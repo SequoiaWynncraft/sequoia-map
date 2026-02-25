@@ -1,0 +1,80 @@
+use std::convert::Infallible;
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::extract::State;
+use axum::response::Sse;
+use axum::response::sse::{Event, KeepAlive};
+use futures::stream::Stream;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
+use tracing::warn;
+
+use crate::config::SSE_KEEPALIVE_SECS;
+use crate::state::{AppState, PreSerializedEvent};
+
+pub async fn territory_events(
+    State(state): State<AppState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let stream = async_stream::stream! {
+        // Send pre-serialized snapshot (Arc clone = O(1) refcount bump, not 200KB String copy)
+        let (seq, data) = {
+            let snapshot = state.live_snapshot.read().await;
+            (snapshot.seq, snapshot.snapshot_json.clone())
+        };
+        if !data.is_empty() {
+            yield Ok(
+                Event::default()
+                    .id(seq.to_string())
+                    .event("snapshot")
+                    .data(Arc::unwrap_or_clone(data)),
+            );
+        }
+
+        // Subscribe to updates
+        let rx = state.event_tx.subscribe();
+        let mut stream = BroadcastStream::new(rx);
+
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(event) => {
+                    let (event_type, seq, data) = match event {
+                        PreSerializedEvent::Snapshot { seq, json } => ("snapshot", seq, json),
+                        PreSerializedEvent::Update { seq, json, .. } => ("update", seq, json),
+                    };
+                    yield Ok(
+                        Event::default()
+                            .id(seq.to_string())
+                            .event(event_type)
+                            .data(Arc::unwrap_or_clone(data)),
+                    );
+                }
+                Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(skipped)) => {
+                    warn!(
+                        skipped_events = skipped,
+                        "SSE client lagged behind broadcast buffer; replaying snapshot"
+                    );
+                    // Client fell behind — resend pre-serialized snapshot (Arc clone = O(1))
+                    let (seq, data) = {
+                        let snapshot = state.live_snapshot.read().await;
+                        (snapshot.seq, snapshot.snapshot_json.clone())
+                    };
+                    if !data.is_empty() {
+                        yield Ok(
+                            Event::default()
+                                .id(seq.to_string())
+                                .event("snapshot")
+                                .data(Arc::unwrap_or_clone(data)),
+                        );
+                    }
+                }
+            }
+        }
+    };
+
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(SSE_KEEPALIVE_SECS))
+            .text("keep-alive"),
+    )
+}

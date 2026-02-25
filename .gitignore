@@ -1,0 +1,8 @@
+/target
+client/dist
+.env
+.env.*
+!.env.example
+*.wasm
+*.d
+.DS_Store

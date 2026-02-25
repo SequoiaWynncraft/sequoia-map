@@ -1,0 +1,25 @@
+[package]
+name = "sequoia-server"
+edition.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "sequoia-server"
+path = "src/main.rs"
+
+[dependencies]
+sequoia-shared = { path = "../shared" }
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["fs", "compression-gzip", "compression-br", "cors"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+dashmap = "6"
+async-stream = "0.3"
+futures = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "json"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

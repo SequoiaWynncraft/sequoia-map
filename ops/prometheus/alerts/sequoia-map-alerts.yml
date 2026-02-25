@@ -1,0 +1,71 @@
+groups:
+  - name: sequoia-map.rules
+    interval: 30s
+    rules:
+      - alert: SequoiaMapTargetDown
+        expr: up{job="sequoia-map"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: sequoia-map
+        annotations:
+          summary: Sequoia Map target is down
+          description: Prometheus has not scraped the sequoia-map target successfully for 2 minutes.
+
+      - alert: SequoiaMapMetricsMissing
+        expr: absent_over_time(sequoia_territories{job="sequoia-map"}[5m]) == 1
+        for: 1m
+        labels:
+          severity: critical
+          service: sequoia-map
+        annotations:
+          summary: Sequoia Map metrics are missing
+          description: No sequoia-map metrics have been seen for at least 5 minutes.
+
+      - alert: SequoiaMapPersistFailures
+        expr: increase(sequoia_persist_failures_total{job="sequoia-map"}[10m]) > 0
+        labels:
+          severity: warning
+          service: sequoia-map
+        annotations:
+          summary: Sequoia Map persistence failures detected
+          description: sequoia_persist_failures_total increased in the last 10 minutes.
+
+      - alert: SequoiaMapDroppedUpdates
+        expr: increase(sequoia_dropped_update_events_total{job="sequoia-map"}[10m]) > 0
+        labels:
+          severity: critical
+          service: sequoia-map
+        annotations:
+          summary: Sequoia Map dropped update events
+          description: sequoia_dropped_update_events_total increased in the last 10 minutes.
+
+      - alert: SequoiaMapHistoryUnavailable
+        expr: min_over_time(sequoia_history_available{job="sequoia-map"}[10m]) == 0
+        for: 10m
+        labels:
+          severity: warning
+          service: sequoia-map
+        annotations:
+          summary: Sequoia Map history storage unavailable
+          description: History has been unavailable for at least 10 minutes.
+
+      - alert: SequoiaMapSeqLiveHandoffDisabled
+        expr: min_over_time(sequoia_seq_live_handoff_v1_enabled{job="sequoia-map"}[10m]) == 0
+        for: 10m
+        labels:
+          severity: warning
+          service: sequoia-map
+        annotations:
+          summary: Sequoia seq live handoff v1 is disabled
+          description: seq_live_handoff_v1 has been disabled for at least 10 minutes.
+
+      - alert: SequoiaMapLiveStateRequestSpike
+        expr: rate(sequoia_live_state_requests_total{job="sequoia-map"}[5m]) > 1
+        for: 5m
+        labels:
+          severity: warning
+          service: sequoia-map
+        annotations:
+          summary: Sequoia live-state request rate is high
+          description: Live-state request rate has exceeded 1 req/s over 5 minutes. Tune this threshold for your traffic profile.

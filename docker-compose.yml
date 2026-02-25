@@ -1,0 +1,83 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sequoia
+      POSTGRES_USER: sequoia
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    mem_limit: 768m
+    mem_reservation: 256m
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sequoia"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: ${DOCKER_LOG_MAX_SIZE:-10m}
+        max-file: ${DOCKER_LOG_MAX_FILE:-5}
+
+  server:
+    build: .
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://sequoia:${POSTGRES_PASSWORD}@postgres:5432/sequoia
+      RUST_LOG: info
+      DB_MAX_CONNECTIONS: ${DB_MAX_CONNECTIONS:-10}
+      SSE_BROADCAST_BUFFER: ${SSE_BROADCAST_BUFFER:-256}
+    mem_limit: 768m
+    mem_reservation: 256m
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: ${DOCKER_LOG_MAX_SIZE:-10m}
+        max-file: ${DOCKER_LOG_MAX_FILE:-5}
+
+  postgres-backup:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: sequoia
+      POSTGRES_USER: sequoia
+      BACKUP_INTERVAL_HOURS: ${BACKUP_INTERVAL_HOURS:-6}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+    volumes:
+      - pgbackups:/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      sh -ec '
+      mkdir -p /backups;
+      while true; do
+        ts=$$(date -u +%Y%m%dT%H%M%SZ);
+        file="/backups/sequoia_$${ts}.sql";
+        echo "[backup] creating $${file}.gz";
+        pg_dump -h "$${POSTGRES_HOST}" -p "$${POSTGRES_PORT}" -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}" --clean --if-exists --no-owner --no-privileges > "$${file}";
+        gzip -f "$${file}";
+        find /backups -type f -name "sequoia_*.sql.gz" -mtime +"$${BACKUP_RETENTION_DAYS}" -delete;
+        echo "[backup] done at $$(date -u +%FT%TZ)";
+        sleep "$$(( BACKUP_INTERVAL_HOURS * 3600 ))";
+      done
+      '
+    logging:
+      driver: json-file
+      options:
+        max-size: ${DOCKER_LOG_MAX_SIZE:-10m}
+        max-file: ${DOCKER_LOG_MAX_FILE:-5}
+
+volumes:
+  pgdata:
+  pgbackups:

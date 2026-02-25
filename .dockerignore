@@ -1,0 +1,13 @@
+.git
+.jj
+.github
+target
+client/dist
+client/.trunk
+client/.cache
+**/*.log
+.env
+.env.*
+*.tmp
+*.swp
+.DS_Store

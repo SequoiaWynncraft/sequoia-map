@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Sequoia Map — Wynncraft Territory Map</title>
+    <link data-trunk rel="tailwind-css" href="input.css" />
+    <link data-trunk rel="copy-dir" href="public/tiles" />
+    <link data-trunk rel="copy-dir" href="public/icons" />
+    <link data-trunk rel="copy-dir" href="public/fonts" />
+    <link rel="preload" href="/fonts/silkscreen-regular.ttf" as="font" type="font/ttf" crossorigin />
+    <style>
+      @font-face {
+        font-family: "Silkscreen";
+        src: url("/fonts/silkscreen-regular.ttf") format("truetype");
+        font-style: normal;
+        font-weight: 400;
+        font-display: block;
+      }
+      @font-face {
+        font-family: "SilkscreenLocal";
+        src: local("Silkscreen"),
+             url("/fonts/silkscreen-regular.ttf") format("truetype");
+        font-style: normal;
+        font-weight: 400;
+        font-display: block;
+      }
+      html, body, #app { width: 100%; height: 100%; margin: 0; }
+      body {
+        background: #0c0e17;
+        color: #e6e3d9;
+        font-family: "SilkscreenLocal", monospace;
+        overflow: hidden;
+      }
+      #app-loading-shell {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #0c0e17;
+        z-index: 9999;
+      }
+      .shell-core {
+        display: grid;
+        place-items: center;
+        gap: 12px;
+        width: min(92vw, 420px);
+        text-align: center;
+      }
+      .shell-title {
+        margin: 0;
+        font-family: "SilkscreenLocal", monospace;
+        font-size: clamp(0.95rem, 2.4vw, 1.3rem);
+        letter-spacing: 0.06em;
+        color: #f5c542;
+        text-transform: uppercase;
+      }
+      .shell-spinner {
+        width: 36px;
+        height: 36px;
+        border-radius: 50%;
+        border: 3px solid rgba(245, 197, 66, 0.25);
+        border-top-color: #f5c542;
+        animation: shell-spin 0.85s linear infinite;
+      }
+      .shell-step {
+        margin: 2px 0 0;
+        padding-left: 0;
+        text-align: center;
+        width: min(92vw, 340px);
+        font-size: 0.66rem;
+        line-height: 1.6;
+        letter-spacing: 0.01em;
+        position: relative;
+        color: #f5c542;
+      }
+      @keyframes shell-spin {
+        to { transform: rotate(360deg); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .shell-spinner {
+          animation: none;
+        }
+      }
+    </style>
+</head>
+<body>
+    <div id="app-loading-shell" role="status" aria-live="polite">
+      <div class="shell-core">
+        <div class="shell-spinner" aria-hidden="true"></div>
+        <div class="shell-title">Loading Sequoia Map</div>
+        <p id="app-loading-step" class="shell-step">Connecting to API</p>
+      </div>
+    </div>
+    <div id="app"></div>
+</body>
+</html>

@@ -1,0 +1,318 @@
+use leptos::prelude::*;
+use wasm_bindgen::JsCast;
+
+use sequoia_shared::tower::{
+    self, ATTACK_RATES, AURA_LABELS, DAMAGES, DEFENSES, HEALTHS, VOLLEY_LABELS,
+};
+
+use crate::colors::rgba_css;
+
+/// Persistent tower calculator state, provided via context so stats survive territory switches.
+#[derive(Clone, Copy)]
+pub struct TowerState {
+    pub damage_lvl: RwSignal<u32>,
+    pub attack_lvl: RwSignal<u32>,
+    pub health_lvl: RwSignal<u32>,
+    pub defense_lvl: RwSignal<u32>,
+    pub aura_lvl: RwSignal<u32>,
+    pub volley_lvl: RwSignal<u32>,
+    pub is_hq: RwSignal<bool>,
+    pub connections: RwSignal<u32>,
+    pub externals: RwSignal<u32>,
+}
+
+impl TowerState {
+    pub fn new() -> Self {
+        Self {
+            damage_lvl: RwSignal::new(0),
+            attack_lvl: RwSignal::new(0),
+            health_lvl: RwSignal::new(0),
+            defense_lvl: RwSignal::new(0),
+            aura_lvl: RwSignal::new(0),
+            volley_lvl: RwSignal::new(0),
+            is_hq: RwSignal::new(false),
+            connections: RwSignal::new(0),
+            externals: RwSignal::new(0),
+        }
+    }
+}
+
+/// Tower calculator component for the sidebar detail panel.
+#[component]
+pub fn TowerCalculator() -> impl IntoView {
+    let TowerState {
+        damage_lvl,
+        attack_lvl,
+        health_lvl,
+        defense_lvl,
+        aura_lvl,
+        volley_lvl,
+        is_hq,
+        connections,
+        externals,
+    } = expect_context();
+
+    // Computed results
+    let dps = Memo::new(move |_| {
+        tower::calc_dps(
+            damage_lvl.get() as usize,
+            attack_lvl.get() as usize,
+            is_hq.get(),
+            connections.get(),
+            externals.get(),
+        )
+    });
+
+    let ehp = Memo::new(move |_| {
+        tower::calc_ehp(
+            health_lvl.get() as usize,
+            defense_lvl.get() as usize,
+            is_hq.get(),
+            connections.get(),
+            externals.get(),
+        )
+    });
+
+    let defense_rating = Memo::new(move |_| {
+        let sum = damage_lvl.get() + attack_lvl.get() + health_lvl.get() + defense_lvl.get();
+        tower::DefenseRating::from_sum(sum)
+    });
+
+    let damage_range = Memo::new(move |_| {
+        let lvl = damage_lvl.get() as usize;
+        let d = &DAMAGES[lvl.min(11)];
+        let mult = tower::calc_stat(1.0, is_hq.get(), connections.get(), externals.get());
+        (d.start * mult, d.end * mult)
+    });
+
+    let attack_speed = Memo::new(move |_| ATTACK_RATES[attack_lvl.get() as usize]);
+
+    let health_val = Memo::new(move |_| {
+        let base = HEALTHS[health_lvl.get().min(11) as usize];
+        tower::calc_stat(base, is_hq.get(), connections.get(), externals.get())
+    });
+
+    let defense_pct = Memo::new(move |_| DEFENSES[defense_lvl.get().min(11) as usize]);
+
+    let is_maxed = Memo::new(move |_| {
+        damage_lvl.get() == 11
+            && attack_lvl.get() == 11
+            && health_lvl.get() == 11
+            && defense_lvl.get() == 11
+    });
+    let on_max_toggle = move |_| {
+        if is_maxed.get() {
+            damage_lvl.set(0);
+            attack_lvl.set(0);
+            health_lvl.set(0);
+            defense_lvl.set(0);
+        } else {
+            damage_lvl.set(11);
+            attack_lvl.set(11);
+            health_lvl.set(11);
+            defense_lvl.set(11);
+        }
+    };
+
+    view! {
+        <div style="padding: 10px 0 4px;">
+            <div style="font-family: 'Silkscreen', monospace; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.12em; color: #5a5860; margin-bottom: 10px;">
+                <span style="color: #f5c542; margin-right: 5px; font-size: 0.7rem;">{"\u{25C6}"}</span>"Tower Calculator"
+            </div>
+
+            // Stat rows
+            <StatRow label="Damage" level=damage_lvl max=11 detail=Memo::new(move |_| {
+                let (lo, hi) = damage_range.get();
+                format!("{}-{}", tower::format_stat(lo), tower::format_stat(hi))
+            }) />
+            <StatRow label="Attack" level=attack_lvl max=11 detail=Memo::new(move |_| {
+                format!("{:.2}x", attack_speed.get())
+            }) />
+            <StatRow label="Health" level=health_lvl max=11 detail=Memo::new(move |_| {
+                tower::format_stat(health_val.get())
+            }) />
+            <StatRow label="Defense" level=defense_lvl max=11 detail=Memo::new(move |_| {
+                format!("{:.0}%", defense_pct.get())
+            }) />
+            <StatRow label="Aura" level=aura_lvl max=3 detail=Memo::new(move |_| {
+                AURA_LABELS[aura_lvl.get().min(3) as usize].to_string()
+            }) />
+            <StatRow label="Volley" level=volley_lvl max=3 detail=Memo::new(move |_| {
+                VOLLEY_LABELS[volley_lvl.get().min(3) as usize].to_string()
+            }) />
+
+            // HQ toggle + max preset + connections
+            <div style="display: flex; gap: 6px; margin-top: 8px; margin-bottom: 8px;">
+                <button
+                    style=move || format!(
+                        "flex: 1; padding: 5px 0; border-radius: 4px; border: 1px solid {}; background: {}; color: {}; font-family: 'Silkscreen', monospace; font-size: 0.62rem; cursor: pointer; transition: all 0.15s; text-transform: uppercase; letter-spacing: 0.1em;",
+                        if is_hq.get() { "#f5c542" } else { "#282c3e" },
+                        if is_hq.get() { "rgba(245,197,66,0.12)" } else { "#1a1d2a" },
+                        if is_hq.get() { "#f5c542" } else { "#5a5860" },
+                    )
+                    on:click=move |_| is_hq.update(|v| *v = !*v)
+                >"HQ"</button>
+                <button
+                    style=move || format!(
+                        "flex: 1; padding: 5px 0; border-radius: 4px; border: 1px solid {}; background: {}; color: {}; font-family: 'Silkscreen', monospace; font-size: 0.62rem; cursor: pointer; transition: all 0.15s; text-transform: uppercase; letter-spacing: 0.1em;",
+                        if is_maxed.get() { "#f5c542" } else { "#282c3e" },
+                        if is_maxed.get() { "rgba(245,197,66,0.12)" } else { "#1a1d2a" },
+                        if is_maxed.get() { "#f5c542" } else { "#5a5860" },
+                    )
+                    on:click=on_max_toggle
+                >"11x4"</button>
+                <div style="flex: 1; display: flex; align-items: center; gap: 4px;">
+                    <span style="font-family: 'Inter', system-ui, sans-serif; font-size: 0.62rem; color: #5a5860; white-space: nowrap;">"Conn"</span>
+                    <CounterInput value=connections max=20 />
+                </div>
+                <div style="flex: 1; display: flex; align-items: center; gap: 4px;">
+                    <span style="font-family: 'Inter', system-ui, sans-serif; font-size: 0.62rem; color: #5a5860; white-space: nowrap;">"Ext"</span>
+                    <CounterInput value=externals max=50 />
+                </div>
+            </div>
+
+            // Computed results
+            <div class="divider-gold" style="margin: 8px 0;" />
+            <div style="display: flex; flex-direction: column; gap: 6px;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <span style="font-family: 'Silkscreen', monospace; font-size: 0.6rem; color: #9a9590; text-transform: uppercase; letter-spacing: 0.1em;">"Avg DPS"</span>
+                    <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; color: #f5c542; font-weight: 700;">
+                        {move || tower::format_stat(dps.get())}
+                    </span>
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <span style="font-family: 'Silkscreen', monospace; font-size: 0.6rem; color: #9a9590; text-transform: uppercase; letter-spacing: 0.1em;">"EHP"</span>
+                    <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; color: #50c878; font-weight: 700;">
+                        {move || tower::format_stat(ehp.get())}
+                    </span>
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <span style="font-family: 'Silkscreen', monospace; font-size: 0.6rem; color: #9a9590; text-transform: uppercase; letter-spacing: 0.1em;">"Rating"</span>
+                    <span style=move || {
+                        let rating = defense_rating.get();
+                        let (rr, rg, rb) = rating.color_rgb();
+                        format!(
+                            "font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; font-weight: 700; color: {};",
+                            rgba_css(rr, rg, rb, 1.0)
+                        )
+                    }>
+                        {move || defense_rating.get().label()}
+                    </span>
+                </div>
+            </div>
+        </div>
+    }
+}
+
+/// A single stat row with label, +/- buttons, editable level input, scroll support, and detail text.
+#[component]
+fn StatRow(
+    label: &'static str,
+    level: RwSignal<u32>,
+    max: u32,
+    detail: Memo<String>,
+) -> impl IntoView {
+    let on_dec = move |_| level.update(|v| *v = v.saturating_sub(1));
+    let on_inc = move |_| level.update(|v| *v = (*v + 1).min(max));
+    let on_wheel = move |ev: web_sys::WheelEvent| {
+        ev.prevent_default();
+        if ev.delta_y() < 0.0 {
+            level.update(|v| *v = (*v + 1).min(max));
+        } else if ev.delta_y() > 0.0 {
+            level.update(|v| *v = v.saturating_sub(1));
+        }
+    };
+    let on_input = move |ev: leptos::ev::Event| {
+        let val = event_target_value(&ev);
+        if let Ok(n) = val.parse::<u32>() {
+            level.set(n.min(max));
+        }
+    };
+    let on_focus = move |ev: web_sys::FocusEvent| {
+        if let Some(target) = ev.target()
+            && let Ok(input) = target.dyn_into::<web_sys::HtmlInputElement>()
+        {
+            input.select();
+        }
+    };
+
+    view! {
+        <div
+            style="display: flex; align-items: center; gap: 4px; margin-bottom: 3px;"
+            on:wheel=on_wheel
+        >
+            <span style="font-family: 'Silkscreen', monospace; font-size: 0.58rem; color: #5a5860; width: 48px; text-transform: uppercase; letter-spacing: 0.06em; flex-shrink: 0;">{label}</span>
+            <button
+                style="width: 20px; height: 20px; border-radius: 3px; border: 1px solid #282c3e; background: #1a1d2a; color: #9a9590; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 0.7rem; font-family: 'JetBrains Mono', monospace; padding: 0; flex-shrink: 0; transition: border-color 0.15s;"
+                on:click=on_dec
+            >"-"</button>
+            <input
+                type="text"
+                inputmode="numeric"
+                style="width: 20px; height: 20px; border-radius: 3px; border: 1px solid #282c3e; background: #1a1d2a; color: #e2e0d8; font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; text-align: center; padding: 0; flex-shrink: 0; outline: none; -moz-appearance: textfield; appearance: textfield;"
+                prop:value=move || level.get().to_string()
+                on:input=on_input
+                on:focus=on_focus
+            />
+            <button
+                style="width: 20px; height: 20px; border-radius: 3px; border: 1px solid #282c3e; background: #1a1d2a; color: #9a9590; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 0.7rem; font-family: 'JetBrains Mono', monospace; padding: 0; flex-shrink: 0; transition: border-color 0.15s;"
+                on:click=on_inc
+            >"+"</button>
+            <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.65rem; color: #9a9590; margin-left: auto; flex-shrink: 0;">
+                {move || detail.get()}
+            </span>
+        </div>
+    }
+}
+
+/// Small counter input with +/- buttons, editable value, and scroll support.
+#[component]
+fn CounterInput(value: RwSignal<u32>, max: u32) -> impl IntoView {
+    let on_dec = move |_| value.update(|v| *v = v.saturating_sub(1));
+    let on_inc = move |_| value.update(|v| *v = (*v + 1).min(max));
+    let on_wheel = move |ev: web_sys::WheelEvent| {
+        ev.prevent_default();
+        if ev.delta_y() < 0.0 {
+            value.update(|v| *v = (*v + 1).min(max));
+        } else if ev.delta_y() > 0.0 {
+            value.update(|v| *v = v.saturating_sub(1));
+        }
+    };
+    let on_input = move |ev: leptos::ev::Event| {
+        let val = event_target_value(&ev);
+        if let Ok(n) = val.parse::<u32>() {
+            value.set(n.min(max));
+        }
+    };
+    let on_focus = move |ev: web_sys::FocusEvent| {
+        if let Some(target) = ev.target()
+            && let Ok(input) = target.dyn_into::<web_sys::HtmlInputElement>()
+        {
+            input.select();
+        }
+    };
+
+    view! {
+        <div
+            style="display: flex; align-items: center; gap: 2px;"
+            on:wheel=on_wheel
+        >
+            <button
+                style="width: 16px; height: 16px; border-radius: 2px; border: 1px solid #282c3e; background: #1a1d2a; color: #9a9590; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 0.6rem; font-family: 'JetBrains Mono', monospace; padding: 0;"
+                on:click=on_dec
+            >"-"</button>
+            <input
+                type="text"
+                inputmode="numeric"
+                style="width: 16px; height: 16px; border-radius: 2px; border: 1px solid #282c3e; background: #1a1d2a; color: #e2e0d8; font-family: 'JetBrains Mono', monospace; font-size: 0.65rem; text-align: center; padding: 0; outline: none; -moz-appearance: textfield; appearance: textfield;"
+                prop:value=move || value.get().to_string()
+                on:input=on_input
+                on:focus=on_focus
+            />
+            <button
+                style="width: 16px; height: 16px; border-radius: 2px; border: 1px solid #282c3e; background: #1a1d2a; color: #9a9590; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 0.6rem; font-family: 'JetBrains Mono', monospace; padding: 0;"
+                on:click=on_inc
+            >"+"</button>
+        </div>
+    }
+}
