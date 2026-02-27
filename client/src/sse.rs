@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
@@ -18,6 +18,7 @@ use crate::territory::{ClientTerritoryMap, apply_changes, from_snapshot};
 
 const LIVE_RESYNC_RETRY_BASE_MS: f64 = 500.0;
 const LIVE_RESYNC_RETRY_MAX_MS: f64 = 10_000.0;
+const RECONNECT_EVENT_TIMEOUT_MS: i32 = 4_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionStatus {
@@ -32,6 +33,12 @@ struct SseConnection {
     on_error: Closure<dyn Fn()>,
     snapshot_handler: Closure<dyn Fn(MessageEvent)>,
     update_handler: Closure<dyn Fn(MessageEvent)>,
+}
+
+struct ReconnectWatchdog {
+    window: web_sys::Window,
+    timeout_id: i32,
+    _callback: Closure<dyn Fn()>,
 }
 
 impl SseConnection {
@@ -74,6 +81,8 @@ impl LiveResyncRetryState {
 thread_local! {
     static SSE_CONNECTION: RefCell<Option<SseConnection>> = const { RefCell::new(None) };
     static LIVE_RESYNC_RETRY: RefCell<LiveResyncRetryState> = const { RefCell::new(LiveResyncRetryState::new()) };
+    static POST_RECONNECT_AWAITING_EVENT: Cell<bool> = const { Cell::new(false) };
+    static RECONNECT_WATCHDOG: RefCell<Option<ReconnectWatchdog>> = const { RefCell::new(None) };
 }
 
 pub fn disconnect() {
@@ -83,6 +92,8 @@ pub fn disconnect() {
             connection.close();
         }
     });
+    clear_reconnect_watchdog();
+    POST_RECONNECT_AWAITING_EVENT.with(|awaiting| awaiting.set(false));
     reset_live_resync_retry();
 }
 
@@ -110,6 +121,78 @@ fn mark_live_resync_failure(now_ms: f64) -> (u32, f64) {
         state.next_allowed_at_ms = now_ms + backoff_ms;
         (state.consecutive_failures, backoff_ms)
     })
+}
+
+fn clear_reconnect_watchdog() {
+    RECONNECT_WATCHDOG.with(|slot| {
+        if let Some(binding) = slot.borrow_mut().take() {
+            binding.window.clear_timeout_with_handle(binding.timeout_id);
+        }
+    });
+}
+
+fn arm_reconnect_watchdog(
+    mode: RwSignal<MapMode>,
+    resync_in_flight: RwSignal<bool>,
+    needs_live_resync: RwSignal<bool>,
+    last_live_seq: RwSignal<Option<u64>>,
+    territories: RwSignal<ClientTerritoryMap>,
+) {
+    clear_reconnect_watchdog();
+    POST_RECONNECT_AWAITING_EVENT.with(|awaiting| awaiting.set(true));
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+
+    let callback = Closure::<dyn Fn()>::new(move || {
+        let should_trigger = POST_RECONNECT_AWAITING_EVENT.with(|awaiting| {
+            if !awaiting.get() {
+                return false;
+            }
+            awaiting.set(false);
+            true
+        });
+        if !should_trigger {
+            return;
+        }
+        needs_live_resync.set(true);
+        trigger_live_resync(
+            mode,
+            resync_in_flight,
+            needs_live_resync,
+            last_live_seq,
+            territories,
+        );
+    });
+
+    let Ok(timeout_id) = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+        callback.as_ref().unchecked_ref(),
+        RECONNECT_EVENT_TIMEOUT_MS,
+    ) else {
+        return;
+    };
+
+    RECONNECT_WATCHDOG.with(|slot| {
+        *slot.borrow_mut() = Some(ReconnectWatchdog {
+            window: window.clone(),
+            timeout_id,
+            _callback: callback,
+        });
+    });
+}
+
+fn mark_post_reconnect_event_received() {
+    let was_waiting = POST_RECONNECT_AWAITING_EVENT.with(|awaiting| {
+        let was_waiting = awaiting.get();
+        if was_waiting {
+            awaiting.set(false);
+        }
+        was_waiting
+    });
+    if was_waiting {
+        clear_reconnect_watchdog();
+    }
 }
 
 fn trigger_live_resync(
@@ -161,6 +244,8 @@ fn trigger_live_resync(
 
 /// Connect to the SSE endpoint and reactively update territory state.
 pub fn connect(territories: RwSignal<ClientTerritoryMap>, connection: RwSignal<ConnectionStatus>) {
+    clear_reconnect_watchdog();
+    POST_RECONNECT_AWAITING_EVENT.with(|awaiting| awaiting.set(false));
     connection.set(ConnectionStatus::Connecting);
 
     let es = match EventSource::new("/api/events") {
@@ -188,11 +273,12 @@ pub fn connect(territories: RwSignal<ClientTerritoryMap>, connection: RwSignal<C
     // On open
     let conn = connection;
     let on_open = Closure::<dyn Fn()>::new(move || {
+        let was_reconnecting = conn.get_untracked() == ConnectionStatus::Reconnecting;
         if conn.get_untracked() != ConnectionStatus::Live {
             conn.set(ConnectionStatus::Live);
         }
-        if mode.get_untracked() == MapMode::Live && needs_live_resync.get_untracked() {
-            trigger_live_resync(
+        if was_reconnecting && mode.get_untracked() == MapMode::Live {
+            arm_reconnect_watchdog(
                 mode,
                 resync_in_flight,
                 needs_live_resync,
@@ -218,6 +304,7 @@ pub fn connect(territories: RwSignal<ClientTerritoryMap>, connection: RwSignal<C
         else {
             return;
         };
+        mark_post_reconnect_event_received();
 
         if mode.get_untracked() == MapMode::History || buffer_mode_active.get_untracked() {
             if seq > 0 {
@@ -263,6 +350,7 @@ pub fn connect(territories: RwSignal<ClientTerritoryMap>, connection: RwSignal<C
         else {
             return;
         };
+        mark_post_reconnect_event_received();
 
         if mode.get_untracked() == MapMode::History || buffer_mode_active.get_untracked() {
             if seq > 0 {
@@ -343,9 +431,6 @@ pub fn connect(territories: RwSignal<ClientTerritoryMap>, connection: RwSignal<C
     let on_error = Closure::<dyn Fn()>::new(move || {
         if conn.get_untracked() != ConnectionStatus::Reconnecting {
             conn.set(ConnectionStatus::Reconnecting);
-        }
-        if !needs_live_resync.get_untracked() {
-            needs_live_resync.set(true);
         }
     });
     es.set_onerror(Some(on_error.as_ref().unchecked_ref()));

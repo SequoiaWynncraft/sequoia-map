@@ -8,12 +8,12 @@ use web_sys::{HtmlCanvasElement, MouseEvent, PointerEvent, WheelEvent};
 
 use crate::app::{
     AbbreviateNames, BoldConnections, ConnectionOpacityScale, ConnectionThicknessScale,
-    CurrentMode, HeatEntriesByTerritory, HeatMaxTakeCount, HeatModeEnabled, HeatWindowLabel,
-    HistoryTimestamp, Hovered, IsMobile, LabelScaleDynamic, LabelScaleIcons, LabelScaleMaster,
-    LabelScaleStatic, LabelScaleStaticName, MapMode, NameColorSetting, PeekTerritory,
-    ResourceHighlight, Selected, ShowCompoundMapTime, ShowCountdown, ShowGranularMapTime,
-    ShowMinimap, ShowNames, ShowResourceIcons, SidebarOpen, SidebarTransient, ThickCooldownBorders,
-    WhiteGuildTags,
+    CurrentMode, DetailReturnGuild, HeatEntriesByTerritory, HeatMaxTakeCount, HeatModeEnabled,
+    HeatWindowLabel, HistoryTimestamp, Hovered, IsMobile, LabelScaleDynamic, LabelScaleIcons,
+    LabelScaleMaster, LabelScaleStatic, LabelScaleStaticName, MapMode, NameColorSetting,
+    PeekTerritory, ResourceHighlight, Selected, ShowCompoundMapTime, ShowCountdown,
+    ShowGranularMapTime, ShowMinimap, ShowNames, ShowResourceIcons, SidebarOpen, SidebarTransient,
+    ThickCooldownBorders, WhiteGuildTags,
 };
 use crate::gpu::{GpuRenderer, RenderFrameInput};
 use crate::icons::ResourceAtlas;
@@ -127,6 +127,7 @@ pub fn MapCanvas() -> impl IntoView {
     let HistoryTimestamp(history_timestamp) = expect_context();
     let IsMobile(is_mobile) = expect_context();
     let PeekTerritory(peek_territory) = expect_context();
+    let DetailReturnGuild(detail_return_guild) = expect_context();
     let mouse_pos: RwSignal<(f64, f64)> = expect_context();
     let loaded_tiles: RwSignal<Vec<LoadedTile>> = expect_context();
     let loaded_icons: RwSignal<Option<ResourceAtlas>> = expect_context();
@@ -755,6 +756,7 @@ pub fn MapCanvas() -> impl IntoView {
                 sidebar_open.set(false);
                 sidebar_transient.set(false);
             }
+            detail_return_guild.set(None);
             selected.set(hit.clone());
             if is_mobile.get_untracked() {
                 peek_territory.set(hit);

@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
@@ -8,6 +10,10 @@ use crate::app::{BufferedUpdate, GuildColorMap, MapMode, TerritoryGeometryMap};
 use crate::territory::{ClientTerritoryMap, apply_changes, from_snapshot};
 
 const MAX_BUFFERED_UPDATES: usize = 20_000;
+
+thread_local! {
+    static ACTIVE_HISTORY_FETCH: RefCell<Option<(u64, web_sys::AbortController)>> = const { RefCell::new(None) };
+}
 
 #[derive(Clone, Copy)]
 pub struct HistoryFetchContext {
@@ -45,13 +51,16 @@ pub fn check_availability(available: RwSignal<bool>) {
     });
 }
 
-/// Fetch history snapshot at a given timestamp from the API.
-pub async fn fetch_history_at(timestamp_secs: i64) -> Result<HistorySnapshot, String> {
+async fn fetch_history_at_with_abort(
+    timestamp_secs: i64,
+    abort_signal: Option<&web_sys::AbortSignal>,
+) -> Result<HistorySnapshot, String> {
     let dt = chrono::DateTime::from_timestamp(timestamp_secs, 0).ok_or("invalid timestamp")?;
     let t = dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let url = format!("/api/history/at?t={}", t);
 
     let resp = gloo_net::http::Request::get(&url)
+        .abort_signal(abort_signal)
         .send()
         .await
         .map_err(|e| format!("fetch error: {e}"))?;
@@ -63,6 +72,39 @@ pub async fn fetch_history_at(timestamp_secs: i64) -> Result<HistorySnapshot, St
     resp.json::<HistorySnapshot>()
         .await
         .map_err(|e| format!("parse error: {e}"))
+}
+
+fn replace_active_history_fetch(request_nonce: u64, next: Option<web_sys::AbortController>) {
+    ACTIVE_HISTORY_FETCH.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if let Some((_, current)) = slot.take() {
+            current.abort();
+        }
+        if let Some(controller) = next {
+            *slot = Some((request_nonce, controller));
+        }
+    });
+}
+
+fn clear_active_history_fetch(request_nonce: u64) {
+    ACTIVE_HISTORY_FETCH.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot
+            .as_ref()
+            .is_some_and(|(active_nonce, _)| *active_nonce == request_nonce)
+        {
+            slot.take();
+        }
+    });
+}
+
+fn abort_active_history_fetch() {
+    replace_active_history_fetch(0, None);
+}
+
+fn is_abort_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("aborterror") || error.contains("aborted")
 }
 
 /// Fetch the current live territory snapshot.
@@ -166,10 +208,16 @@ pub fn fetch_and_apply_with(timestamp_secs: i64, ctx: HistoryFetchContext) {
 
     let request_nonce = fetch_nonce.get_untracked().wrapping_add(1);
     fetch_nonce.set(request_nonce);
+    let abort_controller = web_sys::AbortController::new().ok();
+    let abort_signal = abort_controller
+        .as_ref()
+        .map(|controller| controller.signal());
+    replace_active_history_fetch(request_nonce, abort_controller);
 
     spawn_local(async move {
-        match fetch_history_at(timestamp_secs).await {
+        match fetch_history_at_with_abort(timestamp_secs, abort_signal.as_ref()).await {
             Ok(snapshot) => {
+                clear_active_history_fetch(request_nonce);
                 // Only apply the latest in-flight history fetch, and only while still in history mode.
                 if fetch_nonce.get_untracked() != request_nonce
                     || mode.get_untracked() != MapMode::History
@@ -184,6 +232,10 @@ pub fn fetch_and_apply_with(timestamp_secs: i64, ctx: HistoryFetchContext) {
                 territories.set(from_snapshot(merged));
             }
             Err(e) => {
+                clear_active_history_fetch(request_nonce);
+                if is_abort_error(&e) {
+                    return;
+                }
                 if fetch_nonce.get_untracked() != request_nonce {
                     return;
                 }
@@ -307,6 +359,7 @@ pub fn enter_history_mode(input: EnterHistoryModeInput) {
         territories,
     } = input;
 
+    abort_active_history_fetch();
     history_fetch_nonce.update(|n| *n = n.wrapping_add(1));
     history_buffer_mode_active.set(true);
     history_buffered_updates.set(Vec::new());
@@ -418,6 +471,7 @@ pub fn exit_history_mode(input: ExitHistoryModeInput) {
 
     let request_nonce = history_fetch_nonce.get_untracked().wrapping_add(1);
     history_fetch_nonce.set(request_nonce);
+    abort_active_history_fetch();
     playback_active.set(false);
 
     let mut handoff_count = 0;
