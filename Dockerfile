@@ -1,7 +1,19 @@
 ### Stage 1: Build the client (WASM via Trunk)
 FROM rust:1.88-bookworm AS client-build
 
-RUN apt-get update && apt-get install -y --no-install-recommends brotli gzip && rm -rf /var/lib/apt/lists/*
+ARG BINARYEN_VERSION=126
+ARG BINARYEN_ARCH=x86_64-linux
+
+RUN apt-get update && apt-get install -y --no-install-recommends brotli gzip ca-certificates curl && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    curl -fsSLo /tmp/binaryen.tar.gz "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-${BINARYEN_ARCH}.tar.gz"; \
+    curl -fsSLo /tmp/binaryen.tar.gz.sha256 "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-${BINARYEN_ARCH}.tar.gz.sha256"; \
+    EXPECTED_SHA="$(awk '{print $1}' /tmp/binaryen.tar.gz.sha256)"; \
+    echo "${EXPECTED_SHA}  /tmp/binaryen.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/binaryen.tar.gz -C /tmp; \
+    install -m 0755 "/tmp/binaryen-version_${BINARYEN_VERSION}/bin/wasm-opt" /usr/local/bin/wasm-opt; \
+    rm -rf /tmp/binaryen.tar.gz /tmp/binaryen.tar.gz.sha256 "/tmp/binaryen-version_${BINARYEN_VERSION}"; \
+    wasm-opt --version
 RUN rustup target add wasm32-unknown-unknown
 RUN --mount=type=cache,id=sequoia-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=sequoia-cargo-git,target=/usr/local/cargo/git,sharing=locked \
@@ -21,9 +33,7 @@ RUN --mount=type=cache,id=sequoia-cargo-registry,target=/usr/local/cargo/registr
     --mount=type=cache,id=sequoia-client-target,target=/app/target,sharing=locked \
     --mount=type=cache,id=sequoia-trunk-cache,target=/app/.trunk,sharing=locked \
     trunk build --release
-# Skip wasm-opt in Docker builds: Binaryen 108 (bookworm) can emit a broken
-# externref-table export for this module, causing browser startup failure
-# at __wbindgen_init_externref_table (WebAssembly.Table.grow).
+RUN find dist -type f -name '*_bg.wasm' -exec wasm-opt -Oz {} -o {} \;
 RUN find dist -type f \( -name '*.wasm' -o -name '*.js' -o -name '*.css' -o -name '*.html' -o -name '*.json' -o -name '*.svg' \) -exec sh -c 'brotli -f -q 11 "$1" -o "$1.br"; gzip -f -k -9 "$1"' _ {} \;
 
 ### Stage 2: Build the server
