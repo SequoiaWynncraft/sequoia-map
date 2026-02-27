@@ -1,7 +1,7 @@
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::rc::Rc;
 
 use js_sys::Reflect;
@@ -12,21 +12,49 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::HtmlImageElement;
 
+use crate::viewport::Viewport;
+
 const HQ_CONCURRENCY: usize = 6;
 const LQ_CONCURRENCY: usize = 6;
 const HQ_UPGRADE_CONCURRENCY: usize = 2;
-const INITIAL_VIEW_CENTER_X: f64 = -300.0;
-const INITIAL_VIEW_CENTER_Z: f64 = -3100.0;
+const NEAR_PREFETCH_PADDING_WORLD: f64 = 1024.0;
 const ONLOAD_HANDLE_KEY: &str = "__sequoiaTileOnload";
 const ONERROR_HANDLE_KEY: &str = "__sequoiaTileOnerror";
 
 type IdleCallback = Rc<dyn Fn()>;
 type SharedIdleCallback = Rc<RefCell<Option<IdleCallback>>>;
+type WorldBounds = (f64, f64, f64, f64);
+type SharedRequestedJobs = Rc<RefCell<HashSet<(usize, TileQuality)>>>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TileQuality {
     Low,
     High,
+}
+
+#[derive(Debug, Clone)]
+pub struct TileFetchContext {
+    viewport: Viewport,
+    canvas_width: f64,
+    canvas_height: f64,
+}
+
+impl TileFetchContext {
+    pub fn new(viewport: Viewport, canvas_width: f64, canvas_height: f64) -> Self {
+        Self {
+            viewport,
+            canvas_width: canvas_width.max(1.0),
+            canvas_height: canvas_height.max(1.0),
+        }
+    }
+
+    fn viewport_bounds(&self) -> WorldBounds {
+        let (wx1, wz1) = self.viewport.screen_to_world(0.0, 0.0);
+        let (wx2, wz2) = self
+            .viewport
+            .screen_to_world(self.canvas_width, self.canvas_height);
+        (wx1.min(wx2), wz1.min(wz2), wx1.max(wx2), wz1.max(wz2))
+    }
 }
 
 /// A loaded map tile image with its world coordinate bounds.
@@ -77,42 +105,105 @@ struct LoadJob {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StartupTileMode {
+pub enum StartupTileMode {
+    LowOnly,
     HighOnly,
     ProgressiveLowToHigh,
 }
 
+struct LoadPhase {
+    jobs: VecDeque<LoadJob>,
+    max_concurrency: usize,
+}
+
+#[derive(Default)]
+struct JobBuckets {
+    visible: Vec<LoadJob>,
+    near_visible: Vec<LoadJob>,
+    far: Vec<LoadJob>,
+}
+
 /// Load local map tile images from static assets.
-pub fn fetch_tiles(tiles_signal: RwSignal<Vec<LoadedTile>>) {
+pub fn fetch_tiles(tiles_signal: RwSignal<Vec<LoadedTile>>, context: TileFetchContext) {
     tiles_signal.set(Vec::new());
 
-    match detect_startup_tile_mode() {
+    let startup_mode = detect_startup_tile_mode();
+    let low_jobs = make_job_buckets(TileQuality::Low, &context);
+    let high_jobs = make_job_buckets(TileQuality::High, &context);
+    let phases = match startup_mode {
+        StartupTileMode::LowOnly => vec![
+            LoadPhase {
+                jobs: low_jobs.visible.into(),
+                max_concurrency: LQ_CONCURRENCY,
+            },
+            LoadPhase {
+                jobs: low_jobs.near_visible.into(),
+                max_concurrency: LQ_CONCURRENCY,
+            },
+            LoadPhase {
+                jobs: low_jobs.far.into(),
+                max_concurrency: LQ_CONCURRENCY,
+            },
+        ],
         StartupTileMode::HighOnly => {
-            let hq_jobs = make_jobs(TileQuality::High);
-            start_queue(tiles_signal, hq_jobs, HQ_CONCURRENCY, None);
+            vec![
+                LoadPhase {
+                    jobs: high_jobs.visible.into(),
+                    max_concurrency: HQ_CONCURRENCY,
+                },
+                LoadPhase {
+                    jobs: high_jobs.near_visible.into(),
+                    max_concurrency: HQ_CONCURRENCY,
+                },
+                LoadPhase {
+                    jobs: high_jobs.far.into(),
+                    max_concurrency: HQ_CONCURRENCY,
+                },
+            ]
         }
         StartupTileMode::ProgressiveLowToHigh => {
-            let lq_jobs = make_jobs(TileQuality::Low);
-            let signal_for_hq = tiles_signal;
-            let on_lq_complete: Rc<dyn Fn()> = Rc::new(move || {
-                let hq_jobs = make_jobs(TileQuality::High);
-                start_queue(signal_for_hq, hq_jobs, HQ_UPGRADE_CONCURRENCY, None);
-            });
-            start_queue(tiles_signal, lq_jobs, LQ_CONCURRENCY, Some(on_lq_complete));
+            vec![
+                LoadPhase {
+                    jobs: low_jobs.visible.into(),
+                    max_concurrency: LQ_CONCURRENCY,
+                },
+                LoadPhase {
+                    jobs: low_jobs.near_visible.into(),
+                    max_concurrency: LQ_CONCURRENCY,
+                },
+                LoadPhase {
+                    jobs: low_jobs.far.into(),
+                    max_concurrency: LQ_CONCURRENCY,
+                },
+                LoadPhase {
+                    jobs: high_jobs.visible.into(),
+                    max_concurrency: HQ_UPGRADE_CONCURRENCY,
+                },
+                LoadPhase {
+                    jobs: high_jobs.near_visible.into(),
+                    max_concurrency: HQ_UPGRADE_CONCURRENCY,
+                },
+                LoadPhase {
+                    jobs: high_jobs.far.into(),
+                    max_concurrency: HQ_UPGRADE_CONCURRENCY,
+                },
+            ]
         }
-    }
+    };
+
+    start_phased_queues(tiles_signal, phases);
 }
 
 fn detect_startup_tile_mode() -> StartupTileMode {
     let Some(window) = web_sys::window() else {
-        return StartupTileMode::ProgressiveLowToHigh;
+        return StartupTileMode::LowOnly;
     };
 
     let Ok(navigator) = Reflect::get(window.as_ref(), &JsValue::from_str("navigator")) else {
-        return StartupTileMode::ProgressiveLowToHigh;
+        return StartupTileMode::LowOnly;
     };
     let Ok(connection) = Reflect::get(&navigator, &JsValue::from_str("connection")) else {
-        return StartupTileMode::ProgressiveLowToHigh;
+        return StartupTileMode::LowOnly;
     };
 
     let save_data = Reflect::get(&connection, &JsValue::from_str("saveData"))
@@ -120,30 +211,78 @@ fn detect_startup_tile_mode() -> StartupTileMode {
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
     if save_data {
-        return StartupTileMode::ProgressiveLowToHigh;
+        return StartupTileMode::LowOnly;
     }
 
     let effective_type = Reflect::get(&connection, &JsValue::from_str("effectiveType"))
         .ok()
         .and_then(|value| value.as_string())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if matches!(effective_type.as_str(), "slow-2g" | "2g" | "3g") {
-        return StartupTileMode::ProgressiveLowToHigh;
-    }
+        .map(|value| value.to_ascii_lowercase());
 
-    let downlink_mbps = Reflect::get(&connection, &JsValue::from_str("downlink"))
-        .ok()
-        .and_then(|value| value.as_f64())
-        .unwrap_or(10.0);
-    if downlink_mbps >= 8.0 && effective_type == "4g" {
-        return StartupTileMode::HighOnly;
+    match effective_type.as_deref() {
+        Some("slow-2g" | "2g" | "3g") => StartupTileMode::LowOnly,
+        Some("4g") => {
+            let downlink_mbps = Reflect::get(&connection, &JsValue::from_str("downlink"))
+                .ok()
+                .and_then(|value| value.as_f64())
+                .unwrap_or(0.0);
+            if downlink_mbps >= 8.0 {
+                StartupTileMode::HighOnly
+            } else {
+                StartupTileMode::ProgressiveLowToHigh
+            }
+        }
+        _ => StartupTileMode::LowOnly,
     }
-
-    StartupTileMode::ProgressiveLowToHigh
 }
 
-fn make_jobs(quality: TileQuality) -> VecDeque<LoadJob> {
+fn start_phased_queues(tiles_signal: RwSignal<Vec<LoadedTile>>, phases: Vec<LoadPhase>) {
+    let phases: VecDeque<_> = phases
+        .into_iter()
+        .filter(|phase| !phase.jobs.is_empty())
+        .collect();
+    if phases.is_empty() {
+        return;
+    }
+    let phase_queue = Rc::new(RefCell::new(phases));
+    let requested_jobs: SharedRequestedJobs = Rc::new(RefCell::new(HashSet::new()));
+    start_next_phase(tiles_signal, phase_queue, requested_jobs);
+}
+
+fn start_next_phase(
+    tiles_signal: RwSignal<Vec<LoadedTile>>,
+    phase_queue: Rc<RefCell<VecDeque<LoadPhase>>>,
+    requested_jobs: SharedRequestedJobs,
+) {
+    let Some(phase) = phase_queue.borrow_mut().pop_front() else {
+        return;
+    };
+
+    let phase_queue_next = phase_queue.clone();
+    let requested_jobs_next = requested_jobs.clone();
+    let on_idle: IdleCallback = Rc::new(move || {
+        start_next_phase(
+            tiles_signal,
+            phase_queue_next.clone(),
+            requested_jobs_next.clone(),
+        );
+    });
+
+    start_queue(
+        tiles_signal,
+        phase.jobs,
+        phase.max_concurrency,
+        Some(on_idle),
+        requested_jobs,
+    );
+}
+
+fn make_job_buckets(quality: TileQuality, context: &TileFetchContext) -> JobBuckets {
+    let mut buckets = JobBuckets::default();
+    let viewport_bounds = context.viewport_bounds();
+    let near_bounds = expand_bounds(viewport_bounds, NEAR_PREFETCH_PADDING_WORLD);
+    let viewport_center = bounds_center(viewport_bounds);
+
     let mut jobs: Vec<_> = TILES
         .iter()
         .enumerate()
@@ -158,20 +297,97 @@ fn make_jobs(quality: TileQuality) -> VecDeque<LoadJob> {
         })
         .collect();
 
-    jobs.sort_by(|a, b| {
-        distance_sq_to_initial_view(a)
-            .total_cmp(&distance_sq_to_initial_view(b))
+    for job in jobs.drain(..) {
+        if intersects_bounds(&job, viewport_bounds) {
+            buckets.visible.push(job);
+            continue;
+        }
+        if intersects_bounds(&job, near_bounds) {
+            buckets.near_visible.push(job);
+            continue;
+        }
+        buckets.far.push(job);
+    }
+
+    buckets.visible.sort_by(|a, b| {
+        distance_sq_to_point(job_center(a), viewport_center)
+            .total_cmp(&distance_sq_to_point(job_center(b), viewport_center))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    buckets.near_visible.sort_by(|a, b| {
+        distance_sq_to_bounds(job_center(a), viewport_bounds)
+            .total_cmp(&distance_sq_to_bounds(job_center(b), viewport_bounds))
+            .then_with(|| {
+                distance_sq_to_point(job_center(a), viewport_center)
+                    .total_cmp(&distance_sq_to_point(job_center(b), viewport_center))
+            })
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    buckets.far.sort_by(|a, b| {
+        distance_sq_to_bounds(job_center(a), viewport_bounds)
+            .total_cmp(&distance_sq_to_bounds(job_center(b), viewport_bounds))
+            .then_with(|| {
+                distance_sq_to_point(job_center(a), viewport_center)
+                    .total_cmp(&distance_sq_to_point(job_center(b), viewport_center))
+            })
             .then_with(|| a.id.cmp(&b.id))
     });
 
-    jobs.into()
+    buckets
 }
 
-fn distance_sq_to_initial_view(job: &LoadJob) -> f64 {
-    let center_x = (job.x1 as f64 + job.x2 as f64) * 0.5;
-    let center_z = (job.z1 as f64 + job.z2 as f64) * 0.5;
-    let dx = center_x - INITIAL_VIEW_CENTER_X;
-    let dz = center_z - INITIAL_VIEW_CENTER_Z;
+fn intersects_bounds(job: &LoadJob, bounds: WorldBounds) -> bool {
+    let (x1, z1, x2, z2) = job_bounds(job);
+    x1 < bounds.2 && x2 > bounds.0 && z1 < bounds.3 && z2 > bounds.1
+}
+
+fn bounds_center(bounds: WorldBounds) -> (f64, f64) {
+    ((bounds.0 + bounds.2) * 0.5, (bounds.1 + bounds.3) * 0.5)
+}
+
+fn expand_bounds(bounds: WorldBounds, padding: f64) -> WorldBounds {
+    (
+        bounds.0 - padding,
+        bounds.1 - padding,
+        bounds.2 + padding,
+        bounds.3 + padding,
+    )
+}
+
+fn job_bounds(job: &LoadJob) -> WorldBounds {
+    let x1 = job.x1.min(job.x2) as f64;
+    let z1 = job.z1.min(job.z2) as f64;
+    let x2 = job.x1.max(job.x2) as f64 + 1.0;
+    let z2 = job.z1.max(job.z2) as f64 + 1.0;
+    (x1, z1, x2, z2)
+}
+
+fn job_center(job: &LoadJob) -> (f64, f64) {
+    let (x1, z1, x2, z2) = job_bounds(job);
+    ((x1 + x2) * 0.5, (z1 + z2) * 0.5)
+}
+
+fn distance_sq_to_point(a: (f64, f64), b: (f64, f64)) -> f64 {
+    let dx = a.0 - b.0;
+    let dz = a.1 - b.1;
+    dx * dx + dz * dz
+}
+
+fn distance_sq_to_bounds(point: (f64, f64), bounds: WorldBounds) -> f64 {
+    let dx = if point.0 < bounds.0 {
+        bounds.0 - point.0
+    } else if point.0 > bounds.2 {
+        point.0 - bounds.2
+    } else {
+        0.0
+    };
+    let dz = if point.1 < bounds.1 {
+        bounds.1 - point.1
+    } else if point.1 > bounds.3 {
+        point.1 - bounds.3
+    } else {
+        0.0
+    };
     dx * dx + dz * dz
 }
 
@@ -180,6 +396,7 @@ fn start_queue(
     jobs: VecDeque<LoadJob>,
     max_concurrency: usize,
     on_idle: Option<IdleCallback>,
+    requested_jobs: SharedRequestedJobs,
 ) {
     if jobs.is_empty() {
         if let Some(cb) = on_idle {
@@ -191,7 +408,14 @@ fn start_queue(
     let queue = Rc::new(RefCell::new(jobs));
     let in_flight = Rc::new(Cell::new(0usize));
     let on_idle = Rc::new(RefCell::new(on_idle));
-    pump_queue(tiles_signal, queue, in_flight, max_concurrency, on_idle);
+    pump_queue(
+        tiles_signal,
+        queue,
+        in_flight,
+        max_concurrency,
+        on_idle,
+        requested_jobs,
+    );
 }
 
 fn pump_queue(
@@ -200,16 +424,21 @@ fn pump_queue(
     in_flight: Rc<Cell<usize>>,
     max_concurrency: usize,
     on_idle: SharedIdleCallback,
+    requested_jobs: SharedRequestedJobs,
 ) {
     while in_flight.get() < max_concurrency {
         let Some(job) = queue.borrow_mut().pop_front() else {
             break;
         };
+        if should_skip_job(tiles_signal, &job, &requested_jobs) {
+            continue;
+        }
         in_flight.set(in_flight.get() + 1);
 
         let queue_next = queue.clone();
         let in_flight_next = in_flight.clone();
         let on_idle_next = on_idle.clone();
+        let requested_jobs_next = requested_jobs.clone();
         let on_done: IdleCallback = Rc::new(move || {
             in_flight_next.set(in_flight_next.get().saturating_sub(1));
             pump_queue(
@@ -218,6 +447,7 @@ fn pump_queue(
                 in_flight_next.clone(),
                 max_concurrency,
                 on_idle_next.clone(),
+                requested_jobs_next.clone(),
             );
         });
 
@@ -230,6 +460,29 @@ fn pump_queue(
     {
         cb();
     }
+}
+
+fn should_skip_job(
+    tiles_signal: RwSignal<Vec<LoadedTile>>,
+    job: &LoadJob,
+    requested_jobs: &SharedRequestedJobs,
+) -> bool {
+    let key = (job.id, job.quality);
+    if requested_jobs.borrow().contains(&key) {
+        return true;
+    }
+
+    let already_loaded = tiles_signal.with_untracked(|loaded| {
+        loaded
+            .iter()
+            .any(|tile| tile.id == job.id && tile.quality >= job.quality)
+    });
+    if already_loaded {
+        return true;
+    }
+
+    requested_jobs.borrow_mut().insert(key);
+    false
 }
 
 fn load_tile_job(tiles_signal: RwSignal<Vec<LoadedTile>>, job: LoadJob, on_done: Rc<dyn Fn()>) {

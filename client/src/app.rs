@@ -151,6 +151,8 @@ pub(crate) struct IsMobile(pub RwSignal<bool>);
 pub(crate) struct PeekTerritory(pub RwSignal<Option<String>>);
 #[derive(Clone, Copy)]
 pub(crate) struct SelectedGuild(pub RwSignal<Option<String>>);
+#[derive(Clone, Copy)]
+pub(crate) struct DetailReturnGuild(pub RwSignal<Option<String>>);
 
 #[derive(Clone, Default, PartialEq)]
 pub(crate) struct GuildOnlineInfo {
@@ -650,7 +652,6 @@ fn normalize_heat_selected_season_id(meta: &HistoryHeatMeta, selected: Option<i3
         _ => latest_valid,
     }
 }
-
 /// Root application component. Provides global reactive signals via context.
 #[component]
 pub fn App() -> impl IntoView {
@@ -723,6 +724,7 @@ pub fn App() -> impl IntoView {
     let is_mobile: RwSignal<bool> = RwSignal::new(canvas_dimensions().0 < MOBILE_BREAKPOINT);
     let peek_territory: RwSignal<Option<String>> = RwSignal::new(None);
     let selected_guild: RwSignal<Option<String>> = RwSignal::new(None);
+    let detail_return_guild: RwSignal<Option<String>> = RwSignal::new(None);
     let guild_online_data: RwSignal<HashMap<String, GuildOnlineInfo>> =
         RwSignal::new(HashMap::new());
     let show_leaderboard_territory_count: RwSignal<bool> =
@@ -828,6 +830,7 @@ pub fn App() -> impl IntoView {
     provide_context(IsMobile(is_mobile));
     provide_context(PeekTerritory(peek_territory));
     provide_context(SelectedGuild(selected_guild));
+    provide_context(DetailReturnGuild(detail_return_guild));
     provide_context(GuildOnlineData(guild_online_data));
     provide_context(ShowLeaderboardTerritoryCount(
         show_leaderboard_territory_count,
@@ -1047,7 +1050,7 @@ pub fn App() -> impl IntoView {
     // Poll shared server-side scalar estimate while in live mode.
     wasm_bindgen_futures::spawn_local(async move {
         loop {
-            if map_mode.get_untracked() == MapMode::Live {
+            if map_mode.get_untracked() == MapMode::Live && auto_sr_scalar_enabled.get_untracked() {
                 match season_scalar::fetch_current_scalar_sample().await {
                     Ok(sample) => live_season_scalar_sample.set(sample),
                     Err(e) => {
@@ -1337,12 +1340,18 @@ pub fn App() -> impl IntoView {
         tile_fetch_scheduled.set(true);
 
         let Some(window) = web_sys::window() else {
-            tiles::fetch_tiles(loaded_tiles);
+            let (canvas_w, canvas_h) = canvas_dimensions();
+            let context =
+                tiles::TileFetchContext::new(viewport.get_untracked(), canvas_w, canvas_h);
+            tiles::fetch_tiles(loaded_tiles, context);
             return;
         };
 
         let callback = wasm_bindgen::closure::Closure::once(move || {
-            tiles::fetch_tiles(loaded_tiles);
+            let (canvas_w, canvas_h) = canvas_dimensions();
+            let context =
+                tiles::TileFetchContext::new(viewport.get_untracked(), canvas_w, canvas_h);
+            tiles::fetch_tiles(loaded_tiles, context);
         });
         let mut scheduled = false;
         if let Ok(idle_fn) =
@@ -1361,8 +1370,7 @@ pub fn App() -> impl IntoView {
         callback.forget();
     });
 
-    // Load icon atlas once deferred boot is ready so territory resource icons
-    // can render immediately without waiting for the resource-highlight toggle.
+    // Lazy-load the icon atlas only when resource icons are enabled.
     Effect::new(move || {
         if !deferred_boot_ready.get() || !show_resource_icons.get() || icons_loaded.get_untracked()
         {
@@ -1418,8 +1426,19 @@ pub fn App() -> impl IntoView {
 
                 match key.as_str() {
                     "Escape" => {
-                        selected.set(None);
-                        selected_guild.set(None);
+                        if selected.get_untracked().is_some() {
+                            if let Some(return_guild) = detail_return_guild.get_untracked() {
+                                selected.set(None);
+                                selected_guild.set(Some(return_guild));
+                            } else {
+                                selected.set(None);
+                                selected_guild.set(None);
+                            }
+                        } else {
+                            selected.set(None);
+                            selected_guild.set(None);
+                        }
+                        detail_return_guild.set(None);
                         hovered.set(None);
                         if sidebar_transient.get_untracked() {
                             sidebar_open.set(false);
@@ -1584,6 +1603,7 @@ pub fn App() -> impl IntoView {
                             let has_active_search = !search_query.get_untracked().trim().is_empty();
                             if has_active_search {
                                 // Search results are territory names.
+                                detail_return_guild.set(None);
                                 selected.set(Some(name.clone()));
                                 if let Some(ct) = map.get(name) {
                                     let loc = &ct.territory.location;
@@ -2229,6 +2249,7 @@ fn TerritoryPeekCard() -> impl IntoView {
     let CurrentMode(mode) = expect_context();
     let HistoryTimestamp(history_timestamp) = expect_context();
     let Selected(selected) = expect_context();
+    let DetailReturnGuild(detail_return_guild) = expect_context();
     let SidebarOpen(sidebar_open) = expect_context();
     let HeatModeEnabled(heat_mode_enabled) = expect_context();
     let HeatEntriesByTerritory(heat_entries_by_territory) = expect_context();
@@ -2316,6 +2337,7 @@ fn TerritoryPeekCard() -> impl IntoView {
                     <button
                         style="align-self: center; margin-right: 14px; min-height: 44px; min-width: 44px; padding: 8px 16px; background: #1a1d2a; border: 1px solid #3a3f5c; border-radius: 6px; color: #f5c542; font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; cursor: pointer; touch-action: manipulation; white-space: nowrap;"
                         on:click=move |_| {
+                            detail_return_guild.set(None);
                             selected.set(Some(name.clone()));
                             sidebar_open.set(true);
                             peek_territory.set(None);
@@ -2354,21 +2376,21 @@ mod tests {
     fn normalize_heat_selected_season_id_keeps_valid_saved_selection() {
         let meta = HistoryHeatMeta {
             latest_season_id: Some(31),
-            seasons: vec![
-                HistoryHeatSeasonWindow {
-                    season_id: 31,
-                    start: "2026-01-01T00:00:00Z".to_string(),
-                    end: "2026-01-08T00:00:00Z".to_string(),
-                    is_current: true,
-                },
-                HistoryHeatSeasonWindow {
-                    season_id: 30,
-                    start: "2025-12-24T00:00:00Z".to_string(),
-                    end: "2025-12-31T00:00:00Z".to_string(),
-                    is_current: false,
-                },
-            ],
-            all_time_earliest: None,
+             seasons: vec![
+                 HistoryHeatSeasonWindow {
+                     season_id: 31,
+                     start: "2026-01-01T00:00:00Z".to_string(),
+                     end: "2026-01-08T00:00:00Z".to_string(),
+                     is_current: true,
+                 },
+                 HistoryHeatSeasonWindow {
+                     season_id: 30,
+                     start: "2025-12-24T00:00:00Z".to_string(),
+                     end: "2025-12-31T00:00:00Z".to_string(),
+                     is_current: false,
+                 },
+             ],
+             all_time_earliest: None,
             retention_days: 30,
             season_fallback_days: 60,
         };
@@ -2379,14 +2401,14 @@ mod tests {
     #[test]
     fn normalize_heat_selected_season_id_replaces_invalid_saved_selection() {
         let meta = HistoryHeatMeta {
-            latest_season_id: Some(31),
-            seasons: vec![HistoryHeatSeasonWindow {
-                season_id: 31,
-                start: "2026-01-01T00:00:00Z".to_string(),
-                end: "2026-01-08T00:00:00Z".to_string(),
-                is_current: true,
-            }],
-            all_time_earliest: None,
+             latest_season_id: Some(31),
+             seasons: vec![HistoryHeatSeasonWindow {
+                 season_id: 31,
+                 start: "2026-01-01T00:00:00Z".to_string(),
+                 end: "2026-01-08T00:00:00Z".to_string(),
+                 is_current: true,
+             }],
+             all_time_earliest: None,
             retention_days: 30,
             season_fallback_days: 60,
         };
@@ -2400,9 +2422,9 @@ mod tests {
     #[test]
     fn normalize_heat_selected_season_id_returns_none_without_valid_latest() {
         let meta = HistoryHeatMeta {
-            latest_season_id: Some(31),
-            seasons: vec![],
-            all_time_earliest: None,
+             latest_season_id: Some(31),
+             seasons: vec![],
+             all_time_earliest: None,
             retention_days: 30,
             season_fallback_days: 60,
         };

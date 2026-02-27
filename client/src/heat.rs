@@ -61,12 +61,14 @@ pub async fn fetch_heat(input: HeatFetchInput) -> Result<HistoryHeat, String> {
         .map_err(|e| format!("parse error: {e}"))
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
 fn lerp_u8(a: u8, b: u8, t: f64) -> u8 {
     let t = t.clamp(0.0, 1.0);
     let value = a as f64 + (b as f64 - a as f64) * t;
     value.round().clamp(0.0, 255.0) as u8
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
 pub fn heat_color_for_intensity(intensity: f64) -> (u8, u8, u8) {
     const STOPS: &[(f64, (u8, u8, u8))] = &[
         (0.00, (30, 80, 220)),
@@ -97,6 +99,7 @@ pub fn heat_color_for_intensity(intensity: f64) -> (u8, u8, u8) {
         .unwrap_or((220, 40, 35))
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
 pub fn heat_color_for_count(take_count: u64, max_take_count: u64) -> (u8, u8, u8) {
     if max_take_count == 0 {
         return heat_color_for_intensity(0.0);

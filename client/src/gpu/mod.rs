@@ -2075,9 +2075,14 @@ impl GpuRenderer {
         if width == 0 || height == 0 {
             return;
         }
+        let size_changed =
+            self.surface_config.width != width || self.surface_config.height != height;
         self.width = width;
         self.height = height;
         self.dpr = dpr;
+        if !size_changed {
+            return;
+        }
         self.surface_config.width = width;
         self.surface_config.height = height;
         self.surface.configure(&self.device, &self.surface_config);
@@ -2120,6 +2125,10 @@ impl GpuRenderer {
         if !self.ensure_tile_upload_context() {
             return;
         }
+        let active_tile_ids: HashSet<usize> = tiles.iter().map(|tile| tile.id).collect();
+        self.tile_textures
+            .retain(|tile_id, _| active_tile_ids.contains(tile_id));
+
         let Some(upload_canvas) = self.tile_upload_canvas.as_ref().cloned() else {
             return;
         };

@@ -49,6 +49,21 @@ pub const AURA_LABELS: [&str; 4] = ["Off", "24s", "18s", "12s"];
 /// Volley cooldown labels (level 0 = off, 1–3 = cooldown seconds).
 pub const VOLLEY_LABELS: [&str; 4] = ["Off", "20s", "15s", "10s"];
 
+/// Flat defense-index bonus when Aura is enabled (level > 0).
+pub const AURA_NONZERO_BONUS: u32 = 5;
+
+/// Flat defense-index bonus when Volley is enabled (level > 0).
+pub const VOLLEY_NONZERO_BONUS: u32 = 3;
+
+/// Flat defense-index bonus applied to HQ territories.
+pub const HQ_BASE_INDEX_BONUS: u32 = 13;
+
+/// Per-connection defense-index bonus for HQ territories.
+pub const HQ_CONNECTION_INDEX_BONUS: u32 = 6;
+
+/// Per-external defense-index bonus for HQ territories.
+pub const HQ_EXTERNAL_INDEX_BONUS: u32 = 2;
+
 /// Per-connected-territory bonus multiplier (30% per connection).
 const CONNECTION_BONUS: f64 = 0.30;
 
@@ -101,6 +116,51 @@ pub fn calc_ehp(
     calc_stat(base_ehp, is_hq, connections, externals)
 }
 
+/// Compute integer defense index from upgrade levels and HQ/network state.
+///
+/// Base formula:
+/// `damage + attack + health + defense + aura + volley + (aura>0 ? 5 : 0) + (volley>0 ? 3 : 0)`
+///
+/// HQ bonus:
+/// `13 + (6 * connections) + (2 * externals)` if `is_hq`, otherwise `0`.
+pub fn calc_defense_index(
+    damage_level: usize,
+    attack_level: usize,
+    health_level: usize,
+    defense_level: usize,
+    aura_level: usize,
+    volley_level: usize,
+    is_hq: bool,
+    connections: u32,
+    externals: u32,
+) -> u32 {
+    let damage = damage_level.min(11) as u32;
+    let attack = attack_level.min(11) as u32;
+    let health = health_level.min(11) as u32;
+    let defense = defense_level.min(11) as u32;
+    let aura = aura_level.min(3) as u32;
+    let volley = volley_level.min(3) as u32;
+
+    let aura_bonus = if aura > 0 { AURA_NONZERO_BONUS } else { 0 };
+    let volley_bonus = if volley > 0 {
+        VOLLEY_NONZERO_BONUS
+    } else {
+        0
+    };
+
+    let base_index = damage + attack + health + defense + aura + volley + aura_bonus + volley_bonus;
+
+    let hq_bonus = if is_hq {
+        HQ_BASE_INDEX_BONUS
+            + connections.saturating_mul(HQ_CONNECTION_INDEX_BONUS)
+            + externals.saturating_mul(HQ_EXTERNAL_INDEX_BONUS)
+    } else {
+        0
+    };
+
+    base_index + hq_bonus
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DefenseRating {
     VeryLow,
@@ -111,15 +171,20 @@ pub enum DefenseRating {
 }
 
 impl DefenseRating {
-    /// Determine rating from the sum of all 4 stat levels (damage + attack + health + defense).
-    pub fn from_sum(stat_sum: u32) -> Self {
-        match stat_sum {
-            0..=8 => DefenseRating::VeryLow,
-            9..=16 => DefenseRating::Low,
-            17..=28 => DefenseRating::Medium,
-            29..=38 => DefenseRating::High,
+    /// Determine rating from the full defense index.
+    pub fn from_index(index: u32) -> Self {
+        match index {
+            0..=5 => DefenseRating::VeryLow,
+            6..=18 => DefenseRating::Low,
+            19..=30 => DefenseRating::Medium,
+            31..=48 => DefenseRating::High,
             _ => DefenseRating::VeryHigh,
         }
+    }
+
+    /// Backward-compatible alias that maps an already-computed index to a rating.
+    pub fn from_sum(stat_sum: u32) -> Self {
+        Self::from_index(stat_sum)
     }
 
     pub fn label(&self) -> &'static str {
@@ -244,8 +309,8 @@ pub fn format_stat(val: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        DefenseRating, calc_dps, calc_ehp, calc_stat, count_guild_connections, find_externals,
-        format_stat,
+        DefenseRating, calc_defense_index, calc_dps, calc_ehp, calc_stat, count_guild_connections,
+        find_externals, format_stat,
     };
     use std::collections::{HashMap, HashSet};
 
@@ -386,16 +451,48 @@ mod tests {
     }
 
     #[test]
-    fn defense_rating_from_sum_boundaries() {
+    fn defense_rating_from_index_boundaries() {
+        assert_eq!(DefenseRating::from_index(5), DefenseRating::VeryLow);
+        assert_eq!(DefenseRating::from_index(6), DefenseRating::Low);
+        assert_eq!(DefenseRating::from_index(18), DefenseRating::Low);
+        assert_eq!(DefenseRating::from_index(19), DefenseRating::Medium);
+        assert_eq!(DefenseRating::from_index(30), DefenseRating::Medium);
+        assert_eq!(DefenseRating::from_index(31), DefenseRating::High);
+        assert_eq!(DefenseRating::from_index(48), DefenseRating::High);
+        assert_eq!(DefenseRating::from_index(49), DefenseRating::VeryHigh);
+    }
+
+    #[test]
+    fn defense_rating_from_sum_is_compatibility_alias() {
         assert_eq!(DefenseRating::from_sum(0), DefenseRating::VeryLow);
-        assert_eq!(DefenseRating::from_sum(8), DefenseRating::VeryLow);
-        assert_eq!(DefenseRating::from_sum(9), DefenseRating::Low);
-        assert_eq!(DefenseRating::from_sum(16), DefenseRating::Low);
-        assert_eq!(DefenseRating::from_sum(17), DefenseRating::Medium);
-        assert_eq!(DefenseRating::from_sum(28), DefenseRating::Medium);
-        assert_eq!(DefenseRating::from_sum(29), DefenseRating::High);
-        assert_eq!(DefenseRating::from_sum(38), DefenseRating::High);
-        assert_eq!(DefenseRating::from_sum(39), DefenseRating::VeryHigh);
+        assert_eq!(DefenseRating::from_sum(18), DefenseRating::Low);
+        assert_eq!(DefenseRating::from_sum(19), DefenseRating::Medium);
+        assert_eq!(DefenseRating::from_sum(48), DefenseRating::High);
+        assert_eq!(DefenseRating::from_sum(49), DefenseRating::VeryHigh);
+    }
+
+    #[test]
+    fn calc_defense_index_core_formula_examples() {
+        assert_eq!(calc_defense_index(0, 0, 0, 0, 0, 0, false, 0, 0), 0);
+        assert_eq!(calc_defense_index(0, 0, 0, 0, 1, 0, false, 0, 0), 6);
+        assert_eq!(calc_defense_index(0, 0, 0, 0, 0, 1, false, 0, 0), 4);
+        assert_eq!(calc_defense_index(0, 0, 0, 0, 1, 1, false, 0, 0), 10);
+        assert_eq!(calc_defense_index(11, 11, 11, 11, 3, 3, false, 0, 0), 58);
+    }
+
+    #[test]
+    fn calc_defense_index_hq_and_network_examples() {
+        assert_eq!(calc_defense_index(0, 0, 0, 0, 0, 0, false, 4, 7), 0);
+        assert_eq!(calc_defense_index(0, 0, 0, 0, 0, 0, true, 1, 0), 19);
+        assert_eq!(calc_defense_index(0, 0, 0, 0, 0, 0, true, 1, 1), 21);
+        assert_eq!(calc_defense_index(0, 0, 0, 0, 0, 0, true, 0, 5), 23);
+    }
+
+    #[test]
+    fn calc_defense_index_clamps_levels() {
+        let clamped = calc_defense_index(99, 42, 12, 15, 10, 99, true, 1, 5);
+        let max_levels = calc_defense_index(11, 11, 11, 11, 3, 3, true, 1, 5);
+        assert_eq!(clamped, max_levels);
     }
 
     #[test]

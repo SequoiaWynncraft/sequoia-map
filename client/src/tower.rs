@@ -23,6 +23,7 @@ pub struct TowerState {
     pub is_hq: RwSignal<bool>,
     pub connections: RwSignal<u32>,
     pub externals: RwSignal<u32>,
+    max_preset_snapshot: RwSignal<Option<TowerLevelSnapshot>>,
 }
 
 impl TowerState {
@@ -37,8 +38,20 @@ impl TowerState {
             is_hq: RwSignal::new(false),
             connections: RwSignal::new(0),
             externals: RwSignal::new(0),
+            max_preset_snapshot: RwSignal::new(None),
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct TowerLevelSnapshot {
+    damage_lvl: u32,
+    attack_lvl: u32,
+    health_lvl: u32,
+    defense_lvl: u32,
+    aura_lvl: u32,
+    volley_lvl: u32,
+    is_hq: bool,
 }
 
 /// Tower calculator component for the sidebar detail panel.
@@ -57,6 +70,7 @@ pub fn TowerCalculator() -> impl IntoView {
         is_hq,
         connections,
         externals,
+        max_preset_snapshot,
     } = expect_context();
 
     // Computed results
@@ -80,10 +94,21 @@ pub fn TowerCalculator() -> impl IntoView {
         )
     });
 
-    let defense_rating = Memo::new(move |_| {
-        let sum = damage_lvl.get() + attack_lvl.get() + health_lvl.get() + defense_lvl.get();
-        tower::DefenseRating::from_sum(sum)
+    let defense_index = Memo::new(move |_| {
+        tower::calc_defense_index(
+            damage_lvl.get() as usize,
+            attack_lvl.get() as usize,
+            health_lvl.get() as usize,
+            defense_lvl.get() as usize,
+            aura_lvl.get() as usize,
+            volley_lvl.get() as usize,
+            is_hq.get(),
+            connections.get(),
+            externals.get(),
+        )
     });
+
+    let defense_rating = Memo::new(move |_| tower::DefenseRating::from_index(defense_index.get()));
 
     let damage_range = Memo::new(move |_| {
         let lvl = damage_lvl.get() as usize;
@@ -101,19 +126,27 @@ pub fn TowerCalculator() -> impl IntoView {
 
     let defense_pct = Memo::new(move |_| DEFENSES[defense_lvl.get().min(11) as usize]);
 
-    let is_maxed = Memo::new(move |_| {
-        damage_lvl.get() == 11
-            && attack_lvl.get() == 11
-            && health_lvl.get() == 11
-            && defense_lvl.get() == 11
-    });
+    let is_max_preset_active = Memo::new(move |_| max_preset_snapshot.get().is_some());
     let on_max_toggle = move |_| {
-        if is_maxed.get() {
-            damage_lvl.set(0);
-            attack_lvl.set(0);
-            health_lvl.set(0);
-            defense_lvl.set(0);
+        if let Some(snapshot) = max_preset_snapshot.get_untracked() {
+            damage_lvl.set(snapshot.damage_lvl);
+            attack_lvl.set(snapshot.attack_lvl);
+            health_lvl.set(snapshot.health_lvl);
+            defense_lvl.set(snapshot.defense_lvl);
+            aura_lvl.set(snapshot.aura_lvl);
+            volley_lvl.set(snapshot.volley_lvl);
+            is_hq.set(snapshot.is_hq);
+            max_preset_snapshot.set(None);
         } else {
+            max_preset_snapshot.set(Some(TowerLevelSnapshot {
+                damage_lvl: damage_lvl.get_untracked(),
+                attack_lvl: attack_lvl.get_untracked(),
+                health_lvl: health_lvl.get_untracked(),
+                defense_lvl: defense_lvl.get_untracked(),
+                aura_lvl: aura_lvl.get_untracked(),
+                volley_lvl: volley_lvl.get_untracked(),
+                is_hq: is_hq.get_untracked(),
+            }));
             damage_lvl.set(11);
             attack_lvl.set(11);
             health_lvl.set(11);
@@ -141,6 +174,14 @@ pub fn TowerCalculator() -> impl IntoView {
 
     let owned_counts_for_apply = owned_counts;
     let on_reset_owned = move |_| {
+        max_preset_snapshot.set(None);
+        damage_lvl.set(0);
+        attack_lvl.set(0);
+        health_lvl.set(0);
+        defense_lvl.set(0);
+        aura_lvl.set(0);
+        volley_lvl.set(0);
+        is_hq.set(false);
         if let Some((guild_conn, ext)) = owned_counts_for_apply.get_untracked() {
             connections.set(guild_conn);
             externals.set(ext);
@@ -167,7 +208,7 @@ pub fn TowerCalculator() -> impl IntoView {
 
     view! {
         <div style="padding: 10px 0 4px;">
-            <div style="font-family: 'Silkscreen', monospace; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.12em; color: #5a5860; margin-bottom: 10px;">
+            <div style="font-family: 'Silkscreen', monospace; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.12em; color: #5f5d65; margin-bottom: 10px;">
                 <span style="color: #f5c542; margin-right: 5px; font-size: 0.7rem;">{"\u{25C6}"}</span>"Tower Calculator"
             </div>
 
@@ -196,28 +237,68 @@ pub fn TowerCalculator() -> impl IntoView {
             <div style="display: flex; gap: 6px; margin-top: 8px; margin-bottom: 8px;">
                 <button
                     style=move || format!(
-                        "flex: 1; padding: 5px 0; border-radius: 4px; border: 1px solid {}; background: {}; color: {}; font-family: 'Silkscreen', monospace; font-size: 0.62rem; cursor: pointer; transition: all 0.15s; text-transform: uppercase; letter-spacing: 0.1em;",
-                        if is_hq.get() { "#f5c542" } else { "#282c3e" },
-                        if is_hq.get() { "rgba(245,197,66,0.12)" } else { "#1a1d2a" },
-                        if is_hq.get() { "#f5c542" } else { "#5a5860" },
+                        "flex: 1; padding: 4px 0; border-radius: 4px; border: 1px solid {}; background: {}; color: {}; font-family: 'Silkscreen', monospace; font-size: 0.56rem; cursor: pointer; text-transform: uppercase; letter-spacing: 0.1em; transition: border-color 0.15s, color 0.15s, background 0.15s;",
+                        if is_hq.get() { "rgba(245,197,66,0.35)" } else { "#282c3e" },
+                        if is_hq.get() { "rgba(245,197,66,0.08)" } else { "#1a1d2a" },
+                        if is_hq.get() { "#f5c542" } else { "#9f9a95" },
                     )
                     on:click=move |_| is_hq.update(|v| *v = !*v)
+                    on:mouseenter=move |e| {
+                        if is_hq.get_untracked() {
+                            return;
+                        }
+                        if let Some(el) = e.target().and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok()) {
+                            el.style().set_property("border-color", "rgba(245,197,66,0.35)").ok();
+                            el.style().set_property("color", "#f5c542").ok();
+                            el.style().set_property("background", "rgba(245,197,66,0.08)").ok();
+                        }
+                    }
+                    on:mouseleave=move |e| {
+                        if is_hq.get_untracked() {
+                            return;
+                        }
+                        if let Some(el) = e.target().and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok()) {
+                            el.style().set_property("border-color", "#282c3e").ok();
+                            el.style().set_property("color", "#9f9a95").ok();
+                            el.style().set_property("background", "#1a1d2a").ok();
+                        }
+                    }
                 >"HQ"</button>
                 <button
                     style=move || format!(
-                        "flex: 1; padding: 5px 0; border-radius: 4px; border: 1px solid {}; background: {}; color: {}; font-family: 'Silkscreen', monospace; font-size: 0.62rem; cursor: pointer; transition: all 0.15s; text-transform: uppercase; letter-spacing: 0.1em;",
-                        if is_maxed.get() { "#f5c542" } else { "#282c3e" },
-                        if is_maxed.get() { "rgba(245,197,66,0.12)" } else { "#1a1d2a" },
-                        if is_maxed.get() { "#f5c542" } else { "#5a5860" },
+                        "flex: 1; padding: 4px 0; border-radius: 4px; border: 1px solid {}; background: {}; color: {}; font-family: 'Silkscreen', monospace; font-size: 0.56rem; cursor: pointer; text-transform: uppercase; letter-spacing: 0.1em; transition: border-color 0.15s, color 0.15s, background 0.15s;",
+                        if is_max_preset_active.get() { "rgba(245,197,66,0.35)" } else { "#282c3e" },
+                        if is_max_preset_active.get() { "rgba(245,197,66,0.08)" } else { "#1a1d2a" },
+                        if is_max_preset_active.get() { "#f5c542" } else { "#9f9a95" },
                     )
                     on:click=on_max_toggle
+                    on:mouseenter=move |e| {
+                        if is_max_preset_active.get_untracked() {
+                            return;
+                        }
+                        if let Some(el) = e.target().and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok()) {
+                            el.style().set_property("border-color", "rgba(245,197,66,0.35)").ok();
+                            el.style().set_property("color", "#f5c542").ok();
+                            el.style().set_property("background", "rgba(245,197,66,0.08)").ok();
+                        }
+                    }
+                    on:mouseleave=move |e| {
+                        if is_max_preset_active.get_untracked() {
+                            return;
+                        }
+                        if let Some(el) = e.target().and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok()) {
+                            el.style().set_property("border-color", "#282c3e").ok();
+                            el.style().set_property("color", "#9f9a95").ok();
+                            el.style().set_property("background", "#1a1d2a").ok();
+                        }
+                    }
                 >"11x4"</button>
                 <div style="flex: 1; display: flex; align-items: center; gap: 4px;">
-                    <span style="font-family: 'Inter', system-ui, sans-serif; font-size: 0.62rem; color: #5a5860; white-space: nowrap;">"Conn"</span>
+                    <span style="font-family: 'Inter', system-ui, sans-serif; font-size: 0.62rem; color: #5f5d65; white-space: nowrap;">"Conn"</span>
                     <CounterInput value=connections max=20 />
                 </div>
                 <div style="flex: 1; display: flex; align-items: center; gap: 4px;">
-                    <span style="font-family: 'Inter', system-ui, sans-serif; font-size: 0.62rem; color: #5a5860; white-space: nowrap;">"Ext"</span>
+                    <span style="font-family: 'Inter', system-ui, sans-serif; font-size: 0.62rem; color: #5f5d65; white-space: nowrap;">"Ext"</span>
                     <CounterInput value=externals max=50 />
                 </div>
             </div>
@@ -225,7 +306,7 @@ pub fn TowerCalculator() -> impl IntoView {
             <div style="display: flex; gap: 6px; margin-top: -2px; margin-bottom: 8px;">
                 <button
                     title="Reset Conn/Ext to guild-owned values"
-                    style="flex: 1; padding: 4px 0; border-radius: 4px; border: 1px solid #282c3e; background: #1a1d2a; color: #9a9590; font-family: 'Silkscreen', monospace; font-size: 0.56rem; cursor: pointer; text-transform: uppercase; letter-spacing: 0.1em; transition: border-color 0.15s, color 0.15s, background 0.15s;"
+                    style="flex: 1; padding: 4px 0; border-radius: 4px; border: 1px solid #282c3e; background: #1a1d2a; color: #9f9a95; font-family: 'Silkscreen', monospace; font-size: 0.56rem; cursor: pointer; text-transform: uppercase; letter-spacing: 0.1em; transition: border-color 0.15s, color 0.15s, background 0.15s;"
                     on:click=on_reset_owned
                     on:mouseenter=|e| {
                         if let Some(el) = e.target().and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok()) {
@@ -237,14 +318,14 @@ pub fn TowerCalculator() -> impl IntoView {
                     on:mouseleave=|e| {
                         if let Some(el) = e.target().and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok()) {
                             el.style().set_property("border-color", "#282c3e").ok();
-                            el.style().set_property("color", "#9a9590").ok();
+                            el.style().set_property("color", "#9f9a95").ok();
                             el.style().set_property("background", "#1a1d2a").ok();
                         }
                     }
                 >"Reset"</button>
                 <button
                     title="Set Ext to all territories reachable in 3 hops (ignores ownership)"
-                    style="flex: 1; padding: 4px 0; border-radius: 4px; border: 1px solid #282c3e; background: #1a1d2a; color: #9a9590; font-family: 'Silkscreen', monospace; font-size: 0.56rem; cursor: pointer; text-transform: uppercase; letter-spacing: 0.1em; transition: border-color 0.15s, color 0.15s, background 0.15s;"
+                    style="flex: 1; padding: 4px 0; border-radius: 4px; border: 1px solid #282c3e; background: #1a1d2a; color: #9f9a95; font-family: 'Silkscreen', monospace; font-size: 0.56rem; cursor: pointer; text-transform: uppercase; letter-spacing: 0.1em; transition: border-color 0.15s, color 0.15s, background 0.15s;"
                     on:click=on_apply_all_externals
                     on:mouseenter=|e| {
                         if let Some(el) = e.target().and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok()) {
@@ -256,7 +337,7 @@ pub fn TowerCalculator() -> impl IntoView {
                     on:mouseleave=|e| {
                         if let Some(el) = e.target().and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok()) {
                             el.style().set_property("border-color", "#282c3e").ok();
-                            el.style().set_property("color", "#9a9590").ok();
+                            el.style().set_property("color", "#9f9a95").ok();
                             el.style().set_property("background", "#1a1d2a").ok();
                         }
                     }
@@ -267,19 +348,19 @@ pub fn TowerCalculator() -> impl IntoView {
             <div class="divider-gold" style="margin: 8px 0;" />
             <div style="display: flex; flex-direction: column; gap: 6px;">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <span style="font-family: 'Silkscreen', monospace; font-size: 0.6rem; color: #9a9590; text-transform: uppercase; letter-spacing: 0.1em;">"Avg DPS"</span>
+                    <span style="font-family: 'Silkscreen', monospace; font-size: 0.6rem; color: #9f9a95; text-transform: uppercase; letter-spacing: 0.1em;">"Avg DPS"</span>
                     <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; color: #f5c542; font-weight: 700;">
                         {move || tower::format_stat(dps.get())}
                     </span>
                 </div>
                 <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <span style="font-family: 'Silkscreen', monospace; font-size: 0.6rem; color: #9a9590; text-transform: uppercase; letter-spacing: 0.1em;">"EHP"</span>
+                    <span style="font-family: 'Silkscreen', monospace; font-size: 0.6rem; color: #9f9a95; text-transform: uppercase; letter-spacing: 0.1em;">"EHP"</span>
                     <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; color: #50c878; font-weight: 700;">
                         {move || tower::format_stat(ehp.get())}
                     </span>
                 </div>
                 <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <span style="font-family: 'Silkscreen', monospace; font-size: 0.6rem; color: #9a9590; text-transform: uppercase; letter-spacing: 0.1em;">"Rating"</span>
+                    <span style="font-family: 'Silkscreen', monospace; font-size: 0.6rem; color: #9f9a95; text-transform: uppercase; letter-spacing: 0.1em;">"Rating"</span>
                     <span style=move || {
                         let rating = defense_rating.get();
                         let (rr, rg, rb) = rating.color_rgb();
@@ -288,7 +369,7 @@ pub fn TowerCalculator() -> impl IntoView {
                             rgba_css(rr, rg, rb, 1.0)
                         )
                     }>
-                        {move || defense_rating.get().label()}
+                        {move || format!("{} ({})", defense_rating.get().label(), defense_index.get())}
                     </span>
                 </div>
             </div>
@@ -333,9 +414,9 @@ fn StatRow(
             style="display: flex; align-items: center; gap: 4px; margin-bottom: 3px;"
             on:wheel=on_wheel
         >
-            <span style="font-family: 'Silkscreen', monospace; font-size: 0.58rem; color: #5a5860; width: 48px; text-transform: uppercase; letter-spacing: 0.06em; flex-shrink: 0;">{label}</span>
+            <span style="font-family: 'Silkscreen', monospace; font-size: 0.58rem; color: #5f5d65; width: 48px; text-transform: uppercase; letter-spacing: 0.06em; flex-shrink: 0;">{label}</span>
             <button
-                style="width: 20px; height: 20px; border-radius: 3px; border: 1px solid #282c3e; background: #1a1d2a; color: #9a9590; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 0.7rem; font-family: 'JetBrains Mono', monospace; padding: 0; flex-shrink: 0; transition: border-color 0.15s;"
+                style="width: 20px; height: 20px; border-radius: 3px; border: 1px solid #282c3e; background: #1a1d2a; color: #9f9a95; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 0.7rem; font-family: 'JetBrains Mono', monospace; padding: 0; flex-shrink: 0; transition: border-color 0.15s;"
                 on:click=on_dec
             >"-"</button>
             <input
@@ -347,10 +428,10 @@ fn StatRow(
                 on:focus=on_focus
             />
             <button
-                style="width: 20px; height: 20px; border-radius: 3px; border: 1px solid #282c3e; background: #1a1d2a; color: #9a9590; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 0.7rem; font-family: 'JetBrains Mono', monospace; padding: 0; flex-shrink: 0; transition: border-color 0.15s;"
+                style="width: 20px; height: 20px; border-radius: 3px; border: 1px solid #282c3e; background: #1a1d2a; color: #9f9a95; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 0.7rem; font-family: 'JetBrains Mono', monospace; padding: 0; flex-shrink: 0; transition: border-color 0.15s;"
                 on:click=on_inc
             >"+"</button>
-            <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.65rem; color: #9a9590; margin-left: auto; flex-shrink: 0;">
+            <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.65rem; color: #9f9a95; margin-left: auto; flex-shrink: 0;">
                 {move || detail.get()}
             </span>
         </div>
@@ -390,7 +471,7 @@ fn CounterInput(value: RwSignal<u32>, max: u32) -> impl IntoView {
             on:wheel=on_wheel
         >
             <button
-                style="width: 16px; height: 16px; border-radius: 2px; border: 1px solid #282c3e; background: #1a1d2a; color: #9a9590; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 0.6rem; font-family: 'JetBrains Mono', monospace; padding: 0;"
+                style="width: 16px; height: 16px; border-radius: 2px; border: 1px solid #282c3e; background: #1a1d2a; color: #9f9a95; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 0.6rem; font-family: 'JetBrains Mono', monospace; padding: 0;"
                 on:click=on_dec
             >"-"</button>
             <input
@@ -402,7 +483,7 @@ fn CounterInput(value: RwSignal<u32>, max: u32) -> impl IntoView {
                 on:focus=on_focus
             />
             <button
-                style="width: 16px; height: 16px; border-radius: 2px; border: 1px solid #282c3e; background: #1a1d2a; color: #9a9590; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 0.6rem; font-family: 'JetBrains Mono', monospace; padding: 0;"
+                style="width: 16px; height: 16px; border-radius: 2px; border: 1px solid #282c3e; background: #1a1d2a; color: #9f9a95; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 0.6rem; font-family: 'JetBrains Mono', monospace; padding: 0;"
                 on:click=on_inc
             >"+"</button>
         </div>

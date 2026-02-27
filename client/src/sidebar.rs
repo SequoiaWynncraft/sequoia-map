@@ -11,21 +11,22 @@ use crate::app::{
     ConnectionOpacityScale, ConnectionThicknessScale, CurrentMode,
     DEFAULT_CONNECTION_OPACITY_SCALE, DEFAULT_CONNECTION_THICKNESS_SCALE,
     DEFAULT_LABEL_SCALE_GROUP, DEFAULT_LABEL_SCALE_MASTER, DEFAULT_LABEL_SCALE_STATIC_NAME,
-    DEFAULT_LABEL_SCALE_STATIC_TAG, GuildColorStore, GuildOnlineData, HeatEntriesByTerritory,
-    HeatFallbackApplied, HeatHistoryBasis, HeatHistoryBasisSetting, HeatLiveSource,
-    HeatLiveSourceSetting, HeatMetaState, HeatModeEnabled, HeatSelectedSeasonId, HeatWindowLabel,
-    HistoryAvailable, HistoryBoundsSignal, HistoryBufferModeActive, HistoryBufferedUpdates,
-    HistoryFetchNonce, HistorySeasonLeaderboard, HistorySeasonScalarSample, HistoryTimestamp,
-    IsMobile, LABEL_SCALE_GROUP_MAX, LABEL_SCALE_GROUP_MIN, LABEL_SCALE_MASTER_MAX,
-    LABEL_SCALE_MASTER_MIN, LabelScaleDynamic, LabelScaleIcons, LabelScaleMaster, LabelScaleStatic,
-    LabelScaleStaticName, LastLiveSeq, LeaderboardSortBySr, LiveHandoffResyncCount,
-    LiveSeasonScalarSample, ManualSrScalar, MapMode, NameColor, NameColorSetting, NeedsLiveResync,
-    PlaybackActive, ResourceHighlight, Selected, SelectedGuild, ShowCompoundMapTime, ShowCountdown,
-    ShowGranularMapTime, ShowLeaderboardOnline, ShowLeaderboardSrGain, ShowLeaderboardSrValue,
-    ShowLeaderboardTerritoryCount, ShowMinimap, ShowNames, ShowResourceIcons, SidebarIndex,
-    SidebarItems, SidebarOpen, SidebarTransient, TerritoryGeometryStore, ThickCooldownBorders,
-    WhiteGuildTags, canvas_dimensions, clamp_connection_opacity_scale,
-    clamp_connection_thickness_scale, clamp_label_scale_group, clamp_label_scale_master,
+    DEFAULT_LABEL_SCALE_STATIC_TAG, DetailReturnGuild, GuildColorStore, GuildOnlineData,
+    HeatEntriesByTerritory, HeatFallbackApplied, HeatHistoryBasis, HeatHistoryBasisSetting,
+    HeatLiveSource, HeatLiveSourceSetting, HeatMetaState, HeatModeEnabled, HeatSelectedSeasonId,
+    HeatWindowLabel, HistoryAvailable, HistoryBoundsSignal, HistoryBufferModeActive,
+    HistoryBufferedUpdates, HistoryFetchNonce, HistorySeasonLeaderboard, HistorySeasonScalarSample,
+    HistoryTimestamp, IsMobile, LABEL_SCALE_GROUP_MAX, LABEL_SCALE_GROUP_MIN,
+    LABEL_SCALE_MASTER_MAX, LABEL_SCALE_MASTER_MIN, LabelScaleDynamic, LabelScaleIcons,
+    LabelScaleMaster, LabelScaleStatic, LabelScaleStaticName, LastLiveSeq, LeaderboardSortBySr,
+    LiveHandoffResyncCount, LiveSeasonScalarSample, ManualSrScalar, MapMode, NameColor,
+    NameColorSetting, NeedsLiveResync, PlaybackActive, ResourceHighlight, Selected, SelectedGuild,
+    ShowCompoundMapTime, ShowCountdown, ShowGranularMapTime, ShowLeaderboardOnline,
+    ShowLeaderboardSrGain, ShowLeaderboardSrValue, ShowLeaderboardTerritoryCount, ShowMinimap,
+    ShowNames, ShowResourceIcons, SidebarIndex, SidebarItems, SidebarOpen, SidebarTransient,
+    TerritoryGeometryStore, ThickCooldownBorders, WhiteGuildTags, canvas_dimensions,
+    clamp_connection_opacity_scale, clamp_connection_thickness_scale, clamp_label_scale_group,
+    clamp_label_scale_master,
 };
 use crate::colors::rgba_css;
 use crate::history;
@@ -809,13 +810,6 @@ fn SettingsHeatSourceRow(
     }
 }
 
-fn resolve_heat_selected_season_id(value: &str) -> Option<i32> {
-    if value == "latest" {
-        return None;
-    }
-    value.parse::<i32>().ok()
-}
-
 #[component]
 fn SettingsHeatSeasonRow(
     season_id: RwSignal<Option<i32>>,
@@ -829,7 +823,11 @@ fn SettingsHeatSeasonRow(
             return;
         };
         let value = select.value();
-        season_id.set(resolve_heat_selected_season_id(&value));
+        if value == "latest" {
+            season_id.set(None);
+            return;
+        }
+        season_id.set(value.parse::<i32>().ok());
     };
 
     view! {
@@ -841,9 +839,7 @@ fn SettingsHeatSeasonRow(
             >
                 <option
                     value="latest"
-                    selected=move || {
-                        season_id.get().is_none()
-                    }
+                    selected=move || season_id.get().is_none()
                 >
                     "Latest"
                 </option>
@@ -878,6 +874,7 @@ fn SearchResults() -> impl IntoView {
     let search_query: RwSignal<String> = expect_context();
     let territories: RwSignal<ClientTerritoryMap> = expect_context();
     let Selected(selected) = expect_context();
+    let DetailReturnGuild(detail_return_guild) = expect_context();
     let viewport: RwSignal<Viewport> = expect_context();
     let SidebarIndex(sidebar_index) = expect_context();
     let SidebarItems(sidebar_items) = expect_context();
@@ -941,6 +938,7 @@ fn SearchResults() -> impl IntoView {
                         let (r, g, b) = item.1.3;
                         let name_click = name.clone();
                         let on_click = move |_| {
+                            detail_return_guild.set(None);
                             selected.set(Some(name_click.clone()));
                             let map = territories.get_untracked();
                             if let Some(ct) = map.get(&name_click) {
@@ -1386,6 +1384,7 @@ fn extract_online_members(json: &serde_json::Value) -> Vec<OnlineMemberRow> {
 fn GuildPanel() -> impl IntoView {
     let SelectedGuild(selected_guild) = expect_context();
     let Selected(selected) = expect_context();
+    let DetailReturnGuild(detail_return_guild) = expect_context();
     let SidebarTransient(sidebar_transient) = expect_context();
     let SidebarOpen(sidebar_open) = expect_context();
     let territories: RwSignal<ClientTerritoryMap> = expect_context();
@@ -1675,6 +1674,7 @@ fn GuildPanel() -> impl IntoView {
                                     let tn = territory_name.clone();
                                     let on_terr_click = move |_| {
                                         let tn_inner = tn.clone();
+                                        detail_return_guild.set(selected_guild.get_untracked());
                                         selected.set(Some(tn_inner.clone()));
                                         if !sidebar_open.get_untracked() {
                                             sidebar_open.set(true);
@@ -1731,6 +1731,8 @@ fn GuildPanel() -> impl IntoView {
 #[component]
 fn DetailPanel() -> impl IntoView {
     let Selected(selected) = expect_context();
+    let SelectedGuild(selected_guild) = expect_context();
+    let DetailReturnGuild(detail_return_guild) = expect_context();
     let SidebarTransient(sidebar_transient) = expect_context();
     let territories: RwSignal<ClientTerritoryMap> = expect_context();
     let tick: RwSignal<i64> = expect_context();
@@ -1840,13 +1842,58 @@ fn DetailPanel() -> impl IntoView {
         ))
     };
 
-    let on_close = move |_| {
+    let current_territory_guild = Memo::new(move |_| {
+        let name = selected.get()?;
+        let map = territories.get();
+        map.get(&name).map(|ct| ct.territory.guild.name.clone())
+    });
+
+    let on_back = move |_| {
+        let owner_guild = current_territory_guild.get_untracked();
         selected.set(None);
+        if let Some(guild_name) = owner_guild {
+            selected_guild.set(Some(guild_name));
+        }
+        detail_return_guild.set(None);
+        sidebar_transient.set(false);
+    };
+
+    let on_close = move |_| {
+        if let Some(return_guild) = detail_return_guild.get_untracked() {
+            selected.set(None);
+            selected_guild.set(Some(return_guild));
+        } else {
+            selected.set(None);
+        }
+        detail_return_guild.set(None);
         sidebar_transient.set(false);
     };
 
     view! {
         <div class="panel-reveal" style="border-bottom: 1px solid #282c3e; position: relative;">
+            <button
+                title="Back to guild"
+                aria-label="Back to guild"
+                style="position: absolute; top: 12px; left: 12px; background: #1a1d2a; border: 1px solid #282c3e; color: #9a9590; cursor: pointer; padding: 3px 8px; border-radius: 4px; transition: color 0.15s, background 0.15s, border-color 0.15s; z-index: 1; display: flex; align-items: center; gap: 5px; font-family: 'JetBrains Mono', monospace; font-size: 0.67rem; text-transform: uppercase; letter-spacing: 0.08em;"
+                on:click=on_back
+                on:mouseenter=|e| {
+                    if let Some(el) = e.target().and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok()) {
+                        el.style().set_property("color", "#f5c542").ok();
+                        el.style().set_property("background", "#232738").ok();
+                        el.style().set_property("border-color", "#3a3f5c").ok();
+                    }
+                }
+                on:mouseleave=|e| {
+                    if let Some(el) = e.target().and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok()) {
+                        el.style().set_property("color", "#9a9590").ok();
+                        el.style().set_property("background", "#1a1d2a").ok();
+                        el.style().set_property("border-color", "#282c3e").ok();
+                    }
+                }
+            >
+                <span style="font-size: 0.8rem; line-height: 1;">{"\u{2039}"}</span>
+                <span>"Back"</span>
+            </button>
             <button
                 style="position: absolute; top: 12px; right: 12px; background: none; border: none; color: #5a5860; cursor: pointer; padding: 4px 8px; border-radius: 4px; transition: color 0.15s, background 0.15s; z-index: 1; display: flex; align-items: center; justify-content: center;"
                 on:click=on_close
@@ -1931,7 +1978,7 @@ fn DetailPanel() -> impl IntoView {
                                 rgba_css(r, g, b, 0.7),
                                 rgba_css(r, g, b, 0.3),
                             )} />
-                            <div style="padding: 18px 24px 20px;">
+                            <div style="padding: 40px 24px 20px;">
                                 <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 4px;">
                                     // Guild color swatch
                                     <div style={format!(
@@ -2243,7 +2290,7 @@ fn StatsBar() -> impl IntoView {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_online_members, resolve_heat_selected_season_id};
+    use super::extract_online_members;
     use serde_json::json;
 
     #[test]
@@ -2334,15 +2381,5 @@ mod tests {
         assert_eq!(row.rank_label, "Chief");
         assert_eq!(row.username, "Obstacles_");
         assert_eq!(row.server, "NA5");
-    }
-
-    #[test]
-    fn resolve_heat_selected_season_id_keeps_latest_sentinel() {
-        assert_eq!(resolve_heat_selected_season_id("latest"), None);
-    }
-
-    #[test]
-    fn resolve_heat_selected_season_id_parses_numeric_ids() {
-        assert_eq!(resolve_heat_selected_season_id("31"), Some(31));
     }
 }
