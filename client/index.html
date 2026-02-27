@@ -8,22 +8,41 @@
     <link data-trunk rel="copy-dir" href="public/tiles" />
     <link data-trunk rel="copy-dir" href="public/icons" />
     <link data-trunk rel="copy-dir" href="public/fonts" />
-    <link rel="preload" href="/fonts/silkscreen-regular.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/minecraft-regular.otf" as="font" type="font/otf" crossorigin />
     <link rel="preload" href="/icons/territory-resources-atlas.png" as="image" />
     <style>
       @font-face {
         font-family: "Silkscreen";
-        src: url("/fonts/silkscreen-regular.woff2") format("woff2"),
-             url("/fonts/silkscreen-regular.ttf") format("truetype");
+        src: url("/fonts/minecraft-regular.otf") format("opentype");
         font-style: normal;
         font-weight: 400;
         font-display: swap;
       }
       @font-face {
+        font-family: "Silkscreen";
+        src: url("/fonts/minecraft-italic.otf") format("opentype");
+        font-style: italic;
+        font-weight: 400;
+        font-display: swap;
+      }
+      @font-face {
+        font-family: "Silkscreen";
+        src: url("/fonts/minecraft-bold.otf") format("opentype");
+        font-style: normal;
+        font-weight: 700;
+        font-display: swap;
+      }
+      @font-face {
+        font-family: "Silkscreen";
+        src: url("/fonts/minecraft-bold-italic.otf") format("opentype");
+        font-style: italic;
+        font-weight: 700;
+        font-display: swap;
+      }
+      @font-face {
         font-family: "SilkscreenLocal";
-        src: local("Silkscreen"),
-             url("/fonts/silkscreen-regular.woff2") format("woff2"),
-             url("/fonts/silkscreen-regular.ttf") format("truetype");
+        src: local("Minecraft"),
+             url("/fonts/minecraft-regular.otf") format("opentype");
         font-style: normal;
         font-weight: 400;
         font-display: swap;

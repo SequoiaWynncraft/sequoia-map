@@ -64,6 +64,14 @@ pub(crate) fn build_app(state: AppState) -> Router {
         .route(
             "/api/history/bounds",
             axum::routing::get(routes::history::history_bounds),
+        )
+        .route(
+            "/api/history/heat/meta",
+            axum::routing::get(routes::history::history_heat_meta),
+        )
+        .route(
+            "/api/history/heat",
+            axum::routing::get(routes::history::history_heat),
         );
 
     app.layer(CompressionLayer::new())
@@ -140,7 +148,7 @@ mod tests {
             Some("public, max-age=86400")
         );
         assert_eq!(
-            cache_control_for_path("/fonts/silkscreen-regular.woff2"),
+            cache_control_for_path("/fonts/minecraft-regular.otf"),
             Some("public, max-age=86400")
         );
     }

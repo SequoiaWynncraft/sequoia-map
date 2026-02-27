@@ -5,7 +5,11 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, MouseEvent};
 
-use crate::app::{CurrentMode, IsMobile, MapMode, Selected, SidebarOpen, canvas_dimensions};
+use crate::app::{
+    CurrentMode, HeatEntriesByTerritory, HeatMaxTakeCount, HeatModeEnabled, IsMobile, MapMode,
+    Selected, SidebarOpen, canvas_dimensions,
+};
+use crate::heat::heat_color_for_count;
 use crate::canvas::render_scale;
 use crate::render_loop::RenderScheduler;
 use crate::territory::ClientTerritoryMap;
@@ -53,6 +57,9 @@ impl OffscreenCache {
         territories: &ClientTerritoryMap,
         tiles: &[LoadedTile],
         selected: &Option<String>,
+        heat_mode_enabled: bool,
+        heat_entries: &std::collections::HashMap<String, u64>,
+        heat_max_take_count: u64,
     ) {
         let world_w = WORLD_MAX_X - WORLD_MIN_X;
         let world_h = WORLD_MAX_Y - WORLD_MIN_Y;
@@ -86,14 +93,20 @@ impl OffscreenCache {
         }
 
         // Draw territories
-        for ct in territories.values() {
+        for (name, ct) in territories {
             let loc = &ct.territory.location;
             let x = ((loc.left() as f64 - WORLD_MIN_X) / world_w) * MINIMAP_W;
             let y = ((loc.top() as f64 - WORLD_MIN_Y) / world_h) * MINIMAP_H;
             let w = (loc.width() as f64 / world_w) * MINIMAP_W;
             let h = (loc.height() as f64 / world_h) * MINIMAP_H;
 
-            ctx.set_fill_style_str(&ct.cached_colors.minimap_fill);
+            if heat_mode_enabled {
+                let take_count = heat_entries.get(name).copied().unwrap_or(0);
+                let (r, g, b) = heat_color_for_count(take_count, heat_max_take_count);
+                ctx.set_fill_style_str(&format!("rgba({r}, {g}, {b}, 0.45)"));
+            } else {
+                ctx.set_fill_style_str(&ct.cached_colors.minimap_fill);
+            }
             ctx.fill_rect(x, y, w.max(1.0), h.max(1.0));
         }
 
@@ -125,6 +138,9 @@ pub fn Minimap() -> impl IntoView {
     let Selected(selected) = expect_context();
     let SidebarOpen(sidebar_open) = expect_context();
     let CurrentMode(map_mode) = expect_context();
+    let HeatModeEnabled(heat_mode_enabled) = expect_context();
+    let HeatEntriesByTerritory(heat_entries_by_territory) = expect_context();
+    let HeatMaxTakeCount(heat_max_take_count) = expect_context();
 
     let canvas_ref = NodeRef::<leptos::html::Canvas>::new();
 
@@ -188,9 +204,13 @@ pub fn Minimap() -> impl IntoView {
         if offscreen_dirty_render.get() {
             offscreen_dirty_render.set(false);
             let sel = selected.get_untracked();
+            let heat_mode = heat_mode_enabled.get_untracked();
+            let heat_max = heat_max_take_count.get_untracked();
             territories.with_untracked(|terr| {
                 loaded_tiles.with_untracked(|tiles| {
-                    cache.redraw(terr, tiles, &sel);
+                    heat_entries_by_territory.with_untracked(|heat_entries| {
+                        cache.redraw(terr, tiles, &sel, heat_mode, heat_entries, heat_max);
+                    });
                 });
             });
         }
@@ -220,6 +240,9 @@ pub fn Minimap() -> impl IntoView {
         territories.track();
         loaded_tiles.track();
         selected.track();
+        heat_mode_enabled.track();
+        heat_entries_by_territory.track();
+        heat_max_take_count.track();
         offscreen_dirty_state.set(true);
         sched_state.mark_dirty();
     });

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::icons::ResourceAtlas;
 use crate::territory::ClientTerritoryMap;
 use crate::tiles::LoadedTile;
@@ -50,6 +52,9 @@ pub struct SceneSnapshot<'a> {
     pub icons: &'a Option<ResourceAtlas>,
     pub show_minimap: bool,
     pub history_mode: bool,
+    pub heat_mode_enabled: bool,
+    pub heat_entries: &'a HashMap<String, u64>,
+    pub heat_max_take_count: u64,
 }
 
 /// Lightweight metadata emitted alongside each built scene snapshot.
@@ -63,6 +68,8 @@ pub struct SceneSummary {
     pub show_minimap: bool,
     pub history_mode: bool,
     pub reference_time_secs: i64,
+    pub heat_mode_enabled: bool,
+    pub heat_max_take_count: u64,
 }
 
 impl<'a> From<&SceneSnapshot<'a>> for SceneSummary {
@@ -76,6 +83,8 @@ impl<'a> From<&SceneSnapshot<'a>> for SceneSummary {
             show_minimap: snapshot.show_minimap,
             history_mode: snapshot.history_mode,
             reference_time_secs: snapshot.reference_time_secs,
+            heat_mode_enabled: snapshot.heat_mode_enabled,
+            heat_max_take_count: snapshot.heat_max_take_count,
         }
     }
 }

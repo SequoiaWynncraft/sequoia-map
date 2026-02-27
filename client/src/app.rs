@@ -3,10 +3,17 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::rc::Rc;
 
-pub(crate) const SIDEBAR_WIDTH: f64 = 340.0;
+pub(crate) const DEFAULT_SIDEBAR_WIDTH: f64 = 380.0;
+pub(crate) const SIDEBAR_WIDTH_MIN: f64 = 300.0;
+pub(crate) const SIDEBAR_WIDTH_MAX: f64 = 620.0;
+
+pub(crate) fn clamp_sidebar_width(value: f64) -> f64 {
+    value.clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)
+}
 
 pub(crate) fn canvas_dimensions() -> (f64, f64) {
     let Some(window) = web_sys::window() else {
@@ -71,7 +78,9 @@ thread_local! {
     static RESIZE_BINDING: RefCell<Option<ResizeBinding>> = const { RefCell::new(None) };
 }
 
-use sequoia_shared::history::HistoryGuildSrEntry;
+use sequoia_shared::history::{
+    HistoryGuildSrEntry, HistoryHeat, HistoryHeatMeta, HistoryHeatSource,
+};
 use sequoia_shared::{Region, Resources, SeasonScalarSample, TerritoryChange, TreasuryLevel};
 
 /// Newtype wrappers to give `hovered` and `selected` distinct types for Leptos context.
@@ -87,11 +96,17 @@ pub(crate) struct ShowCountdown(pub RwSignal<bool>);
 #[derive(Clone, Copy)]
 pub(crate) struct ShowGranularMapTime(pub RwSignal<bool>);
 #[derive(Clone, Copy)]
+pub(crate) struct ShowCompoundMapTime(pub RwSignal<bool>);
+#[derive(Clone, Copy)]
 pub(crate) struct ShowNames(pub RwSignal<bool>);
 #[derive(Clone, Copy)]
 pub(crate) struct ThickCooldownBorders(pub RwSignal<bool>);
 #[derive(Clone, Copy)]
 pub(crate) struct BoldConnections(pub RwSignal<bool>);
+#[derive(Clone, Copy)]
+pub(crate) struct ConnectionOpacityScale(pub RwSignal<f64>);
+#[derive(Clone, Copy)]
+pub(crate) struct ConnectionThicknessScale(pub RwSignal<f64>);
 #[derive(Clone, Copy)]
 pub(crate) struct ResourceHighlight(pub RwSignal<bool>);
 #[derive(Clone, Copy)]
@@ -123,6 +138,8 @@ pub(crate) struct LabelScaleIcons(pub RwSignal<f64>);
 #[derive(Clone, Copy)]
 pub(crate) struct SidebarOpen(pub RwSignal<bool>);
 #[derive(Clone, Copy)]
+pub(crate) struct SidebarWidth(pub RwSignal<f64>);
+#[derive(Clone, Copy)]
 pub(crate) struct SidebarTransient(pub RwSignal<bool>);
 #[derive(Clone, Copy)]
 pub(crate) struct SidebarIndex(pub RwSignal<usize>);
@@ -149,6 +166,24 @@ pub(crate) struct ShowLeaderboardTerritoryCount(pub RwSignal<bool>);
 pub(crate) struct ShowLeaderboardOnline(pub RwSignal<bool>);
 #[derive(Clone, Copy)]
 pub(crate) struct LeaderboardSortBySr(pub RwSignal<bool>);
+#[derive(Clone, Copy)]
+pub(crate) struct HeatModeEnabled(pub RwSignal<bool>);
+#[derive(Clone, Copy)]
+pub(crate) struct HeatLiveSourceSetting(pub RwSignal<HeatLiveSource>);
+#[derive(Clone, Copy)]
+pub(crate) struct HeatHistoryBasisSetting(pub RwSignal<HeatHistoryBasis>);
+#[derive(Clone, Copy)]
+pub(crate) struct HeatSelectedSeasonId(pub RwSignal<Option<i32>>);
+#[derive(Clone, Copy)]
+pub(crate) struct HeatEntriesByTerritory(pub RwSignal<HashMap<String, u64>>);
+#[derive(Clone, Copy)]
+pub(crate) struct HeatMaxTakeCount(pub RwSignal<u64>);
+#[derive(Clone, Copy)]
+pub(crate) struct HeatFallbackApplied(pub RwSignal<bool>);
+#[derive(Clone, Copy)]
+pub(crate) struct HeatWindowLabel(pub RwSignal<String>);
+#[derive(Clone, Copy)]
+pub(crate) struct HeatMetaState(pub RwSignal<Option<HistoryHeatMeta>>);
 
 pub(crate) const MOBILE_BREAKPOINT: f64 = 768.0;
 const GUILD_ONLINE_POLL_INTERVAL_SECS: u64 = 120;
@@ -159,6 +194,20 @@ const GUILD_ONLINE_ERROR_RETRY_SECS: u64 = 15;
 pub(crate) enum MapMode {
     Live,
     History,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum HeatLiveSource {
+    Season,
+    AllTime,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum HeatHistoryBasis {
+    SeasonCumulative,
+    AllTimeCumulative,
 }
 
 #[derive(Clone, Copy)]
@@ -243,9 +292,15 @@ struct SettingsV2 {
     abbreviate_names: bool,
     show_countdown: bool,
     granular_map_time: bool,
+    #[serde(default = "default_true")]
+    compound_map_time: bool,
     show_names: bool,
     thick_cooldown_borders: bool,
     bold_connections: bool,
+    #[serde(default = "default_connection_opacity_scale")]
+    connection_opacity_scale: f64,
+    #[serde(default = "default_connection_thickness_scale")]
+    connection_thickness_scale: f64,
     sidebar_open: bool,
     resource_highlight: bool,
     show_resource_icons: bool,
@@ -260,6 +315,14 @@ struct SettingsV2 {
     #[serde(default = "default_true")]
     show_leaderboard_online: bool,
     leaderboard_sort_by_sr: bool,
+    #[serde(default)]
+    heat_mode_enabled: bool,
+    #[serde(default = "default_heat_live_source")]
+    heat_live_source: HeatLiveSource,
+    #[serde(default = "default_heat_history_basis")]
+    heat_history_basis: HeatHistoryBasis,
+    #[serde(default)]
+    heat_selected_season_id: Option<i32>,
     white_guild_tags: bool,
     #[serde(default = "default_true")]
     show_minimap: bool,
@@ -267,7 +330,7 @@ struct SettingsV2 {
     name_color: NameColor,
     #[serde(default = "default_label_scale_master")]
     label_scale_master: f64,
-    #[serde(default = "default_label_scale_group")]
+    #[serde(default = "default_label_scale_static_tag")]
     label_scale_static: f64,
     #[serde(default)]
     label_scale_static_name: Option<f64>,
@@ -275,10 +338,20 @@ struct SettingsV2 {
     label_scale_dynamic: f64,
     #[serde(default = "default_label_scale_group")]
     label_scale_icons: f64,
+    #[serde(default = "default_sidebar_width")]
+    sidebar_width: f64,
 }
 
 const fn default_name_color() -> NameColor {
     NameColor::Guild
+}
+
+const fn default_heat_live_source() -> HeatLiveSource {
+    HeatLiveSource::AllTime
+}
+
+const fn default_heat_history_basis() -> HeatHistoryBasis {
+    HeatHistoryBasis::SeasonCumulative
 }
 
 const fn default_true() -> bool {
@@ -289,6 +362,14 @@ const fn default_manual_sr_scalar() -> f64 {
     1.5
 }
 
+const fn default_connection_opacity_scale() -> f64 {
+    DEFAULT_CONNECTION_OPACITY_SCALE
+}
+
+const fn default_connection_thickness_scale() -> f64 {
+    DEFAULT_CONNECTION_THICKNESS_SCALE
+}
+
 const fn default_label_scale_master() -> f64 {
     DEFAULT_LABEL_SCALE_MASTER
 }
@@ -297,17 +378,43 @@ const fn default_label_scale_group() -> f64 {
     DEFAULT_LABEL_SCALE_GROUP
 }
 
+const fn default_label_scale_static_tag() -> f64 {
+    DEFAULT_LABEL_SCALE_STATIC_TAG
+}
+
 const fn default_label_scale_static_name() -> f64 {
     DEFAULT_LABEL_SCALE_STATIC_NAME
 }
 
-pub(crate) const DEFAULT_LABEL_SCALE_MASTER: f64 = 1.25;
+const fn default_sidebar_width() -> f64 {
+    DEFAULT_SIDEBAR_WIDTH
+}
+
+pub(crate) const DEFAULT_LABEL_SCALE_MASTER: f64 = 1.0;
 pub(crate) const DEFAULT_LABEL_SCALE_GROUP: f64 = 1.0;
-pub(crate) const DEFAULT_LABEL_SCALE_STATIC_NAME: f64 = 0.75;
+pub(crate) const DEFAULT_LABEL_SCALE_STATIC_TAG: f64 = 1.10;
+pub(crate) const DEFAULT_LABEL_SCALE_STATIC_NAME: f64 = 0.90;
+pub(crate) const DEFAULT_CONNECTION_OPACITY_SCALE: f64 = 1.0;
+pub(crate) const DEFAULT_CONNECTION_THICKNESS_SCALE: f64 = 1.0;
+pub(crate) const CONNECTION_OPACITY_SCALE_MIN: f64 = 0.60;
+pub(crate) const CONNECTION_OPACITY_SCALE_MAX: f64 = 2.50;
+pub(crate) const CONNECTION_THICKNESS_SCALE_MIN: f64 = 0.70;
+pub(crate) const CONNECTION_THICKNESS_SCALE_MAX: f64 = 2.50;
 pub(crate) const LABEL_SCALE_MASTER_MIN: f64 = 1.0;
 pub(crate) const LABEL_SCALE_MASTER_MAX: f64 = 2.25;
 pub(crate) const LABEL_SCALE_GROUP_MIN: f64 = 0.60;
 pub(crate) const LABEL_SCALE_GROUP_MAX: f64 = 1.80;
+
+pub(crate) fn clamp_connection_opacity_scale(value: f64) -> f64 {
+    value.clamp(CONNECTION_OPACITY_SCALE_MIN, CONNECTION_OPACITY_SCALE_MAX)
+}
+
+pub(crate) fn clamp_connection_thickness_scale(value: f64) -> f64 {
+    value.clamp(
+        CONNECTION_THICKNESS_SCALE_MIN,
+        CONNECTION_THICKNESS_SCALE_MAX,
+    )
+}
 
 pub(crate) fn clamp_label_scale_master(value: f64) -> f64 {
     value.clamp(LABEL_SCALE_MASTER_MIN, LABEL_SCALE_MASTER_MAX)
@@ -324,9 +431,12 @@ impl Default for SettingsV2 {
             abbreviate_names: true,
             show_countdown: false,
             granular_map_time: false,
+            compound_map_time: true,
             show_names: true,
             thick_cooldown_borders: true,
             bold_connections: false,
+            connection_opacity_scale: default_connection_opacity_scale(),
+            connection_thickness_scale: default_connection_thickness_scale(),
             sidebar_open: false,
             resource_highlight: false,
             show_resource_icons: false,
@@ -337,14 +447,19 @@ impl Default for SettingsV2 {
             show_leaderboard_territory_count: true,
             show_leaderboard_online: true,
             leaderboard_sort_by_sr: false,
+            heat_mode_enabled: false,
+            heat_live_source: default_heat_live_source(),
+            heat_history_basis: default_heat_history_basis(),
+            heat_selected_season_id: None,
             white_guild_tags: false,
             show_minimap: true,
             name_color: default_name_color(),
             label_scale_master: default_label_scale_master(),
-            label_scale_static: default_label_scale_group(),
+            label_scale_static: default_label_scale_static_tag(),
             label_scale_static_name: Some(default_label_scale_static_name()),
             label_scale_dynamic: default_label_scale_group(),
             label_scale_icons: default_label_scale_group(),
+            sidebar_width: default_sidebar_width(),
         }
     }
 }
@@ -356,6 +471,8 @@ struct LegacySettings {
     abbreviate_names: bool,
     show_countdown: bool,
     granular_map_time: bool,
+    #[serde(default = "default_true")]
+    compound_map_time: bool,
     show_names: bool,
     thick_cooldown_borders: bool,
     bold_names: bool,
@@ -384,6 +501,7 @@ impl Default for LegacySettings {
             abbreviate_names: true,
             show_countdown: false,
             granular_map_time: false,
+            compound_map_time: true,
             show_names: true,
             thick_cooldown_borders: true,
             bold_names: false,
@@ -412,9 +530,12 @@ impl From<LegacySettings> for SettingsV2 {
             abbreviate_names: value.abbreviate_names,
             show_countdown: value.show_countdown,
             granular_map_time: value.granular_map_time,
+            compound_map_time: value.compound_map_time,
             show_names: value.show_names,
             thick_cooldown_borders: value.thick_cooldown_borders,
             bold_connections: value.bold_connections,
+            connection_opacity_scale: default_connection_opacity_scale(),
+            connection_thickness_scale: default_connection_thickness_scale(),
             sidebar_open: value.sidebar_open,
             resource_highlight: value.resource_highlight,
             show_resource_icons: value.show_resource_icons,
@@ -425,14 +546,19 @@ impl From<LegacySettings> for SettingsV2 {
             show_leaderboard_territory_count: true,
             show_leaderboard_online: true,
             leaderboard_sort_by_sr: false,
+            heat_mode_enabled: false,
+            heat_live_source: default_heat_live_source(),
+            heat_history_basis: default_heat_history_basis(),
+            heat_selected_season_id: None,
             white_guild_tags: false,
             show_minimap: true,
             name_color: value.name_color,
             label_scale_master: default_label_scale_master(),
-            label_scale_static: default_label_scale_group(),
+            label_scale_static: default_label_scale_static_tag(),
             label_scale_static_name: Some(default_label_scale_static_name()),
             label_scale_dynamic: default_label_scale_group(),
             label_scale_icons: default_label_scale_group(),
+            sidebar_width: default_sidebar_width(),
         }
     }
 }
@@ -449,6 +575,7 @@ fn load_settings_v2() -> SettingsV2 {
 
 use crate::canvas::MapCanvas;
 use crate::colors::rgba_css;
+use crate::heat::{self, HeatFetchInput};
 use crate::history;
 use crate::icons::{self, ResourceAtlas};
 use crate::label_layout::abbreviate_name;
@@ -485,6 +612,45 @@ fn tooltip_resource_items(res: &Resources) -> Vec<(i32, bool, &'static str, &'st
     ]
 }
 
+fn format_heat_window_time(raw: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .map(|dt| dt.format("%b %d").to_string())
+        .unwrap_or_else(|_| raw.to_string())
+}
+
+fn format_heat_window_label(heat: &HistoryHeat, mode: MapMode) -> String {
+    let source = match (heat.source, heat.season_id) {
+        (HistoryHeatSource::Season, Some(season_id)) => format!("Season {season_id}"),
+        (HistoryHeatSource::Season, None) => "Season (fallback)".to_string(),
+        (HistoryHeatSource::AllTime, _) => "All-time".to_string(),
+    };
+    let mode_label = if mode == MapMode::History {
+        "cumulative"
+    } else {
+        "totals"
+    };
+    format!(
+        "{source} {mode_label} • {} → {}",
+        format_heat_window_time(&heat.from),
+        format_heat_window_time(&heat.to)
+    )
+}
+
+fn normalize_heat_selected_season_id(meta: &HistoryHeatMeta, selected: Option<i32>) -> Option<i32> {
+    let has_season = |season_id: i32| {
+        meta.seasons
+            .iter()
+            .any(|window| window.season_id == season_id)
+    };
+    let latest_valid = meta
+        .latest_season_id
+        .filter(|season_id| has_season(*season_id));
+    match selected {
+        Some(season_id) if has_season(season_id) => Some(season_id),
+        _ => latest_valid,
+    }
+}
+
 /// Root application component. Provides global reactive signals via context.
 #[component]
 pub fn App() -> impl IntoView {
@@ -505,9 +671,16 @@ pub fn App() -> impl IntoView {
     let abbreviate_names: RwSignal<bool> = RwSignal::new(saved.abbreviate_names);
     let show_countdown: RwSignal<bool> = RwSignal::new(saved.show_countdown);
     let show_granular_map_time: RwSignal<bool> = RwSignal::new(saved.granular_map_time);
+    let show_compound_map_time: RwSignal<bool> = RwSignal::new(saved.compound_map_time);
     let show_names: RwSignal<bool> = RwSignal::new(saved.show_names);
     let thick_cooldown_borders: RwSignal<bool> = RwSignal::new(saved.thick_cooldown_borders);
     let bold_connections: RwSignal<bool> = RwSignal::new(saved.bold_connections);
+    let connection_opacity_scale: RwSignal<f64> = RwSignal::new(clamp_connection_opacity_scale(
+        saved.connection_opacity_scale,
+    ));
+    let connection_thickness_scale: RwSignal<f64> = RwSignal::new(
+        clamp_connection_thickness_scale(saved.connection_thickness_scale),
+    );
     let resource_highlight: RwSignal<bool> = RwSignal::new(saved.resource_highlight);
     let show_resource_icons: RwSignal<bool> = RwSignal::new(saved.show_resource_icons);
     let manual_sr_scalar: RwSignal<f64> =
@@ -531,6 +704,7 @@ pub fn App() -> impl IntoView {
         RwSignal::new(clamp_label_scale_group(saved.label_scale_dynamic));
     let label_scale_icons: RwSignal<f64> =
         RwSignal::new(clamp_label_scale_group(saved.label_scale_icons));
+    let sidebar_width: RwSignal<f64> = RwSignal::new(clamp_sidebar_width(saved.sidebar_width));
     let sidebar_open: RwSignal<bool> = RwSignal::new(saved.sidebar_open);
     let sidebar_transient: RwSignal<bool> = RwSignal::new(false);
     let sidebar_ready: RwSignal<bool> = RwSignal::new(false);
@@ -555,6 +729,17 @@ pub fn App() -> impl IntoView {
         RwSignal::new(saved.show_leaderboard_territory_count);
     let show_leaderboard_online: RwSignal<bool> = RwSignal::new(saved.show_leaderboard_online);
     let leaderboard_sort_by_sr: RwSignal<bool> = RwSignal::new(saved.leaderboard_sort_by_sr);
+    let heat_mode_enabled: RwSignal<bool> = RwSignal::new(saved.heat_mode_enabled);
+    let heat_live_source: RwSignal<HeatLiveSource> = RwSignal::new(saved.heat_live_source);
+    let heat_history_basis: RwSignal<HeatHistoryBasis> = RwSignal::new(saved.heat_history_basis);
+    let heat_selected_season_id: RwSignal<Option<i32>> =
+        RwSignal::new(saved.heat_selected_season_id);
+    let heat_entries_by_territory: RwSignal<HashMap<String, u64>> = RwSignal::new(HashMap::new());
+    let heat_max_take_count: RwSignal<u64> = RwSignal::new(0);
+    let heat_fallback_applied: RwSignal<bool> = RwSignal::new(false);
+    let heat_window_label: RwSignal<String> = RwSignal::new(String::new());
+    let heat_meta: RwSignal<Option<HistoryHeatMeta>> = RwSignal::new(None);
+    let heat_refresh_nonce: RwSignal<u64> = RwSignal::new(0);
 
     // History mode signals
     let map_mode: RwSignal<MapMode> = RwSignal::new(MapMode::Live);
@@ -594,9 +779,12 @@ pub fn App() -> impl IntoView {
     provide_context(AbbreviateNames(abbreviate_names));
     provide_context(ShowCountdown(show_countdown));
     provide_context(ShowGranularMapTime(show_granular_map_time));
+    provide_context(ShowCompoundMapTime(show_compound_map_time));
     provide_context(ShowNames(show_names));
     provide_context(ThickCooldownBorders(thick_cooldown_borders));
     provide_context(BoldConnections(bold_connections));
+    provide_context(ConnectionOpacityScale(connection_opacity_scale));
+    provide_context(ConnectionThicknessScale(connection_thickness_scale));
     provide_context(ResourceHighlight(resource_highlight));
     provide_context(ShowResourceIcons(show_resource_icons));
     provide_context(ManualSrScalar(manual_sr_scalar));
@@ -612,6 +800,7 @@ pub fn App() -> impl IntoView {
     provide_context(LabelScaleDynamic(label_scale_dynamic));
     provide_context(LabelScaleIcons(label_scale_icons));
     provide_context(SidebarOpen(sidebar_open));
+    provide_context(SidebarWidth(sidebar_width));
     provide_context(SidebarTransient(sidebar_transient));
     provide_context(SidebarIndex(sidebar_index));
     provide_context(SidebarItems(sidebar_items));
@@ -645,6 +834,15 @@ pub fn App() -> impl IntoView {
     ));
     provide_context(ShowLeaderboardOnline(show_leaderboard_online));
     provide_context(LeaderboardSortBySr(leaderboard_sort_by_sr));
+    provide_context(HeatModeEnabled(heat_mode_enabled));
+    provide_context(HeatLiveSourceSetting(heat_live_source));
+    provide_context(HeatHistoryBasisSetting(heat_history_basis));
+    provide_context(HeatSelectedSeasonId(heat_selected_season_id));
+    provide_context(HeatEntriesByTerritory(heat_entries_by_territory));
+    provide_context(HeatMaxTakeCount(heat_max_take_count));
+    provide_context(HeatFallbackApplied(heat_fallback_applied));
+    provide_context(HeatWindowLabel(heat_window_label));
+    provide_context(HeatMetaState(heat_meta));
 
     // Mutual exclusion: SelectedGuild and Selected clear each other
     Effect::new(move || {
@@ -666,6 +864,183 @@ pub fn App() -> impl IntoView {
         if map_mode.get() == MapMode::Live {
             history_season_scalar_sample.set(None);
             history_season_leaderboard.set(None);
+        }
+    });
+
+    let request_heat_refresh: Rc<dyn Fn(Option<i64>)> = Rc::new({
+        move |at_override: Option<i64>| {
+            if !heat_mode_enabled.get_untracked() {
+                return;
+            }
+
+            let mode_now = map_mode.get_untracked();
+            let (source, at) = if mode_now == MapMode::History {
+                let source = match heat_history_basis.get_untracked() {
+                    HeatHistoryBasis::SeasonCumulative => HistoryHeatSource::Season,
+                    HeatHistoryBasis::AllTimeCumulative => HistoryHeatSource::AllTime,
+                };
+                (source, at_override.or(history_timestamp.get_untracked()))
+            } else {
+                let source = match heat_live_source.get_untracked() {
+                    HeatLiveSource::Season => HistoryHeatSource::Season,
+                    HeatLiveSource::AllTime => HistoryHeatSource::AllTime,
+                };
+                (source, None)
+            };
+
+            let season_id = if source == HistoryHeatSource::Season {
+                heat_selected_season_id.get_untracked()
+            } else {
+                None
+            };
+
+            let request_nonce = heat_refresh_nonce.get_untracked().wrapping_add(1);
+            heat_refresh_nonce.set(request_nonce);
+            wasm_bindgen_futures::spawn_local(async move {
+                match heat::fetch_heat(HeatFetchInput {
+                    source,
+                    season_id,
+                    at,
+                })
+                .await
+                {
+                    Ok(payload) => {
+                        if heat_refresh_nonce.get_untracked() != request_nonce {
+                            return;
+                        }
+                        let entries_map: HashMap<String, u64> = payload
+                            .entries
+                            .iter()
+                            .map(|entry| (entry.territory.clone(), entry.take_count))
+                            .collect();
+                        heat_entries_by_territory.set(entries_map);
+                        heat_max_take_count.set(payload.max_take_count);
+                        heat_fallback_applied.set(payload.fallback_applied);
+                        heat_window_label.set(format_heat_window_label(&payload, mode_now));
+                    }
+                    Err(e) => {
+                        if heat_refresh_nonce.get_untracked() != request_nonce {
+                            return;
+                        }
+                        web_sys::console::warn_1(&format!("heat fetch failed: {e}").into());
+                        heat_entries_by_territory.set(HashMap::new());
+                        heat_max_take_count.set(0);
+                        heat_fallback_applied.set(false);
+                        heat_window_label.set(String::new());
+                    }
+                }
+            });
+        }
+    });
+    // History heat fetch throttling state (leading + trailing calls).
+    let heat_history_refresh_timeout =
+        Rc::new(RefCell::new(None::<gloo_timers::callback::Timeout>));
+    let heat_history_pending_at = Rc::new(Cell::new(None::<i64>));
+    let heat_history_last_refresh_at_ms = Rc::new(Cell::new(0.0));
+
+    Effect::new({
+        let request_heat_refresh = Rc::clone(&request_heat_refresh);
+        move || {
+            if !heat_mode_enabled.get() {
+                heat_entries_by_territory.set(HashMap::new());
+                heat_max_take_count.set(0);
+                heat_fallback_applied.set(false);
+                heat_window_label.set(String::new());
+                return;
+            }
+            if heat_meta.get().is_some() {
+                return;
+            }
+            let request_heat_refresh = Rc::clone(&request_heat_refresh);
+            wasm_bindgen_futures::spawn_local(async move {
+                match heat::fetch_heat_meta().await {
+                    Ok(meta) => {
+                        let selected_before = heat_selected_season_id.get_untracked();
+                        let selected_after =
+                            normalize_heat_selected_season_id(&meta, selected_before);
+                        heat_meta.set(Some(meta));
+                        if selected_after != selected_before {
+                            heat_selected_season_id.set(selected_after);
+                        } else if selected_before.is_none() {
+                            // No valid season id to set; refresh so season mode can fall back server-side.
+                            request_heat_refresh(None);
+                        }
+                    }
+                    Err(e) => {
+                        web_sys::console::warn_1(&format!("heat meta fetch failed: {e}").into());
+                    }
+                }
+            });
+        }
+    });
+
+    Effect::new({
+        let request_heat_refresh = Rc::clone(&request_heat_refresh);
+        let heat_history_refresh_timeout = Rc::clone(&heat_history_refresh_timeout);
+        let heat_history_pending_at = Rc::clone(&heat_history_pending_at);
+        let heat_history_last_refresh_at_ms = Rc::clone(&heat_history_last_refresh_at_ms);
+        move || {
+            if !heat_mode_enabled.get() {
+                if let Some(timeout) = heat_history_refresh_timeout.borrow_mut().take() {
+                    timeout.cancel();
+                }
+                heat_history_pending_at.set(None);
+                return;
+            }
+
+            let mode_now = map_mode.get();
+            heat_live_source.track();
+            heat_history_basis.track();
+            heat_selected_season_id.track();
+            let history_at = history_timestamp.get();
+
+            if mode_now == MapMode::History {
+                let now_ms = js_sys::Date::now();
+                let elapsed_ms = now_ms - heat_history_last_refresh_at_ms.get();
+                if elapsed_ms >= 120.0 && heat_history_refresh_timeout.borrow().is_none() {
+                    heat_history_last_refresh_at_ms.set(now_ms);
+                    request_heat_refresh(history_at);
+                    return;
+                }
+
+                heat_history_pending_at.set(history_at);
+                if heat_history_refresh_timeout.borrow().is_some() {
+                    return;
+                }
+
+                let wait_ms = (120.0 - elapsed_ms).max(0.0).round() as u32;
+                let request_heat_refresh = Rc::clone(&request_heat_refresh);
+                let heat_history_refresh_timeout_cb = Rc::clone(&heat_history_refresh_timeout);
+                let heat_history_pending_at_cb = Rc::clone(&heat_history_pending_at);
+                let heat_history_last_refresh_at_ms_cb =
+                    Rc::clone(&heat_history_last_refresh_at_ms);
+                let timeout = gloo_timers::callback::Timeout::new(wait_ms, move || {
+                    let _ = heat_history_refresh_timeout_cb.borrow_mut().take();
+                    let pending_at = heat_history_pending_at_cb.take();
+                    heat_history_last_refresh_at_ms_cb.set(js_sys::Date::now());
+                    request_heat_refresh(pending_at);
+                });
+                *heat_history_refresh_timeout.borrow_mut() = Some(timeout);
+            } else {
+                if let Some(timeout) = heat_history_refresh_timeout.borrow_mut().take() {
+                    timeout.cancel();
+                }
+                heat_history_pending_at.set(None);
+                heat_history_last_refresh_at_ms.set(0.0);
+                request_heat_refresh(None);
+            }
+        }
+    });
+
+    wasm_bindgen_futures::spawn_local({
+        let request_heat_refresh = Rc::clone(&request_heat_refresh);
+        async move {
+            loop {
+                if heat_mode_enabled.get_untracked() && map_mode.get_untracked() == MapMode::Live {
+                    request_heat_refresh(None);
+                }
+                gloo_timers::future::sleep(std::time::Duration::from_secs(60)).await;
+            }
         }
     });
 
@@ -765,9 +1140,16 @@ pub fn App() -> impl IntoView {
             abbreviate_names: abbreviate_names.get(),
             show_countdown: show_countdown.get(),
             granular_map_time: show_granular_map_time.get(),
+            compound_map_time: show_compound_map_time.get(),
             show_names: show_names.get(),
             thick_cooldown_borders: thick_cooldown_borders.get(),
             bold_connections: bold_connections.get(),
+            connection_opacity_scale: clamp_connection_opacity_scale(
+                connection_opacity_scale.get(),
+            ),
+            connection_thickness_scale: clamp_connection_thickness_scale(
+                connection_thickness_scale.get(),
+            ),
             sidebar_open: sidebar_open.get(),
             resource_highlight: resource_highlight.get(),
             show_resource_icons: show_resource_icons.get(),
@@ -778,6 +1160,10 @@ pub fn App() -> impl IntoView {
             show_leaderboard_territory_count: show_leaderboard_territory_count.get(),
             show_leaderboard_online: show_leaderboard_online.get(),
             leaderboard_sort_by_sr: leaderboard_sort_by_sr.get(),
+            heat_mode_enabled: heat_mode_enabled.get(),
+            heat_live_source: heat_live_source.get(),
+            heat_history_basis: heat_history_basis.get(),
+            heat_selected_season_id: heat_selected_season_id.get(),
             white_guild_tags: white_guild_tags.get(),
             show_minimap: show_minimap.get(),
             name_color: name_color.get(),
@@ -786,6 +1172,7 @@ pub fn App() -> impl IntoView {
             label_scale_static_name: Some(clamp_label_scale_group(label_scale_static_name.get())),
             label_scale_dynamic: clamp_label_scale_group(label_scale_dynamic.get()),
             label_scale_icons: clamp_label_scale_group(label_scale_icons.get()),
+            sidebar_width: clamp_sidebar_width(sidebar_width.get()),
         };
         let _ = gloo_storage::LocalStorage::set("sequoia_settings_v2", &settings);
     });
@@ -1338,6 +1725,13 @@ pub fn App() -> impl IntoView {
                 class="sidebar-wrapper"
                 class:sidebar-ready=move || sidebar_ready.get()
                 class:sidebar-open=move || sidebar_open.get()
+                style:width=move || {
+                    if is_mobile.get() {
+                        "100%".to_string()
+                    } else {
+                        format!("{:.0}px", sidebar_width.get())
+                    }
+                }
                 style:transform=move || {
                     if is_mobile.get() {
                         if sidebar_open.get() { "translateY(0)" } else { "translateY(100%)" }
@@ -1350,6 +1744,7 @@ pub fn App() -> impl IntoView {
                 style:pointer-events=move || if sidebar_open.get() { "auto" } else { "none" }
             >
                 <BottomSheetHandle />
+                <SidebarResizeHandle />
                 <SidebarToggle />
                 {move || {
                     if sidebar_loaded.get() {
@@ -1411,6 +1806,86 @@ fn SidebarToggle() -> impl IntoView {
         >
             {move || if sidebar_open.get() { "\u{00BB}" } else { "\u{00AB}" }}
         </button>
+    }
+}
+
+#[component]
+fn SidebarResizeHandle() -> impl IntoView {
+    let SidebarOpen(sidebar_open) = expect_context();
+    let SidebarWidth(sidebar_width) = expect_context();
+    let IsMobile(is_mobile) = expect_context();
+
+    let drag_start_x = Rc::new(std::cell::Cell::new(0.0f64));
+    let drag_start_width = Rc::new(std::cell::Cell::new(0.0f64));
+    let dragging: RwSignal<bool> = RwSignal::new(false);
+    let active_pointer_id = Rc::new(std::cell::Cell::new(None::<i32>));
+
+    let drag_start_x_down = drag_start_x.clone();
+    let drag_start_width_down = drag_start_width.clone();
+    let active_pointer_id_down = active_pointer_id.clone();
+    let drag_start_x_move = drag_start_x.clone();
+    let drag_start_width_move = drag_start_width.clone();
+    let active_pointer_id_move = active_pointer_id.clone();
+    let active_pointer_id_end = active_pointer_id.clone();
+
+    let end_drag: Rc<dyn Fn(web_sys::PointerEvent)> = Rc::new(move |e: web_sys::PointerEvent| {
+        if active_pointer_id_end.get() != Some(e.pointer_id()) {
+            return;
+        }
+        dragging.set(false);
+        active_pointer_id_end.set(None);
+        if let Some(target) = e
+            .target()
+            .and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok())
+        {
+            target.release_pointer_capture(e.pointer_id()).ok();
+        }
+    });
+
+    let end_drag_up = end_drag.clone();
+    let end_drag_cancel = end_drag.clone();
+
+    view! {
+        <div
+            class="sidebar-resize-handle"
+            class:sidebar-resize-active=move || dragging.get()
+            style:display=move || {
+                if !is_mobile.get() && sidebar_open.get() {
+                    "block"
+                } else {
+                    "none"
+                }
+            }
+            on:pointerdown=move |e: web_sys::PointerEvent| {
+                if !e.is_primary() || e.button() != 0 || is_mobile.get_untracked() || !sidebar_open.get_untracked() {
+                    return;
+                }
+                e.prevent_default();
+                dragging.set(true);
+                active_pointer_id_down.set(Some(e.pointer_id()));
+                drag_start_x_down.set(e.client_x() as f64);
+                drag_start_width_down.set(sidebar_width.get_untracked());
+                if let Some(target) = e.target().and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok()) {
+                    target.set_pointer_capture(e.pointer_id()).ok();
+                }
+            }
+            on:pointermove=move |e: web_sys::PointerEvent| {
+                if !dragging.get_untracked() || active_pointer_id_move.get() != Some(e.pointer_id()) {
+                    return;
+                }
+                e.prevent_default();
+                let next_width = clamp_sidebar_width(
+                    drag_start_width_move.get() + (drag_start_x_move.get() - e.client_x() as f64),
+                );
+                sidebar_width.set(next_width);
+            }
+            on:pointerup=move |e: web_sys::PointerEvent| {
+                end_drag_up(e);
+            }
+            on:pointercancel=move |e: web_sys::PointerEvent| {
+                end_drag_cancel(e);
+            }
+        />
     }
 }
 
@@ -1575,6 +2050,8 @@ fn Tooltip() -> impl IntoView {
     let CurrentMode(mode) = expect_context();
     let HistoryTimestamp(history_timestamp) = expect_context();
     let AbbreviateNames(abbreviate_names) = expect_context();
+    let HeatModeEnabled(heat_mode_enabled) = expect_context();
+    let HeatEntriesByTerritory(heat_entries_by_territory) = expect_context();
 
     let tooltip_info = Memo::new(move |_| {
         let reference_secs = if mode.get() == MapMode::History {
@@ -1587,6 +2064,17 @@ fn Tooltip() -> impl IntoView {
         let ct = map.get(&name)?;
         let (r, g, b) = ct.guild_color;
         let resources = ct.territory.resources.clone();
+        let takes_in_window = if heat_mode_enabled.get() {
+            Some(
+                heat_entries_by_territory
+                    .get()
+                    .get(&name)
+                    .copied()
+                    .unwrap_or(0),
+            )
+        } else {
+            None
+        };
         let acquired = ct.territory.acquired.to_rfc3339();
         let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&acquired) else {
             let treasury = TreasuryLevel::VeryLow;
@@ -1599,6 +2087,7 @@ fn Tooltip() -> impl IntoView {
                 None::<(String, f64)>,
                 treasury,
                 resources,
+                takes_in_window,
             ));
         };
         let secs = (reference_secs - dt.timestamp()).max(0);
@@ -1620,6 +2109,7 @@ fn Tooltip() -> impl IntoView {
             cooldown,
             treasury,
             resources,
+            takes_in_window,
         ))
     });
 
@@ -1633,6 +2123,7 @@ fn Tooltip() -> impl IntoView {
             let cooldown = info.5;
             let treasury = info.6;
             let resources = info.7;
+            let takes_in_window = info.8;
             let (tr, tg, tb) = treasury.color_rgb();
             let buff = treasury.buff_percent();
             view! {
@@ -1655,6 +2146,12 @@ fn Tooltip() -> impl IntoView {
                             <span style="color: #9a9590; font-family: 'Inter', system-ui, sans-serif;">"Held"</span>
                             <span style="color: #e2e0d8; font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums;">{info.3}</span>
                         </div>
+                        {takes_in_window.map(|count| view! {
+                            <div style="font-size: 0.65rem; margin-top: 3px; padding-top: 3px; border-top: 1px solid rgba(40,44,62,0.5); display: flex; justify-content: space-between; align-items: center; gap: 8px;">
+                                <span style="color: #9a9590; font-family: 'Inter', system-ui, sans-serif;">"Takes in window"</span>
+                                <span style="color: #e2e0d8; font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums;">{count}</span>
+                            </div>
+                        })}
                         <div style="font-size: 0.65rem; font-family: 'JetBrains Mono', monospace; margin-top: 3px; padding-top: 3px; border-top: 1px solid rgba(40,44,62,0.5); display: flex; align-items: center; gap: 4px;">
                             <span style={format!("color: {}; font-size: 0.5rem;", rgba_css(tr, tg, tb, 1.0))}>{"\u{25C6}"}</span>
                             <span style={format!("color: {};", rgba_css(tr, tg, tb, 0.9))}>{treasury.label()}</span>
@@ -1733,6 +2230,8 @@ fn TerritoryPeekCard() -> impl IntoView {
     let HistoryTimestamp(history_timestamp) = expect_context();
     let Selected(selected) = expect_context();
     let SidebarOpen(sidebar_open) = expect_context();
+    let HeatModeEnabled(heat_mode_enabled) = expect_context();
+    let HeatEntriesByTerritory(heat_entries_by_territory) = expect_context();
 
     let peek_info = Memo::new(move |_| {
         let reference_secs = if mode.get() == MapMode::History {
@@ -1744,6 +2243,17 @@ fn TerritoryPeekCard() -> impl IntoView {
         let map = territories.get();
         let ct = map.get(&name)?;
         let (r, g, b) = ct.guild_color;
+        let takes_in_window = if heat_mode_enabled.get() {
+            Some(
+                heat_entries_by_territory
+                    .get()
+                    .get(&name)
+                    .copied()
+                    .unwrap_or(0),
+            )
+        } else {
+            None
+        };
         let acquired = ct.territory.acquired.to_rfc3339();
         let secs = chrono::DateTime::parse_from_rfc3339(&acquired)
             .map(|dt| (reference_secs - dt.timestamp()).max(0))
@@ -1757,6 +2267,7 @@ fn TerritoryPeekCard() -> impl IntoView {
             held,
             (r, g, b),
             treasury,
+            takes_in_window,
         ))
     });
 
@@ -1767,6 +2278,7 @@ fn TerritoryPeekCard() -> impl IntoView {
             };
             let (r, g, b) = info.4;
             let treasury = info.5;
+            let takes_in_window = info.6;
             let (tr, tg, tb) = treasury.color_rgb();
             let name = info.0.clone();
             let is_history = mode.get_untracked() == MapMode::History;
@@ -1790,6 +2302,12 @@ fn TerritoryPeekCard() -> impl IntoView {
                             <span style="color: #9a9590; font-family: 'Inter', system-ui, sans-serif;">"Held"</span>
                             <span style="color: #e2e0d8; font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums;">{info.3}</span>
                         </div>
+                        {takes_in_window.map(|count| view! {
+                            <div style="font-size: 0.68rem; display: flex; justify-content: space-between; align-items: center; gap: 8px;">
+                                <span style="color: #9a9590; font-family: 'Inter', system-ui, sans-serif;">"Takes in window"</span>
+                                <span style="color: #e2e0d8; font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums;">{count}</span>
+                            </div>
+                        })}
                         <div style="font-size: 0.68rem; font-family: 'JetBrains Mono', monospace; display: flex; align-items: center; gap: 4px;">
                             <span style={format!("color: {}; font-size: 0.52rem;", rgba_css(tr, tg, tb, 1.0))}>{"\u{25C6}"}</span>
                             <span style={format!("color: {};", rgba_css(tr, tg, tb, 0.9))}>{treasury.label()}</span>
@@ -1808,5 +2326,87 @@ fn TerritoryPeekCard() -> impl IntoView {
                 </div>
             }.into_any()
         }}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DEFAULT_SIDEBAR_WIDTH, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN, SettingsV2,
+        clamp_sidebar_width, normalize_heat_selected_season_id,
+    };
+    use sequoia_shared::history::{HistoryHeatMeta, HistoryHeatSeasonWindow};
+
+    #[test]
+    fn clamp_sidebar_width_enforces_limits() {
+        assert_eq!(clamp_sidebar_width(240.0), SIDEBAR_WIDTH_MIN);
+        assert_eq!(clamp_sidebar_width(420.0), 420.0);
+        assert_eq!(clamp_sidebar_width(900.0), SIDEBAR_WIDTH_MAX);
+    }
+
+    #[test]
+    fn settings_v2_deserialization_defaults_sidebar_width() {
+        let parsed: SettingsV2 = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(parsed.sidebar_width, DEFAULT_SIDEBAR_WIDTH);
+    }
+
+    #[test]
+    fn normalize_heat_selected_season_id_keeps_valid_saved_selection() {
+        let meta = HistoryHeatMeta {
+            latest_season_id: Some(31),
+            seasons: vec![
+                HistoryHeatSeasonWindow {
+                    season_id: 31,
+                    start: "2026-01-01T00:00:00Z".to_string(),
+                    end: "2026-01-08T00:00:00Z".to_string(),
+                    is_current: true,
+                },
+                HistoryHeatSeasonWindow {
+                    season_id: 30,
+                    start: "2025-12-24T00:00:00Z".to_string(),
+                    end: "2025-12-31T00:00:00Z".to_string(),
+                    is_current: false,
+                },
+            ],
+            all_time_earliest: None,
+            retention_days: 30,
+            season_fallback_days: 60,
+        };
+
+        assert_eq!(normalize_heat_selected_season_id(&meta, Some(30)), Some(30));
+    }
+
+    #[test]
+    fn normalize_heat_selected_season_id_replaces_invalid_saved_selection() {
+        let meta = HistoryHeatMeta {
+            latest_season_id: Some(31),
+            seasons: vec![HistoryHeatSeasonWindow {
+                season_id: 31,
+                start: "2026-01-01T00:00:00Z".to_string(),
+                end: "2026-01-08T00:00:00Z".to_string(),
+                is_current: true,
+            }],
+            all_time_earliest: None,
+            retention_days: 30,
+            season_fallback_days: 60,
+        };
+
+        assert_eq!(
+            normalize_heat_selected_season_id(&meta, Some(999)),
+            Some(31)
+        );
+    }
+
+    #[test]
+    fn normalize_heat_selected_season_id_returns_none_without_valid_latest() {
+        let meta = HistoryHeatMeta {
+            latest_season_id: Some(31),
+            seasons: vec![],
+            all_time_earliest: None,
+            retention_days: 30,
+            season_fallback_days: 60,
+        };
+
+        assert_eq!(normalize_heat_selected_season_id(&meta, Some(999)), None);
     }
 }
