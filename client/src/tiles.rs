@@ -111,6 +111,30 @@ pub enum StartupTileMode {
     ProgressiveLowToHigh,
 }
 
+fn select_startup_tile_mode(
+    save_data: bool,
+    effective_type: Option<&str>,
+    downlink_mbps: f64,
+) -> StartupTileMode {
+    if save_data {
+        return StartupTileMode::LowOnly;
+    }
+
+    match effective_type {
+        Some("slow-2g" | "2g" | "3g") => StartupTileMode::LowOnly,
+        Some("4g") => {
+            if downlink_mbps >= 8.0 {
+                StartupTileMode::HighOnly
+            } else {
+                StartupTileMode::ProgressiveLowToHigh
+            }
+        }
+        // If NetworkInformation is unavailable or unknown, avoid getting stuck in
+        // low-res tiles forever: start low and upgrade to high in background.
+        _ => StartupTileMode::ProgressiveLowToHigh,
+    }
+}
+
 struct LoadPhase {
     jobs: VecDeque<LoadJob>,
     max_concurrency: usize,
@@ -196,14 +220,14 @@ pub fn fetch_tiles(tiles_signal: RwSignal<Vec<LoadedTile>>, context: TileFetchCo
 
 fn detect_startup_tile_mode() -> StartupTileMode {
     let Some(window) = web_sys::window() else {
-        return StartupTileMode::LowOnly;
+        return StartupTileMode::ProgressiveLowToHigh;
     };
 
     let Ok(navigator) = Reflect::get(window.as_ref(), &JsValue::from_str("navigator")) else {
-        return StartupTileMode::LowOnly;
+        return StartupTileMode::ProgressiveLowToHigh;
     };
     let Ok(connection) = Reflect::get(&navigator, &JsValue::from_str("connection")) else {
-        return StartupTileMode::LowOnly;
+        return StartupTileMode::ProgressiveLowToHigh;
     };
 
     let save_data = Reflect::get(&connection, &JsValue::from_str("saveData"))
@@ -219,21 +243,12 @@ fn detect_startup_tile_mode() -> StartupTileMode {
         .and_then(|value| value.as_string())
         .map(|value| value.to_ascii_lowercase());
 
-    match effective_type.as_deref() {
-        Some("slow-2g" | "2g" | "3g") => StartupTileMode::LowOnly,
-        Some("4g") => {
-            let downlink_mbps = Reflect::get(&connection, &JsValue::from_str("downlink"))
-                .ok()
-                .and_then(|value| value.as_f64())
-                .unwrap_or(0.0);
-            if downlink_mbps >= 8.0 {
-                StartupTileMode::HighOnly
-            } else {
-                StartupTileMode::ProgressiveLowToHigh
-            }
-        }
-        _ => StartupTileMode::LowOnly,
-    }
+    let downlink_mbps = Reflect::get(&connection, &JsValue::from_str("downlink"))
+        .ok()
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0);
+
+    select_startup_tile_mode(save_data, effective_type.as_deref(), downlink_mbps)
 }
 
 fn start_phased_queues(tiles_signal: RwSignal<Vec<LoadedTile>>, phases: Vec<LoadPhase>) {
@@ -571,4 +586,45 @@ fn upsert_tile(tiles_signal: RwSignal<Vec<LoadedTile>>, incoming: LoadedTile) {
         loaded.push(incoming);
         loaded.sort_by_key(|tile| tile.id);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{StartupTileMode, select_startup_tile_mode};
+
+    #[test]
+    fn startup_mode_honors_data_saver() {
+        assert_eq!(
+            select_startup_tile_mode(true, Some("4g"), 100.0),
+            StartupTileMode::LowOnly
+        );
+    }
+
+    #[test]
+    fn startup_mode_uses_low_only_on_slow_links() {
+        assert_eq!(
+            select_startup_tile_mode(false, Some("3g"), 20.0),
+            StartupTileMode::LowOnly
+        );
+    }
+
+    #[test]
+    fn startup_mode_uses_high_only_on_fast_4g() {
+        assert_eq!(
+            select_startup_tile_mode(false, Some("4g"), 9.0),
+            StartupTileMode::HighOnly
+        );
+    }
+
+    #[test]
+    fn startup_mode_uses_progressive_when_network_info_is_unknown() {
+        assert_eq!(
+            select_startup_tile_mode(false, None, 0.0),
+            StartupTileMode::ProgressiveLowToHigh
+        );
+        assert_eq!(
+            select_startup_tile_mode(false, Some("wifi"), 100.0),
+            StartupTileMode::ProgressiveLowToHigh
+        );
+    }
 }
