@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS idx_season_guild_observations_name_observed_desc;

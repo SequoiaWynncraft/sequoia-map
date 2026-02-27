@@ -1,3 +1,5 @@
+#![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -13,6 +15,10 @@ use web_sys::HtmlImageElement;
 const HQ_CONCURRENCY: usize = 6;
 const LQ_CONCURRENCY: usize = 6;
 const HQ_UPGRADE_CONCURRENCY: usize = 2;
+const INITIAL_VIEW_CENTER_X: f64 = -300.0;
+const INITIAL_VIEW_CENTER_Z: f64 = -3100.0;
+const ONLOAD_HANDLE_KEY: &str = "__sequoiaTileOnload";
+const ONERROR_HANDLE_KEY: &str = "__sequoiaTileOnerror";
 
 type IdleCallback = Rc<dyn Fn()>;
 type SharedIdleCallback = Rc<RefCell<Option<IdleCallback>>>;
@@ -138,7 +144,7 @@ fn detect_startup_tile_mode() -> StartupTileMode {
 }
 
 fn make_jobs(quality: TileQuality) -> VecDeque<LoadJob> {
-    TILES
+    let mut jobs: Vec<_> = TILES
         .iter()
         .enumerate()
         .map(|(id, &(filename, x1, z1, x2, z2))| LoadJob {
@@ -150,7 +156,23 @@ fn make_jobs(quality: TileQuality) -> VecDeque<LoadJob> {
             x2,
             z2,
         })
-        .collect()
+        .collect();
+
+    jobs.sort_by(|a, b| {
+        distance_sq_to_initial_view(a)
+            .total_cmp(&distance_sq_to_initial_view(b))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    jobs.into()
+}
+
+fn distance_sq_to_initial_view(job: &LoadJob) -> f64 {
+    let center_x = (job.x1 as f64 + job.x2 as f64) * 0.5;
+    let center_z = (job.z1 as f64 + job.z2 as f64) * 0.5;
+    let dx = center_x - INITIAL_VIEW_CENTER_X;
+    let dz = center_z - INITIAL_VIEW_CENTER_Z;
+    dx * dx + dz * dz
 }
 
 fn start_queue(
@@ -220,10 +242,12 @@ fn load_tile_job(tiles_signal: RwSignal<Vec<LoadedTile>>, job: LoadJob, on_done:
         }
     };
 
-    let img_for_decode = img.clone();
+    let img_for_load = img.clone();
     let on_done_load = on_done.clone();
-    let onload = Closure::<dyn Fn()>::new(move || {
-        let img_for_decode = img_for_decode.clone();
+    let onload = Closure::<dyn FnMut()>::new(move || {
+        clear_image_handlers(&img_for_load);
+
+        let img_for_decode = img_for_load.clone();
         let on_done_load = on_done_load.clone();
 
         wasm_bindgen_futures::spawn_local(async move {
@@ -244,16 +268,35 @@ fn load_tile_job(tiles_signal: RwSignal<Vec<LoadedTile>>, job: LoadJob, on_done:
         });
     });
 
+    let img_for_error = img.clone();
     let on_done_error = on_done.clone();
-    let onerror = Closure::<dyn Fn()>::new(move || {
+    let onerror = Closure::<dyn FnMut()>::new(move || {
+        clear_image_handlers(&img_for_error);
         on_done_error();
     });
 
-    img.set_onload(Some(onload.as_ref().unchecked_ref()));
-    img.set_onerror(Some(onerror.as_ref().unchecked_ref()));
-    onload.forget();
-    onerror.forget();
+    let onload_js = onload.into_js_value();
+    let onerror_js = onerror.into_js_value();
+    img.set_onload(Some(onload_js.unchecked_ref()));
+    img.set_onerror(Some(onerror_js.unchecked_ref()));
+    let _ = Reflect::set(
+        img.as_ref(),
+        &JsValue::from_str(ONLOAD_HANDLE_KEY),
+        &onload_js,
+    );
+    let _ = Reflect::set(
+        img.as_ref(),
+        &JsValue::from_str(ONERROR_HANDLE_KEY),
+        &onerror_js,
+    );
     img.set_src(&src);
+}
+
+fn clear_image_handlers(img: &HtmlImageElement) {
+    img.set_onload(None);
+    img.set_onerror(None);
+    let _ = Reflect::delete_property(img.as_ref(), &JsValue::from_str(ONLOAD_HANDLE_KEY));
+    let _ = Reflect::delete_property(img.as_ref(), &JsValue::from_str(ONERROR_HANDLE_KEY));
 }
 
 fn tile_src(filename: &str, quality: TileQuality) -> String {

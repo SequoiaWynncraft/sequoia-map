@@ -11,6 +11,9 @@ pub const ATHENA_REFRESH_SECS: u64 = 600; // 10 minutes
 
 pub const POLL_INTERVAL_SECS: u64 = 10;
 pub const GUILD_CACHE_TTL_SECS: i64 = 600; // 10 minutes
+pub const DEFAULT_GUILDS_ONLINE_CACHE_TTL_SECS: i64 = 120; // 2 minutes
+pub const DEFAULT_GUILDS_ONLINE_MAX_CONCURRENCY: usize = 8;
+pub const MAX_GUILD_CACHE_ENTRIES: usize = 64;
 pub const SSE_KEEPALIVE_SECS: u64 = 15;
 pub const DEFAULT_BROADCAST_BUFFER: usize = 256;
 pub const DEFAULT_DB_MAX_CONNECTIONS: u32 = 10;
@@ -19,7 +22,7 @@ pub const DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECS: u64 = 3;
 pub const SERVER_PORT: u16 = 3000;
 
 // History feature
-pub const SNAPSHOT_INTERVAL_SECS: u64 = 3600; // hourly
+pub const SNAPSHOT_INTERVAL_SECS: u64 = 21600; // every 6 hours
 pub const RETENTION_DAYS: i64 = 365;
 pub const RETENTION_CHECK_SECS: u64 = 86400; // daily
 
@@ -65,4 +68,20 @@ pub fn upstream_connect_timeout() -> Duration {
         .filter(|value| *value > 0)
         .map(Duration::from_secs)
         .unwrap_or_else(|| Duration::from_secs(DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECS))
+}
+
+pub fn guilds_online_cache_ttl_secs() -> i64 {
+    std::env::var("GUILDS_ONLINE_CACHE_TTL_SECS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_GUILDS_ONLINE_CACHE_TTL_SECS)
+}
+
+pub fn guilds_online_max_concurrency() -> usize {
+    std::env::var("GUILDS_ONLINE_MAX_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_GUILDS_ONLINE_MAX_CONCURRENCY)
 }

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
@@ -5,7 +7,9 @@ use sequoia_shared::tower::{
     self, ATTACK_RATES, AURA_LABELS, DAMAGES, DEFENSES, HEALTHS, VOLLEY_LABELS,
 };
 
+use crate::app::Selected;
 use crate::colors::rgba_css;
+use crate::territory::ClientTerritoryMap;
 
 /// Persistent tower calculator state, provided via context so stats survive territory switches.
 #[derive(Clone, Copy)]
@@ -40,6 +44,9 @@ impl TowerState {
 /// Tower calculator component for the sidebar detail panel.
 #[component]
 pub fn TowerCalculator() -> impl IntoView {
+    let Selected(selected) = expect_context();
+    let territories: RwSignal<ClientTerritoryMap> = expect_context();
+
     let TowerState {
         damage_lvl,
         attack_lvl,
@@ -114,6 +121,50 @@ pub fn TowerCalculator() -> impl IntoView {
         }
     };
 
+    let owned_counts = Memo::new(move |_| {
+        let name = selected.get()?;
+        let map = territories.get();
+        let ct = map.get(&name)?;
+        let guild_uuid = ct.territory.guild.uuid.as_str();
+        let connections_slice = ct.territory.connections.as_slice();
+
+        let (guild_conn, _total_conn, ext) =
+            tower::count_guild_connections(&name, connections_slice, guild_uuid, |n| {
+                let ct2 = map.get(n)?;
+                Some((
+                    ct2.territory.guild.uuid.as_str(),
+                    ct2.territory.connections.as_slice(),
+                ))
+            });
+        Some((guild_conn, ext))
+    });
+
+    let owned_counts_for_apply = owned_counts;
+    let on_reset_owned = move |_| {
+        if let Some((guild_conn, ext)) = owned_counts_for_apply.get_untracked() {
+            connections.set(guild_conn);
+            externals.set(ext);
+        }
+    };
+
+    let selected_for_all_ext = selected;
+    let territories_for_all_ext = territories;
+    let on_apply_all_externals = move |_| {
+        let Some(name) = selected_for_all_ext.get_untracked() else {
+            return;
+        };
+        let map = territories_for_all_ext.get_untracked();
+        if !map.contains_key(&name) {
+            return;
+        }
+        let connections_map: HashMap<String, Vec<String>> = map
+            .iter()
+            .map(|(territory, ct)| (territory.clone(), ct.territory.connections.clone()))
+            .collect();
+        let all_ext = tower::find_externals(&name, &connections_map, 3).len() as u32;
+        externals.set(all_ext);
+    };
+
     view! {
         <div style="padding: 10px 0 4px;">
             <div style="font-family: 'Silkscreen', monospace; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.12em; color: #5a5860; margin-bottom: 10px;">
@@ -169,6 +220,47 @@ pub fn TowerCalculator() -> impl IntoView {
                     <span style="font-family: 'Inter', system-ui, sans-serif; font-size: 0.62rem; color: #5a5860; white-space: nowrap;">"Ext"</span>
                     <CounterInput value=externals max=50 />
                 </div>
+            </div>
+
+            <div style="display: flex; gap: 6px; margin-top: -2px; margin-bottom: 8px;">
+                <button
+                    title="Reset Conn/Ext to guild-owned values"
+                    style="flex: 1; padding: 4px 0; border-radius: 4px; border: 1px solid #282c3e; background: #1a1d2a; color: #9a9590; font-family: 'Silkscreen', monospace; font-size: 0.56rem; cursor: pointer; text-transform: uppercase; letter-spacing: 0.1em; transition: border-color 0.15s, color 0.15s, background 0.15s;"
+                    on:click=on_reset_owned
+                    on:mouseenter=|e| {
+                        if let Some(el) = e.target().and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok()) {
+                            el.style().set_property("border-color", "rgba(245,197,66,0.35)").ok();
+                            el.style().set_property("color", "#f5c542").ok();
+                            el.style().set_property("background", "rgba(245,197,66,0.08)").ok();
+                        }
+                    }
+                    on:mouseleave=|e| {
+                        if let Some(el) = e.target().and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok()) {
+                            el.style().set_property("border-color", "#282c3e").ok();
+                            el.style().set_property("color", "#9a9590").ok();
+                            el.style().set_property("background", "#1a1d2a").ok();
+                        }
+                    }
+                >"Reset"</button>
+                <button
+                    title="Set Ext to all territories reachable in 3 hops (ignores ownership)"
+                    style="flex: 1; padding: 4px 0; border-radius: 4px; border: 1px solid #282c3e; background: #1a1d2a; color: #9a9590; font-family: 'Silkscreen', monospace; font-size: 0.56rem; cursor: pointer; text-transform: uppercase; letter-spacing: 0.1em; transition: border-color 0.15s, color 0.15s, background 0.15s;"
+                    on:click=on_apply_all_externals
+                    on:mouseenter=|e| {
+                        if let Some(el) = e.target().and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok()) {
+                            el.style().set_property("border-color", "rgba(80,200,220,0.45)").ok();
+                            el.style().set_property("color", "#50c8dc").ok();
+                            el.style().set_property("background", "rgba(80,200,220,0.08)").ok();
+                        }
+                    }
+                    on:mouseleave=|e| {
+                        if let Some(el) = e.target().and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok()) {
+                            el.style().set_property("border-color", "#282c3e").ok();
+                            el.style().set_property("color", "#9a9590").ok();
+                            el.style().set_property("background", "#1a1d2a").ok();
+                        }
+                    }
+                >"All Ext"</button>
             </div>
 
             // Computed results

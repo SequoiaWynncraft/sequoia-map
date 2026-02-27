@@ -8,22 +8,25 @@
     <link data-trunk rel="copy-dir" href="public/tiles" />
     <link data-trunk rel="copy-dir" href="public/icons" />
     <link data-trunk rel="copy-dir" href="public/fonts" />
-    <link rel="preload" href="/fonts/silkscreen-regular.ttf" as="font" type="font/ttf" crossorigin />
+    <link rel="preload" href="/fonts/silkscreen-regular.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/icons/territory-resources-atlas.png" as="image" />
     <style>
       @font-face {
         font-family: "Silkscreen";
-        src: url("/fonts/silkscreen-regular.ttf") format("truetype");
+        src: url("/fonts/silkscreen-regular.woff2") format("woff2"),
+             url("/fonts/silkscreen-regular.ttf") format("truetype");
         font-style: normal;
         font-weight: 400;
-        font-display: block;
+        font-display: swap;
       }
       @font-face {
         font-family: "SilkscreenLocal";
         src: local("Silkscreen"),
+             url("/fonts/silkscreen-regular.woff2") format("woff2"),
              url("/fonts/silkscreen-regular.ttf") format("truetype");
         font-style: normal;
         font-weight: 400;
-        font-display: block;
+        font-display: swap;
       }
       html, body, #app { width: 100%; height: 100%; margin: 0; }
       body {

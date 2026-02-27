@@ -193,3 +193,63 @@ impl Region {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Resources;
+
+    #[test]
+    fn highlight_data_mode0_no_resources() {
+        let resources = Resources::default();
+        assert_eq!(resources.highlight_data(), [0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn highlight_data_mode0_only_double_emeralds() {
+        let resources = Resources {
+            emeralds: 18_000,
+            ..Resources::default()
+        };
+        assert_eq!(resources.highlight_data(), [0.0, 0.0, 0.0, 1024.0]);
+    }
+
+    #[test]
+    fn highlight_data_mode1_single_resource() {
+        let resources = Resources {
+            ore: 1,
+            ..Resources::default()
+        };
+        assert_eq!(resources.highlight_data(), [1.0, 1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn highlight_data_mode1_single_double_resource() {
+        let resources = Resources {
+            ore: 7_200,
+            ..Resources::default()
+        };
+        assert_eq!(resources.highlight_data(), [1.0, 1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn highlight_data_mode2_two_resources_with_doubles() {
+        let resources = Resources {
+            ore: 7_200,
+            fish: 7_200,
+            ..Resources::default()
+        };
+        assert_eq!(resources.highlight_data(), [2.0, 1.0, 3.0, 3.0]);
+    }
+
+    #[test]
+    fn highlight_data_mode3_three_plus_resources_stripe_mask() {
+        let resources = Resources {
+            emeralds: 18_000,
+            ore: 7_200,
+            crops: 100,
+            wood: 7_200,
+            ..Resources::default()
+        };
+        assert_eq!(resources.highlight_data(), [3.0, 0.0, 0.0, 1_622.0]);
+    }
+}

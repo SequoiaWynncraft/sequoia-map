@@ -188,7 +188,9 @@ pub fn connect(territories: RwSignal<ClientTerritoryMap>, connection: RwSignal<C
     // On open
     let conn = connection;
     let on_open = Closure::<dyn Fn()>::new(move || {
-        conn.set(ConnectionStatus::Live);
+        if conn.get_untracked() != ConnectionStatus::Live {
+            conn.set(ConnectionStatus::Live);
+        }
         if mode.get_untracked() == MapMode::Live && needs_live_resync.get_untracked() {
             trigger_live_resync(
                 mode,
@@ -339,8 +341,12 @@ pub fn connect(territories: RwSignal<ClientTerritoryMap>, connection: RwSignal<C
     // On error
     let conn = connection;
     let on_error = Closure::<dyn Fn()>::new(move || {
-        conn.set(ConnectionStatus::Reconnecting);
-        needs_live_resync.set(true);
+        if conn.get_untracked() != ConnectionStatus::Reconnecting {
+            conn.set(ConnectionStatus::Reconnecting);
+        }
+        if !needs_live_resync.get_untracked() {
+            needs_live_resync.set(true);
+        }
     });
     es.set_onerror(Some(on_error.as_ref().unchecked_ref()));
 

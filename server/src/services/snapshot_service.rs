@@ -1,20 +1,9 @@
-use std::collections::HashMap;
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::config::SNAPSHOT_INTERVAL_SECS;
 use crate::state::AppState;
-
-/// Compact ownership record stored in snapshot JSONB.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OwnershipEntry {
-    guild_uuid: String,
-    guild_name: String,
-    guild_prefix: String,
-    acquired_at: String,
-}
 
 /// Periodically takes ownership snapshots for efficient historical reconstruction.
 pub async fn run(state: AppState) {
@@ -41,43 +30,24 @@ pub async fn run(state: AppState) {
 }
 
 async fn run_snapshot_once(state: &AppState, pool: &sqlx::PgPool) {
-    let territories = state.live_snapshot.read().await;
-    if territories.territories.is_empty() {
-        return;
-    }
-
-    // Build compact ownership map (strip resources/connections/location)
-    let ownership: HashMap<String, OwnershipEntry> = territories
-        .territories
-        .iter()
-        .map(|(name, terr)| {
-            (
-                name.clone(),
-                OwnershipEntry {
-                    guild_uuid: terr.guild.uuid.clone(),
-                    guild_name: terr.guild.name.clone(),
-                    guild_prefix: terr.guild.prefix.clone(),
-                    acquired_at: terr.acquired.to_rfc3339(),
-                },
-            )
-        })
-        .collect();
-    drop(territories);
-
-    let ownership_json = match serde_json::to_value(&ownership) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!("Failed to serialize ownership snapshot: {e}");
+    let (territory_count, ownership_json) = {
+        let snapshot = state.live_snapshot.read().await;
+        if snapshot.territories.is_empty() {
             return;
         }
+        (snapshot.territories.len(), snapshot.ownership_json.clone())
+    };
+    let Ok(ownership_json_str) = std::str::from_utf8(ownership_json.as_ref()) else {
+        warn!("Failed to decode pre-serialized ownership snapshot as UTF-8");
+        return;
     };
 
-    match sqlx::query("INSERT INTO territory_snapshots (ownership) VALUES ($1)")
-        .bind(&ownership_json)
+    match sqlx::query("INSERT INTO territory_snapshots (ownership) VALUES ($1::jsonb)")
+        .bind(ownership_json_str)
         .execute(pool)
         .await
     {
-        Ok(_) => info!("Saved ownership snapshot ({} territories)", ownership.len()),
+        Ok(_) => info!("Saved ownership snapshot ({} territories)", territory_count),
         Err(e) => warn!("Failed to insert snapshot: {e}"),
     }
 }

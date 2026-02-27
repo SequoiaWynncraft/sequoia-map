@@ -1,13 +1,31 @@
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
-use sequoia_shared::history::{HistoryBounds, HistorySnapshot};
-use sequoia_shared::{GuildRef, LiveState, Territory, TerritoryMap};
+use sequoia_shared::history::{HistoryBounds, HistoryGuildSrEntry, HistorySnapshot};
+use sequoia_shared::{GuildRef, LiveState, SeasonScalarSample, Territory, TerritoryMap};
 
 use crate::app::{BufferedUpdate, GuildColorMap, MapMode, TerritoryGeometryMap};
 use crate::territory::{ClientTerritoryMap, apply_changes, from_snapshot};
 
 const MAX_BUFFERED_UPDATES: usize = 20_000;
+
+#[derive(Clone, Copy)]
+pub struct HistoryFetchContext {
+    pub mode: RwSignal<MapMode>,
+    pub history_fetch_nonce: RwSignal<u64>,
+    pub history_scalar_sample: RwSignal<Option<SeasonScalarSample>>,
+    pub history_sr_leaderboard: RwSignal<Option<Vec<HistoryGuildSrEntry>>>,
+    pub geo_store: StoredValue<TerritoryGeometryMap>,
+    pub guild_color_store: StoredValue<GuildColorMap>,
+    pub territories: RwSignal<ClientTerritoryMap>,
+}
+
+#[derive(Clone, Copy)]
+pub struct HistoryStepContext {
+    pub history_timestamp: RwSignal<Option<i64>>,
+    pub playback_active: RwSignal<bool>,
+    pub fetch: HistoryFetchContext,
+}
 
 /// Check if history features are available by querying /api/health.
 pub fn check_availability(available: RwSignal<bool>) {
@@ -118,7 +136,9 @@ pub fn merge_with_static(
                     uuid: record.guild_uuid.clone(),
                     name: record.guild_name.clone(),
                     prefix: record.guild_prefix.clone(),
-                    color: guild_colors.get(&record.guild_name).copied(),
+                    color: record
+                        .guild_color
+                        .or_else(|| guild_colors.get(&record.guild_name).copied()),
                 },
                 acquired,
                 location: location.clone(),
@@ -133,14 +153,17 @@ pub fn merge_with_static(
 
 /// Fetch historical data and update the territories signal.
 /// Reads geometry from `TerritoryGeometryStore` context.
-pub fn fetch_and_apply_with(
-    timestamp_secs: i64,
-    mode: RwSignal<MapMode>,
-    fetch_nonce: RwSignal<u64>,
-    geo_store: StoredValue<TerritoryGeometryMap>,
-    guild_color_store: StoredValue<GuildColorMap>,
-    territories: RwSignal<ClientTerritoryMap>,
-) {
+pub fn fetch_and_apply_with(timestamp_secs: i64, ctx: HistoryFetchContext) {
+    let HistoryFetchContext {
+        mode,
+        history_fetch_nonce: fetch_nonce,
+        history_scalar_sample,
+        history_sr_leaderboard,
+        geo_store,
+        guild_color_store,
+        territories,
+    } = ctx;
+
     let request_nonce = fetch_nonce.get_untracked().wrapping_add(1);
     fetch_nonce.set(request_nonce);
 
@@ -153,6 +176,8 @@ pub fn fetch_and_apply_with(
                 {
                     return;
                 }
+                history_scalar_sample.set(snapshot.season_scalar.clone());
+                history_sr_leaderboard.set(snapshot.season_leaderboard.clone());
                 let geo = geo_store.get_value();
                 let guild_colors = guild_color_store.get_value();
                 let merged = merge_with_static(&snapshot, &geo, &guild_colors);
@@ -256,6 +281,8 @@ pub struct EnterHistoryModeInput {
     pub history_buffered_updates: RwSignal<Vec<BufferedUpdate>>,
     pub history_buffer_mode_active: RwSignal<bool>,
     pub needs_live_resync: RwSignal<bool>,
+    pub history_scalar_sample: RwSignal<Option<SeasonScalarSample>>,
+    pub history_sr_leaderboard: RwSignal<Option<Vec<HistoryGuildSrEntry>>>,
     pub geo_store: StoredValue<TerritoryGeometryMap>,
     pub guild_color_store: StoredValue<GuildColorMap>,
     pub territories: RwSignal<ClientTerritoryMap>,
@@ -273,6 +300,8 @@ pub fn enter_history_mode(input: EnterHistoryModeInput) {
         history_buffered_updates,
         history_buffer_mode_active,
         needs_live_resync,
+        history_scalar_sample,
+        history_sr_leaderboard,
         geo_store,
         guild_color_store,
         territories,
@@ -282,6 +311,8 @@ pub fn enter_history_mode(input: EnterHistoryModeInput) {
     history_buffer_mode_active.set(true);
     history_buffered_updates.set(Vec::new());
     needs_live_resync.set(false);
+    history_scalar_sample.set(None);
+    history_sr_leaderboard.set(None);
 
     let now = chrono::Utc::now().timestamp();
     history_timestamp.set(Some(now));
@@ -332,11 +363,15 @@ pub fn enter_history_mode(input: EnterHistoryModeInput) {
                 // Fetch initial historical data so the map updates immediately
                 fetch_and_apply_with(
                     now,
-                    mode,
-                    history_fetch_nonce,
-                    geo_store,
-                    guild_color_store,
-                    territories,
+                    HistoryFetchContext {
+                        mode,
+                        history_fetch_nonce,
+                        history_scalar_sample,
+                        history_sr_leaderboard,
+                        geo_store,
+                        guild_color_store,
+                        territories,
+                    },
                 );
             }
             Err(_) => {
@@ -361,6 +396,7 @@ pub struct ExitHistoryModeInput {
     pub last_live_seq: RwSignal<Option<u64>>,
     pub needs_live_resync: RwSignal<bool>,
     pub live_handoff_resync_count: RwSignal<u64>,
+    pub history_sr_leaderboard: RwSignal<Option<Vec<HistoryGuildSrEntry>>>,
     pub territories: RwSignal<ClientTerritoryMap>,
 }
 
@@ -376,6 +412,7 @@ pub fn exit_history_mode(input: ExitHistoryModeInput) {
         last_live_seq,
         needs_live_resync,
         live_handoff_resync_count,
+        history_sr_leaderboard,
         territories,
     } = input;
 
@@ -424,6 +461,7 @@ pub fn exit_history_mode(input: ExitHistoryModeInput) {
                 history_buffer_mode_active.set(false);
                 needs_live_resync.set(false);
                 history_timestamp.set(None);
+                history_sr_leaderboard.set(None);
                 last_live_seq.set(Some(newest_seq));
                 mode.set(MapMode::Live);
             }
@@ -445,6 +483,7 @@ pub fn exit_history_mode(input: ExitHistoryModeInput) {
                 history_buffered_updates.set(Vec::new());
                 history_buffer_mode_active.set(false);
                 history_timestamp.set(None);
+                history_sr_leaderboard.set(None);
                 last_live_seq.set(None);
                 needs_live_resync.set(true);
                 mode.set(MapMode::Live);
@@ -454,58 +493,24 @@ pub fn exit_history_mode(input: ExitHistoryModeInput) {
 }
 
 /// Step backward by 60 seconds.
-pub fn step_backward(
-    history_timestamp: RwSignal<Option<i64>>,
-    playback_active: RwSignal<bool>,
-    mode: RwSignal<MapMode>,
-    history_fetch_nonce: RwSignal<u64>,
-    geo_store: StoredValue<TerritoryGeometryMap>,
-    guild_color_store: StoredValue<GuildColorMap>,
-    territories: RwSignal<ClientTerritoryMap>,
-) {
-    playback_active.set(false);
-    history_timestamp.update(|ts| {
-        if let Some(t) = ts {
-            *t -= 60;
-        }
-    });
-    if let Some(ts) = history_timestamp.get_untracked() {
-        fetch_and_apply_with(
-            ts,
-            mode,
-            history_fetch_nonce,
-            geo_store,
-            guild_color_store,
-            territories,
-        );
-    }
+pub fn step_backward(ctx: HistoryStepContext) {
+    step_time(ctx, -60);
 }
 
 /// Step forward by 60 seconds.
-pub fn step_forward(
-    history_timestamp: RwSignal<Option<i64>>,
-    playback_active: RwSignal<bool>,
-    mode: RwSignal<MapMode>,
-    history_fetch_nonce: RwSignal<u64>,
-    geo_store: StoredValue<TerritoryGeometryMap>,
-    guild_color_store: StoredValue<GuildColorMap>,
-    territories: RwSignal<ClientTerritoryMap>,
-) {
-    playback_active.set(false);
-    history_timestamp.update(|ts| {
+pub fn step_forward(ctx: HistoryStepContext) {
+    step_time(ctx, 60);
+}
+
+fn step_time(ctx: HistoryStepContext, delta_secs: i64) {
+    ctx.playback_active.set(false);
+    ctx.history_timestamp.update(|ts| {
         if let Some(t) = ts {
-            *t += 60;
+            *t += delta_secs;
         }
     });
-    if let Some(ts) = history_timestamp.get_untracked() {
-        fetch_and_apply_with(
-            ts,
-            mode,
-            history_fetch_nonce,
-            geo_store,
-            guild_color_store,
-            territories,
-        );
+    if let Some(ts) = ctx.history_timestamp.get_untracked() {
+        fetch_and_apply_with(ts, ctx.fetch);
     }
 }
 

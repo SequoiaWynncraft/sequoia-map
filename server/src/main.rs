@@ -1,8 +1,13 @@
 mod app;
 mod config;
+mod db_migrations;
+mod db_sqlx;
 mod routes;
 mod services;
 mod state;
+
+extern crate self as sqlx;
+pub use crate::db_sqlx::{PgPool, Postgres, QueryBuilder, postgres, query, query_as, query_scalar};
 
 use sqlx::postgres::PgPoolOptions;
 use std::sync::atomic::Ordering;
@@ -37,7 +42,7 @@ async fn main() {
             return;
         }
     };
-    if let Err(e) = sqlx::migrate!("./migrations").run(&db).await {
+    if let Err(e) = db_migrations::run(&db).await {
         tracing::error!(error = %e, "failed to run migrations");
         return;
     }
@@ -66,11 +71,14 @@ async fn main() {
         }
     }
 
+    services::season_scalar_estimator::warm_cache(&state).await;
+
     // Spawn background services
     tokio::spawn(services::territory_poller::run(state.clone()));
     tokio::spawn(services::guild_evictor::run(state.clone()));
     tokio::spawn(services::extra_data_loader::run(state.clone()));
     tokio::spawn(services::guild_color_loader::run(state.clone()));
+    tokio::spawn(services::season_scalar_estimator::run(state.clone()));
 
     tokio::spawn(services::snapshot_service::run(state.clone()));
     tokio::spawn(services::retention_cleaner::run(state.clone()));

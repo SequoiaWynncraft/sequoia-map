@@ -20,6 +20,8 @@ dashmap = "6"
 async-stream = "0.3"
 futures = "0.3"
 tokio-stream = { version = "0.1", features = ["sync"] }
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "json"] }
+sqlx-core = { version = "0.8", default-features = false, features = ["_rt-tokio", "_tls-rustls-ring-webpki", "chrono", "json", "migrate"] }
+sqlx-postgres = { version = "0.8", default-features = false, features = ["chrono", "json", "migrate"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bytes = "1"
