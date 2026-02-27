@@ -1,13 +1,30 @@
 ### Stage 1: Build the client (WASM via Trunk)
 FROM rust:1.88-bookworm AS client-build
 
+ARG TARGETARCH
 ARG BINARYEN_VERSION=126
-ARG BINARYEN_ARCH=x86_64-linux
+ARG BINARYEN_ARCH=
 
 RUN apt-get update && apt-get install -y --no-install-recommends brotli gzip ca-certificates curl && rm -rf /var/lib/apt/lists/*
 RUN set -eux; \
-    curl -fsSLo /tmp/binaryen.tar.gz "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-${BINARYEN_ARCH}.tar.gz"; \
-    curl -fsSLo /tmp/binaryen.tar.gz.sha256 "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-${BINARYEN_ARCH}.tar.gz.sha256"; \
+    TARGET_ARCH="${TARGETARCH:-}"; \
+    if [ -z "${TARGET_ARCH}" ]; then \
+        TARGET_ARCH="$(dpkg --print-architecture)"; \
+    fi; \
+    RESOLVED_BINARYEN_ARCH="${BINARYEN_ARCH:-}"; \
+    if [ -z "${RESOLVED_BINARYEN_ARCH}" ]; then \
+        case "${TARGET_ARCH}" in \
+            amd64|x86_64) RESOLVED_BINARYEN_ARCH="x86_64-linux" ;; \
+            arm64|aarch64) RESOLVED_BINARYEN_ARCH="aarch64-linux" ;; \
+            *) \
+                echo "Unsupported architecture '${TARGET_ARCH}' for Binaryen auto-selection."; \
+                echo "Set --build-arg BINARYEN_ARCH=<binaryen-archive-suffix> to override."; \
+                exit 1 ;; \
+        esac; \
+    fi; \
+    echo "Using Binaryen archive architecture: ${RESOLVED_BINARYEN_ARCH} (target=${TARGET_ARCH})"; \
+    curl -fsSLo /tmp/binaryen.tar.gz "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-${RESOLVED_BINARYEN_ARCH}.tar.gz"; \
+    curl -fsSLo /tmp/binaryen.tar.gz.sha256 "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-${RESOLVED_BINARYEN_ARCH}.tar.gz.sha256"; \
     EXPECTED_SHA="$(awk '{print $1}' /tmp/binaryen.tar.gz.sha256)"; \
     echo "${EXPECTED_SHA}  /tmp/binaryen.tar.gz" | sha256sum -c -; \
     tar -xzf /tmp/binaryen.tar.gz -C /tmp; \
