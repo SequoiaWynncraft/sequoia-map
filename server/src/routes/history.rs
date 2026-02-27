@@ -724,15 +724,18 @@ mod tests {
             .expect("truncate history tables");
 
         let now = Utc::now();
-        let acquired_1 = now - chrono::TimeDelta::minutes(1);
-        let acquired_2 = now;
+        let recorded_1 = now - chrono::TimeDelta::minutes(1);
+        let recorded_2 = now;
+        let acquired_1 = recorded_1;
+        let acquired_2 = recorded_2;
         sqlx::query(
             "INSERT INTO territory_events \
-             (stream_seq, acquired_at, territory, guild_uuid, guild_name, guild_prefix, \
+             (stream_seq, recorded_at, acquired_at, territory, guild_uuid, guild_name, guild_prefix, \
               prev_guild_uuid, prev_guild_name, prev_guild_prefix) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
         )
         .bind(1_i64)
+        .bind(recorded_1)
         .bind(acquired_1)
         .bind("Alpha")
         .bind("g1")
@@ -747,11 +750,12 @@ mod tests {
 
         sqlx::query(
             "INSERT INTO territory_events \
-             (stream_seq, acquired_at, territory, guild_uuid, guild_name, guild_prefix, \
+             (stream_seq, recorded_at, acquired_at, territory, guild_uuid, guild_name, guild_prefix, \
               prev_guild_uuid, prev_guild_name, prev_guild_prefix) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
         )
         .bind(2_i64)
+        .bind(recorded_2)
         .bind(acquired_2)
         .bind("Alpha")
         .bind("g2")
@@ -816,12 +820,13 @@ mod tests {
         let base_url = format!("http://{addr}");
         let client = reqwest::Client::new();
 
-        let to = (Utc::now() + chrono::TimeDelta::minutes(1)).to_rfc3339();
+        let from = (now - chrono::TimeDelta::hours(1)).to_rfc3339();
+        let to = (now + chrono::TimeDelta::hours(1)).to_rfc3339();
         let all_url = {
             let mut url = reqwest::Url::parse(&format!("{base_url}/api/history/events"))
                 .expect("history events url");
             url.query_pairs_mut()
-                .append_pair("from", "1970-01-01T00:00:00Z")
+                .append_pair("from", &from)
                 .append_pair("to", &to)
                 .append_pair("limit", "100");
             url
@@ -847,7 +852,7 @@ mod tests {
             let mut url = reqwest::Url::parse(&format!("{base_url}/api/history/sr-samples"))
                 .expect("history sr samples url");
             url.query_pairs_mut()
-                .append_pair("from", "1970-01-01T00:00:00Z")
+                .append_pair("from", &from)
                 .append_pair("to", &to);
             url
         };
@@ -872,7 +877,7 @@ mod tests {
             let mut url = reqwest::Url::parse(&format!("{base_url}/api/history/events"))
                 .expect("paged history events url");
             url.query_pairs_mut()
-                .append_pair("from", "1970-01-01T00:00:00Z")
+                .append_pair("from", &from)
                 .append_pair("to", &to)
                 .append_pair("after_seq", "1")
                 .append_pair("limit", "100");
