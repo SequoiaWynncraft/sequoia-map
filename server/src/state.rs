@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
-use sequoia_shared::{Resources, TerritoryMap};
+use sequoia_shared::{LiveState, Resources, SeasonScalarSample, TerritoryMap};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tokio::sync::{RwLock, broadcast};
@@ -17,12 +18,13 @@ use crate::config::{
 
 pub type GuildColor = (u8, u8, u8);
 pub type GuildColorMap = HashMap<String, GuildColor>;
+pub type CachedScalarSample = (SeasonScalarSample, Arc<Bytes>);
 
 /// Pre-serialized SSE event — serialized once by the poller, shared by all clients via Arc.
 #[derive(Debug, Clone)]
 pub enum PreSerializedEvent {
-    Snapshot { seq: u64, json: Arc<String> },
-    Update { seq: u64, json: Arc<String> },
+    Snapshot { seq: u64, json: Arc<Bytes> },
+    Update { seq: u64, json: Arc<Bytes> },
 }
 
 #[derive(Debug, Clone)]
@@ -30,18 +32,33 @@ pub struct LiveSnapshot {
     pub seq: u64,
     pub timestamp: String,
     pub territories: TerritoryMap,
-    pub snapshot_json: Arc<String>,
-    pub territories_json: Arc<String>,
+    pub snapshot_json: Arc<Bytes>,
+    pub territories_json: Arc<Bytes>,
+    pub live_state_json: Arc<Bytes>,
+    pub ownership_json: Arc<Bytes>,
 }
 
 impl Default for LiveSnapshot {
     fn default() -> Self {
+        let seq = 0;
+        let timestamp = Utc::now().to_rfc3339();
+        let territories = TerritoryMap::new();
+        let live_state_json = serde_json::to_vec(&LiveState {
+            seq,
+            timestamp: timestamp.clone(),
+            territories: territories.clone(),
+        })
+        .map(Bytes::from)
+        .unwrap_or_else(|_| Bytes::from_static(br#"{"seq":0,"timestamp":"","territories":{}}"#));
+
         Self {
-            seq: 0,
-            timestamp: Utc::now().to_rfc3339(),
-            territories: TerritoryMap::new(),
-            snapshot_json: Arc::new(String::new()),
-            territories_json: Arc::new("{}".to_string()),
+            seq,
+            timestamp,
+            territories,
+            snapshot_json: Arc::new(Bytes::new()),
+            territories_json: Arc::new(Bytes::from_static(b"{}")),
+            live_state_json: Arc::new(live_state_json),
+            ownership_json: Arc::new(Bytes::from_static(b"{}")),
         }
     }
 }
@@ -62,8 +79,12 @@ pub struct AppState {
     pub guild_cache: Arc<DashMap<String, CachedGuild>>,
     /// Extra territory data (resources, connections) from supplemental gist.
     pub extra_terr: Arc<RwLock<HashMap<String, ExtraTerrInfo>>>,
+    pub extra_data_dirty: Arc<AtomicBool>,
     /// Guild name -> RGB color from Athena/Wynntils.
     pub guild_colors: Arc<RwLock<GuildColorMap>>,
+    pub guild_colors_dirty: Arc<AtomicBool>,
+    /// Latest computed season scalar sample and pre-serialized API payload.
+    pub latest_scalar_sample: Arc<RwLock<Option<CachedScalarSample>>>,
     pub http_client: reqwest::Client,
     /// PostgreSQL pool for history persistence. None if DATABASE_URL is not set.
     pub db: Option<PgPool>,
@@ -73,8 +94,8 @@ pub struct AppState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedGuild {
-    pub data: serde_json::Value,
-    pub cached_at: DateTime<Utc>,
+    pub data: String,
+    pub fetched_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Default)]
@@ -83,6 +104,10 @@ pub struct ObservabilityCounters {
     persist_failures_total: AtomicU64,
     dropped_update_events_total: AtomicU64,
     persisted_update_events_total: AtomicU64,
+    guilds_online_requests_total: AtomicU64,
+    guilds_online_cache_hits_total: AtomicU64,
+    guilds_online_cache_misses_total: AtomicU64,
+    guilds_online_upstream_errors_total: AtomicU64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -91,6 +116,10 @@ pub struct ObservabilitySnapshot {
     pub persist_failures_total: u64,
     pub dropped_update_events_total: u64,
     pub persisted_update_events_total: u64,
+    pub guilds_online_requests_total: u64,
+    pub guilds_online_cache_hits_total: u64,
+    pub guilds_online_cache_misses_total: u64,
+    pub guilds_online_upstream_errors_total: u64,
 }
 
 impl ObservabilityCounters {
@@ -101,6 +130,16 @@ impl ObservabilityCounters {
             dropped_update_events_total: self.dropped_update_events_total.load(Ordering::Relaxed),
             persisted_update_events_total: self
                 .persisted_update_events_total
+                .load(Ordering::Relaxed),
+            guilds_online_requests_total: self.guilds_online_requests_total.load(Ordering::Relaxed),
+            guilds_online_cache_hits_total: self
+                .guilds_online_cache_hits_total
+                .load(Ordering::Relaxed),
+            guilds_online_cache_misses_total: self
+                .guilds_online_cache_misses_total
+                .load(Ordering::Relaxed),
+            guilds_online_upstream_errors_total: self
+                .guilds_online_upstream_errors_total
                 .load(Ordering::Relaxed),
         }
     }
@@ -121,6 +160,26 @@ impl ObservabilityCounters {
 
     pub fn record_persisted_update_events(&self, count: u64) {
         self.persisted_update_events_total
+            .fetch_add(count, Ordering::Relaxed);
+    }
+
+    pub fn record_guilds_online_request(&self) {
+        self.guilds_online_requests_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_guilds_online_cache_hits(&self, count: u64) {
+        self.guilds_online_cache_hits_total
+            .fetch_add(count, Ordering::Relaxed);
+    }
+
+    pub fn record_guilds_online_cache_misses(&self, count: u64) {
+        self.guilds_online_cache_misses_total
+            .fetch_add(count, Ordering::Relaxed);
+    }
+
+    pub fn record_guilds_online_upstream_errors(&self, count: u64) {
+        self.guilds_online_upstream_errors_total
             .fetch_add(count, Ordering::Relaxed);
     }
 }
@@ -154,7 +213,10 @@ impl AppState {
             event_tx,
             guild_cache: Arc::new(DashMap::new()),
             extra_terr: Arc::new(RwLock::new(HashMap::new())),
+            extra_data_dirty: Arc::new(AtomicBool::new(true)),
             guild_colors: Arc::new(RwLock::new(HashMap::new())),
+            guild_colors_dirty: Arc::new(AtomicBool::new(true)),
+            latest_scalar_sample: Arc::new(RwLock::new(None)),
             http_client,
             db,
             seq_live_handoff_v1: seq_live_handoff_v1_enabled(),

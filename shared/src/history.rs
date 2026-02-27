@@ -2,12 +2,37 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::SeasonScalarSample;
+
+/// Snapshot of season rating data for one guild at a given sample time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryGuildSrEntry {
+    pub guild_uuid: String,
+    pub guild_name: String,
+    pub guild_prefix: String,
+    pub sampled_at: String,
+    pub season_id: i32,
+    pub season_rating: i64,
+    pub season_rank: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sr_gain_5m: Option<i64>,
+}
+
+/// Collection of season rating snapshots captured at a single timestamp.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistorySrSnapshot {
+    pub sampled_at: String,
+    pub entries: Vec<HistoryGuildSrEntry>,
+}
+
 /// Ownership record for a single territory at a point in time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OwnershipRecord {
     pub guild_uuid: String,
     pub guild_name: String,
     pub guild_prefix: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guild_color: Option<(u8, u8, u8)>,
     pub acquired_at: String,
 }
 
@@ -16,6 +41,10 @@ pub struct OwnershipRecord {
 pub struct HistorySnapshot {
     pub timestamp: String,
     pub ownership: HashMap<String, OwnershipRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub season_scalar: Option<SeasonScalarSample>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub season_leaderboard: Option<Vec<HistoryGuildSrEntry>>,
 }
 
 /// A single territory change event from the history log.
@@ -24,12 +53,18 @@ pub struct HistoryEvent {
     #[serde(default)]
     pub stream_seq: u64,
     pub timestamp: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acquired_at: Option<String>,
     pub territory: String,
     pub guild_uuid: String,
     pub guild_name: String,
     pub guild_prefix: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guild_color: Option<(u8, u8, u8)>,
     pub prev_guild_name: Option<String>,
     pub prev_guild_prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_guild_color: Option<(u8, u8, u8)>,
 }
 
 /// Paginated list of history events.
@@ -37,6 +72,13 @@ pub struct HistoryEvent {
 pub struct HistoryEvents {
     pub events: Vec<HistoryEvent>,
     pub has_more: bool,
+}
+
+/// Season rating snapshots over a time window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistorySrSamples {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub samples: Vec<HistorySrSnapshot>,
 }
 
 /// Time bounds and event count for the history timeline.

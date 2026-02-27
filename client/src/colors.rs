@@ -4,6 +4,7 @@ pub fn rgba_css(r: u8, g: u8, b: u8, a: f64) -> String {
 }
 
 /// Brighten a color by a factor (1.0 = no change, >1.0 = brighter).
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub fn brighten(r: u8, g: u8, b: u8, factor: f64) -> (u8, u8, u8) {
     (
         ((r as f64 * factor).min(255.0)) as u8,

@@ -1,3 +1,5 @@
+#![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+
 use std::collections::HashMap;
 
 use sequoia_shared::{Territory, TerritoryChange, TerritoryMap};
@@ -5,9 +7,19 @@ use sequoia_shared::{Territory, TerritoryChange, TerritoryMap};
 use crate::animation::ColorTransition;
 use crate::colors::rgba_css;
 
+#[inline]
+pub fn territory_name_hash(name: &str) -> u64 {
+    let mut h: u64 = 5381;
+    for b in name.bytes() {
+        h = h.wrapping_mul(33).wrapping_add(b as u64);
+    }
+    h
+}
+
 /// Pre-formatted CSS rgba strings for the fixed set of alpha values used in rendering.
 /// Avoids hundreds of `format!()` allocations per frame.
 #[derive(Debug, Clone)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub struct CachedColors {
     /// Fill: normal (0.22)
     pub fill_normal: String,
@@ -38,14 +50,17 @@ impl CachedColors {
 pub struct ClientTerritory {
     pub territory: Territory,
     pub animation: Option<ColorTransition>,
+    /// Pre-computed stable hash of the territory name for connection dedup.
+    pub name_hash: u64,
     /// Pre-computed guild color (CRC32 hash), avoids recomputation per frame.
     pub guild_color: (u8, u8, u8),
     /// Pre-formatted CSS rgba strings for rendering.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub cached_colors: CachedColors,
 }
 
 impl ClientTerritory {
-    pub fn from_territory(territory: Territory) -> Self {
+    pub fn from_territory(name: &str, territory: Territory) -> Self {
         let guild_color = territory
             .guild
             .color
@@ -54,6 +69,7 @@ impl ClientTerritory {
         Self {
             territory,
             animation: None,
+            name_hash: territory_name_hash(name),
             guild_color,
             cached_colors,
         }
@@ -65,7 +81,10 @@ pub type ClientTerritoryMap = HashMap<String, ClientTerritory>;
 /// Build client territory map from a full snapshot.
 pub fn from_snapshot(map: TerritoryMap) -> ClientTerritoryMap {
     map.into_iter()
-        .map(|(name, t)| (name, ClientTerritory::from_territory(t)))
+        .map(|(name, t)| {
+            let territory = ClientTerritory::from_territory(&name, t);
+            (name, territory)
+        })
         .collect()
 }
 
@@ -114,6 +133,7 @@ pub fn apply_changes(
             ClientTerritory {
                 territory: new_territory,
                 animation,
+                name_hash: territory_name_hash(&change.territory),
                 guild_color: new_color,
                 cached_colors,
             },

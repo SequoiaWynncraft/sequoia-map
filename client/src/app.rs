@@ -1,4 +1,4 @@
-use js_sys::{Function, Reflect};
+use js_sys::{Function, Reflect, encode_uri_component};
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
@@ -60,12 +60,19 @@ struct KeydownBinding {
     _handler: wasm_bindgen::closure::Closure<dyn Fn(web_sys::KeyboardEvent)>,
 }
 
+struct ResizeBinding {
+    window: web_sys::Window,
+    _callback: wasm_bindgen::closure::Closure<dyn Fn()>,
+}
+
 thread_local! {
     static TICK_INTERVAL_BINDING: RefCell<Option<TickIntervalBinding>> = const { RefCell::new(None) };
     static KEYDOWN_BINDING: RefCell<Option<KeydownBinding>> = const { RefCell::new(None) };
+    static RESIZE_BINDING: RefCell<Option<ResizeBinding>> = const { RefCell::new(None) };
 }
 
-use sequoia_shared::{Region, Resources, TerritoryChange, TreasuryLevel};
+use sequoia_shared::history::HistoryGuildSrEntry;
+use sequoia_shared::{Region, Resources, SeasonScalarSample, TerritoryChange, TreasuryLevel};
 
 /// Newtype wrappers to give `hovered` and `selected` distinct types for Leptos context.
 /// (Both are `RwSignal<Option<String>>` — without wrappers, `provide_context` overwrites one.)
@@ -84,25 +91,69 @@ pub(crate) struct ShowNames(pub RwSignal<bool>);
 #[derive(Clone, Copy)]
 pub(crate) struct ThickCooldownBorders(pub RwSignal<bool>);
 #[derive(Clone, Copy)]
-pub(crate) struct BoldNames(pub RwSignal<bool>);
-#[derive(Clone, Copy)]
-pub(crate) struct BoldTags(pub RwSignal<bool>);
-#[derive(Clone, Copy)]
-pub(crate) struct ThickTagOutline(pub RwSignal<bool>);
-#[derive(Clone, Copy)]
-pub(crate) struct ThickNameOutline(pub RwSignal<bool>);
-#[derive(Clone, Copy)]
-pub(crate) struct ReadableFont(pub RwSignal<bool>);
-#[derive(Clone, Copy)]
 pub(crate) struct BoldConnections(pub RwSignal<bool>);
 #[derive(Clone, Copy)]
 pub(crate) struct ResourceHighlight(pub RwSignal<bool>);
 #[derive(Clone, Copy)]
+pub(crate) struct ShowResourceIcons(pub RwSignal<bool>);
+#[derive(Clone, Copy)]
+pub(crate) struct ManualSrScalar(pub RwSignal<f64>);
+#[derive(Clone, Copy)]
+pub(crate) struct AutoSrScalarEnabled(pub RwSignal<bool>);
+#[derive(Clone, Copy)]
+pub(crate) struct ShowLeaderboardSrGain(pub RwSignal<bool>);
+#[derive(Clone, Copy)]
+pub(crate) struct ShowLeaderboardSrValue(pub RwSignal<bool>);
+#[derive(Clone, Copy)]
+pub(crate) struct WhiteGuildTags(pub RwSignal<bool>);
+#[derive(Clone, Copy)]
+pub(crate) struct NameColorSetting(pub RwSignal<NameColor>);
+#[derive(Clone, Copy)]
+pub(crate) struct ShowMinimap(pub RwSignal<bool>);
+#[derive(Clone, Copy)]
+pub(crate) struct LabelScaleMaster(pub RwSignal<f64>);
+#[derive(Clone, Copy)]
+pub(crate) struct LabelScaleStatic(pub RwSignal<f64>);
+#[derive(Clone, Copy)]
+pub(crate) struct LabelScaleStaticName(pub RwSignal<f64>);
+#[derive(Clone, Copy)]
+pub(crate) struct LabelScaleDynamic(pub RwSignal<f64>);
+#[derive(Clone, Copy)]
+pub(crate) struct LabelScaleIcons(pub RwSignal<f64>);
+#[derive(Clone, Copy)]
 pub(crate) struct SidebarOpen(pub RwSignal<bool>);
+#[derive(Clone, Copy)]
+pub(crate) struct SidebarTransient(pub RwSignal<bool>);
 #[derive(Clone, Copy)]
 pub(crate) struct SidebarIndex(pub RwSignal<usize>);
 #[derive(Clone, Copy)]
 pub(crate) struct SidebarItems(pub RwSignal<Vec<String>>);
+#[derive(Clone, Copy)]
+pub(crate) struct IsMobile(pub RwSignal<bool>);
+#[derive(Clone, Copy)]
+pub(crate) struct PeekTerritory(pub RwSignal<Option<String>>);
+#[derive(Clone, Copy)]
+pub(crate) struct SelectedGuild(pub RwSignal<Option<String>>);
+
+#[derive(Clone, Default, PartialEq)]
+pub(crate) struct GuildOnlineInfo {
+    pub online: u32,
+    pub season_rating: Option<i64>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct GuildOnlineData(pub RwSignal<HashMap<String, GuildOnlineInfo>>);
+#[derive(Clone, Copy)]
+pub(crate) struct ShowLeaderboardTerritoryCount(pub RwSignal<bool>);
+#[derive(Clone, Copy)]
+pub(crate) struct ShowLeaderboardOnline(pub RwSignal<bool>);
+#[derive(Clone, Copy)]
+pub(crate) struct LeaderboardSortBySr(pub RwSignal<bool>);
+
+pub(crate) const MOBILE_BREAKPOINT: f64 = 768.0;
+const GUILD_ONLINE_POLL_INTERVAL_SECS: u64 = 120;
+const GUILD_ONLINE_BOOTSTRAP_RETRY_SECS: u64 = 3;
+const GUILD_ONLINE_ERROR_RETRY_SECS: u64 = 15;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MapMode {
@@ -140,6 +191,12 @@ pub(crate) struct LiveHandoffResyncCount(pub RwSignal<u64>);
 pub(crate) struct SseSeqGapDetectedCount(pub RwSignal<u64>);
 #[derive(Clone, Copy)]
 pub(crate) struct HistoryBufferSizeMax(pub RwSignal<usize>);
+#[derive(Clone, Copy)]
+pub(crate) struct LiveSeasonScalarSample(pub RwSignal<Option<SeasonScalarSample>>);
+#[derive(Clone, Copy)]
+pub(crate) struct HistorySeasonScalarSample(pub RwSignal<Option<SeasonScalarSample>>);
+#[derive(Clone, Copy)]
+pub(crate) struct HistorySeasonLeaderboard(pub RwSignal<Option<Vec<HistoryGuildSrEntry>>>);
 
 #[derive(Clone, Debug)]
 pub(crate) struct BufferedUpdate {
@@ -167,14 +224,134 @@ pub(crate) enum NameColor {
     Muted,  // rgba(120, 116, 112, 0.78) — subtle/subdued
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct NameColorSetting(pub RwSignal<NameColor>);
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FontRendererMode {
+    #[default]
+    Auto,
+    Classic,
+    Dynamic,
+    ExperimentalGpu,
+}
 
 use gloo_storage::Storage;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(default)]
-struct Settings {
+struct SettingsV2 {
+    show_connections: bool,
+    abbreviate_names: bool,
+    show_countdown: bool,
+    granular_map_time: bool,
+    show_names: bool,
+    thick_cooldown_borders: bool,
+    bold_connections: bool,
+    sidebar_open: bool,
+    resource_highlight: bool,
+    show_resource_icons: bool,
+    #[serde(default = "default_manual_sr_scalar")]
+    manual_sr_scalar: f64,
+    auto_sr_scalar_enabled: bool,
+    show_leaderboard_sr_gain: bool,
+    #[serde(default)]
+    show_leaderboard_sr_value: bool,
+    #[serde(default = "default_true")]
+    show_leaderboard_territory_count: bool,
+    #[serde(default = "default_true")]
+    show_leaderboard_online: bool,
+    leaderboard_sort_by_sr: bool,
+    white_guild_tags: bool,
+    #[serde(default = "default_true")]
+    show_minimap: bool,
+    #[serde(default = "default_name_color")]
+    name_color: NameColor,
+    #[serde(default = "default_label_scale_master")]
+    label_scale_master: f64,
+    #[serde(default = "default_label_scale_group")]
+    label_scale_static: f64,
+    #[serde(default)]
+    label_scale_static_name: Option<f64>,
+    #[serde(default = "default_label_scale_group")]
+    label_scale_dynamic: f64,
+    #[serde(default = "default_label_scale_group")]
+    label_scale_icons: f64,
+}
+
+const fn default_name_color() -> NameColor {
+    NameColor::Guild
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+const fn default_manual_sr_scalar() -> f64 {
+    1.5
+}
+
+const fn default_label_scale_master() -> f64 {
+    DEFAULT_LABEL_SCALE_MASTER
+}
+
+const fn default_label_scale_group() -> f64 {
+    DEFAULT_LABEL_SCALE_GROUP
+}
+
+const fn default_label_scale_static_name() -> f64 {
+    DEFAULT_LABEL_SCALE_STATIC_NAME
+}
+
+pub(crate) const DEFAULT_LABEL_SCALE_MASTER: f64 = 1.25;
+pub(crate) const DEFAULT_LABEL_SCALE_GROUP: f64 = 1.0;
+pub(crate) const DEFAULT_LABEL_SCALE_STATIC_NAME: f64 = 0.75;
+pub(crate) const LABEL_SCALE_MASTER_MIN: f64 = 1.0;
+pub(crate) const LABEL_SCALE_MASTER_MAX: f64 = 2.25;
+pub(crate) const LABEL_SCALE_GROUP_MIN: f64 = 0.60;
+pub(crate) const LABEL_SCALE_GROUP_MAX: f64 = 1.80;
+
+pub(crate) fn clamp_label_scale_master(value: f64) -> f64 {
+    value.clamp(LABEL_SCALE_MASTER_MIN, LABEL_SCALE_MASTER_MAX)
+}
+
+pub(crate) fn clamp_label_scale_group(value: f64) -> f64 {
+    value.clamp(LABEL_SCALE_GROUP_MIN, LABEL_SCALE_GROUP_MAX)
+}
+
+impl Default for SettingsV2 {
+    fn default() -> Self {
+        Self {
+            show_connections: true,
+            abbreviate_names: true,
+            show_countdown: false,
+            granular_map_time: false,
+            show_names: true,
+            thick_cooldown_borders: true,
+            bold_connections: false,
+            sidebar_open: false,
+            resource_highlight: false,
+            show_resource_icons: false,
+            manual_sr_scalar: default_manual_sr_scalar(),
+            auto_sr_scalar_enabled: false,
+            show_leaderboard_sr_gain: false,
+            show_leaderboard_sr_value: false,
+            show_leaderboard_territory_count: true,
+            show_leaderboard_online: true,
+            leaderboard_sort_by_sr: false,
+            white_guild_tags: false,
+            show_minimap: true,
+            name_color: default_name_color(),
+            label_scale_master: default_label_scale_master(),
+            label_scale_static: default_label_scale_group(),
+            label_scale_static_name: Some(default_label_scale_static_name()),
+            label_scale_dynamic: default_label_scale_group(),
+            label_scale_icons: default_label_scale_group(),
+        }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct LegacySettings {
     show_connections: bool,
     abbreviate_names: bool,
     show_countdown: bool,
@@ -186,13 +363,21 @@ struct Settings {
     thick_tag_outline: bool,
     thick_name_outline: bool,
     readable_font: bool,
+    font_renderer_mode: Option<FontRendererMode>,
+    #[serde(default, rename = "experimental_gpu_labels")]
+    legacy_experimental_gpu_labels: Option<bool>,
     bold_connections: bool,
     name_color: NameColor,
     sidebar_open: bool,
     resource_highlight: bool,
+    show_resource_icons: bool,
+    #[serde(default = "default_manual_sr_scalar")]
+    manual_sr_scalar: f64,
+    auto_sr_scalar_enabled: bool,
+    show_leaderboard_sr_gain: bool,
 }
 
-impl Default for Settings {
+impl Default for LegacySettings {
     fn default() -> Self {
         Self {
             show_connections: true,
@@ -206,19 +391,68 @@ impl Default for Settings {
             thick_tag_outline: false,
             thick_name_outline: false,
             readable_font: false,
+            font_renderer_mode: Some(FontRendererMode::Auto),
+            legacy_experimental_gpu_labels: None,
             bold_connections: false,
             name_color: NameColor::White,
             sidebar_open: false,
             resource_highlight: false,
+            show_resource_icons: false,
+            manual_sr_scalar: default_manual_sr_scalar(),
+            auto_sr_scalar_enabled: false,
+            show_leaderboard_sr_gain: false,
         }
     }
 }
 
-use crate::canvas::{MapCanvas, abbreviate_name};
+impl From<LegacySettings> for SettingsV2 {
+    fn from(value: LegacySettings) -> Self {
+        Self {
+            show_connections: value.show_connections,
+            abbreviate_names: value.abbreviate_names,
+            show_countdown: value.show_countdown,
+            granular_map_time: value.granular_map_time,
+            show_names: value.show_names,
+            thick_cooldown_borders: value.thick_cooldown_borders,
+            bold_connections: value.bold_connections,
+            sidebar_open: value.sidebar_open,
+            resource_highlight: value.resource_highlight,
+            show_resource_icons: value.show_resource_icons,
+            manual_sr_scalar: value.manual_sr_scalar,
+            auto_sr_scalar_enabled: value.auto_sr_scalar_enabled,
+            show_leaderboard_sr_gain: value.show_leaderboard_sr_gain,
+            show_leaderboard_sr_value: false,
+            show_leaderboard_territory_count: true,
+            show_leaderboard_online: true,
+            leaderboard_sort_by_sr: false,
+            white_guild_tags: false,
+            show_minimap: true,
+            name_color: value.name_color,
+            label_scale_master: default_label_scale_master(),
+            label_scale_static: default_label_scale_group(),
+            label_scale_static_name: Some(default_label_scale_static_name()),
+            label_scale_dynamic: default_label_scale_group(),
+            label_scale_icons: default_label_scale_group(),
+        }
+    }
+}
+
+fn load_settings_v2() -> SettingsV2 {
+    if let Ok(saved) = gloo_storage::LocalStorage::get::<SettingsV2>("sequoia_settings_v2") {
+        return saved;
+    }
+    if let Ok(legacy) = gloo_storage::LocalStorage::get::<LegacySettings>("sequoia_settings") {
+        return legacy.into();
+    }
+    SettingsV2::default()
+}
+
+use crate::canvas::MapCanvas;
 use crate::colors::rgba_css;
 use crate::history;
-use crate::icons::{self, ResourceIcons};
-use crate::minimap::Minimap;
+use crate::icons::{self, ResourceAtlas};
+use crate::label_layout::abbreviate_name;
+use crate::season_scalar;
 use crate::sidebar::Sidebar;
 use crate::sse::{self, ConnectionStatus};
 use crate::territory::ClientTerritoryMap;
@@ -236,14 +470,8 @@ fn format_resource_compact(val: i32) -> String {
     }
 }
 
-/// Build inline HTML with `<img>` icon tags and amounts for resource indicators in tooltips.
-fn resource_icons_html(res: &Resources) -> String {
-    let mut html = String::new();
-    if res.has_all() {
-        html.push_str(r#"<span style="display:inline-flex;align-items:center;gap:3px;background:#1a1d2a;padding:1px 5px;border-radius:3px;border:1px solid #282c3e;"><img src="/icons/rainbow.svg" style="width:11px;height:11px;vertical-align:middle;image-rendering:pixelated;" /><span style="font-size:0.6rem;color:#e2e0d8;">All</span></span>"#);
-        return html;
-    }
-    let items: &[(i32, bool, &str, &str)] = &[
+fn tooltip_resource_items(res: &Resources) -> Vec<(i32, bool, &'static str, &'static str)> {
+    vec![
         (
             res.emeralds,
             res.has_double_emeralds(),
@@ -254,26 +482,7 @@ fn resource_icons_html(res: &Resources) -> String {
         (res.crops, res.has_double_crops(), "crops", "Crops"),
         (res.fish, res.has_double_fish(), "fish", "Fish"),
         (res.wood, res.has_double_wood(), "wood", "Wood"),
-    ];
-    for &(val, is_double, icon, label) in items {
-        if val > 0 {
-            let icon_tag = format!(
-                r#"<img src="/icons/{icon}.svg" style="width:11px;height:11px;vertical-align:middle;image-rendering:pixelated;" />"#
-            );
-            let double_marker = if is_double {
-                format!(
-                    r#"<img src="/icons/{icon}.svg" style="width:11px;height:11px;vertical-align:middle;image-rendering:pixelated;" />"#
-                )
-            } else {
-                String::new()
-            };
-            let amount = format_resource_compact(val);
-            html.push_str(&format!(
-                r#"<span style="display:inline-flex;align-items:center;gap:3px;background:#1a1d2a;padding:1px 5px;border-radius:3px;border:1px solid #282c3e;">{icon_tag}{double_marker}<span style="font-size:0.6rem;color:#e2e0d8;">{amount}</span><span style="font-size:0.52rem;color:#5a5860;">{label}</span></span>"#
-            ));
-        }
-    }
-    html
+    ]
 }
 
 /// Root application component. Provides global reactive signals via context.
@@ -288,38 +497,64 @@ pub fn App() -> impl IntoView {
     let connection: RwSignal<ConnectionStatus> = RwSignal::new(ConnectionStatus::Connecting);
     let mouse_pos: RwSignal<(f64, f64)> = RwSignal::new((0.0, 0.0));
     let loaded_tiles: RwSignal<Vec<LoadedTile>> = RwSignal::new(Vec::new());
-    let loaded_icons: RwSignal<Option<ResourceIcons>> = RwSignal::new(None);
+    let loaded_icons: RwSignal<Option<ResourceAtlas>> = RwSignal::new(None);
     // Epoch-second tick — drives cooldown countdown updates across canvas, tooltip, sidebar
     let tick: RwSignal<i64> = RwSignal::new(chrono::Utc::now().timestamp());
-    let saved: Settings = gloo_storage::LocalStorage::get("sequoia_settings").unwrap_or_default();
+    let saved = load_settings_v2();
     let show_connections: RwSignal<bool> = RwSignal::new(saved.show_connections);
     let abbreviate_names: RwSignal<bool> = RwSignal::new(saved.abbreviate_names);
     let show_countdown: RwSignal<bool> = RwSignal::new(saved.show_countdown);
     let show_granular_map_time: RwSignal<bool> = RwSignal::new(saved.granular_map_time);
     let show_names: RwSignal<bool> = RwSignal::new(saved.show_names);
     let thick_cooldown_borders: RwSignal<bool> = RwSignal::new(saved.thick_cooldown_borders);
-    let bold_names: RwSignal<bool> = RwSignal::new(saved.bold_names);
-    let bold_tags: RwSignal<bool> = RwSignal::new(saved.bold_tags);
-    let thick_tag_outline: RwSignal<bool> = RwSignal::new(saved.thick_tag_outline);
-    let thick_name_outline: RwSignal<bool> = RwSignal::new(saved.thick_name_outline);
-    let readable_font: RwSignal<bool> = RwSignal::new(saved.readable_font);
     let bold_connections: RwSignal<bool> = RwSignal::new(saved.bold_connections);
     let resource_highlight: RwSignal<bool> = RwSignal::new(saved.resource_highlight);
+    let show_resource_icons: RwSignal<bool> = RwSignal::new(saved.show_resource_icons);
+    let manual_sr_scalar: RwSignal<f64> =
+        RwSignal::new(season_scalar::clamp_manual_scalar(saved.manual_sr_scalar));
+    let auto_sr_scalar_enabled: RwSignal<bool> = RwSignal::new(saved.auto_sr_scalar_enabled);
+    let show_leaderboard_sr_gain: RwSignal<bool> = RwSignal::new(saved.show_leaderboard_sr_gain);
+    let show_leaderboard_sr_value: RwSignal<bool> = RwSignal::new(saved.show_leaderboard_sr_value);
+    let white_guild_tags: RwSignal<bool> = RwSignal::new(saved.white_guild_tags);
     let name_color: RwSignal<NameColor> = RwSignal::new(saved.name_color);
+    let show_minimap: RwSignal<bool> = RwSignal::new(saved.show_minimap);
+    let label_scale_master: RwSignal<f64> =
+        RwSignal::new(clamp_label_scale_master(saved.label_scale_master));
+    let label_scale_static: RwSignal<f64> =
+        RwSignal::new(clamp_label_scale_group(saved.label_scale_static));
+    let label_scale_static_name: RwSignal<f64> = RwSignal::new(clamp_label_scale_group(
+        saved
+            .label_scale_static_name
+            .unwrap_or(saved.label_scale_static),
+    ));
+    let label_scale_dynamic: RwSignal<f64> =
+        RwSignal::new(clamp_label_scale_group(saved.label_scale_dynamic));
+    let label_scale_icons: RwSignal<f64> =
+        RwSignal::new(clamp_label_scale_group(saved.label_scale_icons));
     let sidebar_open: RwSignal<bool> = RwSignal::new(saved.sidebar_open);
+    let sidebar_transient: RwSignal<bool> = RwSignal::new(false);
     let sidebar_ready: RwSignal<bool> = RwSignal::new(false);
     let sidebar_loaded: RwSignal<bool> = RwSignal::new(saved.sidebar_open);
     let sidebar_index: RwSignal<usize> = RwSignal::new(0);
     let sidebar_items: RwSignal<Vec<String>> = RwSignal::new(Vec::new());
-    // Live-first boot: defer non-essential work (tiles/minimap/history checks/icons)
+    // Live-first boot: defer non-essential work (tiles/history checks/icons)
     // until we have initial territory data and a short settle window.
     let deferred_boot_ready: RwSignal<bool> = RwSignal::new(false);
     let deferred_boot_timer_set: RwSignal<bool> = RwSignal::new(false);
     let tile_fetch_scheduled: RwSignal<bool> = RwSignal::new(false);
-    let minimap_mount_scheduled: RwSignal<bool> = RwSignal::new(false);
-    let minimap_loaded: RwSignal<bool> = RwSignal::new(false);
     let icons_loaded: RwSignal<bool> = RwSignal::new(false);
     let loading_shell_removed: RwSignal<bool> = RwSignal::new(false);
+
+    // Mobile detection
+    let is_mobile: RwSignal<bool> = RwSignal::new(canvas_dimensions().0 < MOBILE_BREAKPOINT);
+    let peek_territory: RwSignal<Option<String>> = RwSignal::new(None);
+    let selected_guild: RwSignal<Option<String>> = RwSignal::new(None);
+    let guild_online_data: RwSignal<HashMap<String, GuildOnlineInfo>> =
+        RwSignal::new(HashMap::new());
+    let show_leaderboard_territory_count: RwSignal<bool> =
+        RwSignal::new(saved.show_leaderboard_territory_count);
+    let show_leaderboard_online: RwSignal<bool> = RwSignal::new(saved.show_leaderboard_online);
+    let leaderboard_sort_by_sr: RwSignal<bool> = RwSignal::new(saved.leaderboard_sort_by_sr);
 
     // History mode signals
     let map_mode: RwSignal<MapMode> = RwSignal::new(MapMode::Live);
@@ -337,6 +572,10 @@ pub fn App() -> impl IntoView {
     let live_handoff_resync_count: RwSignal<u64> = RwSignal::new(0);
     let sse_seq_gap_detected_count: RwSignal<u64> = RwSignal::new(0);
     let history_buffer_size_max: RwSignal<usize> = RwSignal::new(0);
+    let live_season_scalar_sample: RwSignal<Option<SeasonScalarSample>> = RwSignal::new(None);
+    let history_season_scalar_sample: RwSignal<Option<SeasonScalarSample>> = RwSignal::new(None);
+    let history_season_leaderboard: RwSignal<Option<Vec<HistoryGuildSrEntry>>> =
+        RwSignal::new(None);
     let territory_geometry: StoredValue<TerritoryGeometryMap> = StoredValue::new(HashMap::new());
     let guild_colors: StoredValue<GuildColorMap> = StoredValue::new(HashMap::new());
 
@@ -357,15 +596,23 @@ pub fn App() -> impl IntoView {
     provide_context(ShowGranularMapTime(show_granular_map_time));
     provide_context(ShowNames(show_names));
     provide_context(ThickCooldownBorders(thick_cooldown_borders));
-    provide_context(BoldNames(bold_names));
-    provide_context(BoldTags(bold_tags));
-    provide_context(ThickTagOutline(thick_tag_outline));
-    provide_context(ThickNameOutline(thick_name_outline));
-    provide_context(ReadableFont(readable_font));
     provide_context(BoldConnections(bold_connections));
     provide_context(ResourceHighlight(resource_highlight));
+    provide_context(ShowResourceIcons(show_resource_icons));
+    provide_context(ManualSrScalar(manual_sr_scalar));
+    provide_context(AutoSrScalarEnabled(auto_sr_scalar_enabled));
+    provide_context(ShowLeaderboardSrGain(show_leaderboard_sr_gain));
+    provide_context(ShowLeaderboardSrValue(show_leaderboard_sr_value));
+    provide_context(WhiteGuildTags(white_guild_tags));
     provide_context(NameColorSetting(name_color));
+    provide_context(ShowMinimap(show_minimap));
+    provide_context(LabelScaleMaster(label_scale_master));
+    provide_context(LabelScaleStatic(label_scale_static));
+    provide_context(LabelScaleStaticName(label_scale_static_name));
+    provide_context(LabelScaleDynamic(label_scale_dynamic));
+    provide_context(LabelScaleIcons(label_scale_icons));
     provide_context(SidebarOpen(sidebar_open));
+    provide_context(SidebarTransient(sidebar_transient));
     provide_context(SidebarIndex(sidebar_index));
     provide_context(SidebarItems(sidebar_items));
     provide_context(CurrentMode(map_mode));
@@ -383,35 +630,211 @@ pub fn App() -> impl IntoView {
     provide_context(LiveHandoffResyncCount(live_handoff_resync_count));
     provide_context(SseSeqGapDetectedCount(sse_seq_gap_detected_count));
     provide_context(HistoryBufferSizeMax(history_buffer_size_max));
+    provide_context(LiveSeasonScalarSample(live_season_scalar_sample));
+    provide_context(HistorySeasonScalarSample(history_season_scalar_sample));
+    provide_context(HistorySeasonLeaderboard(history_season_leaderboard));
     provide_context(TerritoryGeometryStore(territory_geometry));
     provide_context(GuildColorStore(guild_colors));
     provide_context(crate::tower::TowerState::new());
+    provide_context(IsMobile(is_mobile));
+    provide_context(PeekTerritory(peek_territory));
+    provide_context(SelectedGuild(selected_guild));
+    provide_context(GuildOnlineData(guild_online_data));
+    provide_context(ShowLeaderboardTerritoryCount(
+        show_leaderboard_territory_count,
+    ));
+    provide_context(ShowLeaderboardOnline(show_leaderboard_online));
+    provide_context(LeaderboardSortBySr(leaderboard_sort_by_sr));
+
+    // Mutual exclusion: SelectedGuild and Selected clear each other
+    Effect::new(move || {
+        if selected_guild.get().is_some() {
+            selected.set(None);
+        }
+    });
+    Effect::new(move || {
+        if selected.get().is_some() {
+            selected_guild.set(None);
+        }
+    });
+
+    // Probe history capability once on startup so the History toggle appears automatically.
+    history::check_availability(history_available);
+
+    // Reset history scalar snapshot when returning to live mode.
+    Effect::new(move || {
+        if map_mode.get() == MapMode::Live {
+            history_season_scalar_sample.set(None);
+            history_season_leaderboard.set(None);
+        }
+    });
+
+    // Poll shared server-side scalar estimate while in live mode.
+    wasm_bindgen_futures::spawn_local(async move {
+        loop {
+            if map_mode.get_untracked() == MapMode::Live {
+                match season_scalar::fetch_current_scalar_sample().await {
+                    Ok(sample) => live_season_scalar_sample.set(sample),
+                    Err(e) => {
+                        web_sys::console::warn_1(
+                            &format!("season scalar fetch failed: {e}").into(),
+                        );
+                    }
+                }
+            }
+            gloo_timers::future::sleep(std::time::Duration::from_secs(60)).await;
+        }
+    });
+
+    // Poll guild online data (online counts + season ratings) while in live mode.
+    wasm_bindgen_futures::spawn_local(async move {
+        fn parse_online_response(
+            raw: HashMap<String, serde_json::Value>,
+        ) -> HashMap<String, GuildOnlineInfo> {
+            raw.into_iter()
+                .filter_map(|(name, val)| {
+                    let info = if let Some(obj) = val.as_object() {
+                        // New format: { "online": 42, "season_rating": 12000 }
+                        GuildOnlineInfo {
+                            online: obj.get("online").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                            season_rating: obj.get("season_rating").and_then(|v| v.as_i64()),
+                        }
+                    } else if let Some(n) = val.as_u64() {
+                        // Legacy format: plain u32
+                        GuildOnlineInfo {
+                            online: n as u32,
+                            season_rating: None,
+                        }
+                    } else {
+                        return None;
+                    };
+                    Some((name, info))
+                })
+                .collect()
+        }
+
+        fn encoded_names_query(names: impl IntoIterator<Item = String>) -> String {
+            names
+                .into_iter()
+                .map(|name| encode_uri_component(&name).as_string().unwrap_or(name))
+                .collect::<Vec<_>>()
+                .join(",")
+        }
+
+        loop {
+            let mut next_sleep_secs = GUILD_ONLINE_POLL_INTERVAL_SECS;
+            if map_mode.get_untracked() == MapMode::Live {
+                let map = territories.get_untracked();
+                let mut guild_counts: HashMap<String, usize> = HashMap::new();
+                for ct in map.values() {
+                    *guild_counts
+                        .entry(ct.territory.guild.name.clone())
+                        .or_default() += 1;
+                }
+                let mut sorted: Vec<_> = guild_counts.into_iter().collect();
+                sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                sorted.truncate(20);
+                let names: Vec<String> = sorted.into_iter().map(|(name, _)| name).collect();
+                if !names.is_empty() {
+                    let query = encoded_names_query(names);
+                    let url = format!("/api/guilds/online?names={}", query);
+                    match gloo_net::http::Request::get(&url).send().await {
+                        Ok(resp) if resp.ok() => {
+                            if let Ok(raw) = resp.json::<HashMap<String, serde_json::Value>>().await
+                            {
+                                guild_online_data.set(parse_online_response(raw));
+                            }
+                        }
+                        _ => {
+                            next_sleep_secs = GUILD_ONLINE_ERROR_RETRY_SECS;
+                        }
+                    }
+                } else {
+                    // Territories may not be hydrated yet right after boot/reload.
+                    next_sleep_secs = GUILD_ONLINE_BOOTSTRAP_RETRY_SECS;
+                }
+            }
+            gloo_timers::future::sleep(std::time::Duration::from_secs(next_sleep_secs)).await;
+        }
+    });
 
     // Persist settings to localStorage on any change
     Effect::new(move || {
-        let settings = Settings {
+        let settings = SettingsV2 {
             show_connections: show_connections.get(),
             abbreviate_names: abbreviate_names.get(),
             show_countdown: show_countdown.get(),
             granular_map_time: show_granular_map_time.get(),
             show_names: show_names.get(),
             thick_cooldown_borders: thick_cooldown_borders.get(),
-            bold_names: bold_names.get(),
-            bold_tags: bold_tags.get(),
-            thick_tag_outline: thick_tag_outline.get(),
-            thick_name_outline: thick_name_outline.get(),
-            readable_font: readable_font.get(),
             bold_connections: bold_connections.get(),
-            name_color: name_color.get(),
             sidebar_open: sidebar_open.get(),
             resource_highlight: resource_highlight.get(),
+            show_resource_icons: show_resource_icons.get(),
+            manual_sr_scalar: season_scalar::clamp_manual_scalar(manual_sr_scalar.get()),
+            auto_sr_scalar_enabled: auto_sr_scalar_enabled.get(),
+            show_leaderboard_sr_gain: show_leaderboard_sr_gain.get(),
+            show_leaderboard_sr_value: show_leaderboard_sr_value.get(),
+            show_leaderboard_territory_count: show_leaderboard_territory_count.get(),
+            show_leaderboard_online: show_leaderboard_online.get(),
+            leaderboard_sort_by_sr: leaderboard_sort_by_sr.get(),
+            white_guild_tags: white_guild_tags.get(),
+            show_minimap: show_minimap.get(),
+            name_color: name_color.get(),
+            label_scale_master: clamp_label_scale_master(label_scale_master.get()),
+            label_scale_static: clamp_label_scale_group(label_scale_static.get()),
+            label_scale_static_name: Some(clamp_label_scale_group(label_scale_static_name.get())),
+            label_scale_dynamic: clamp_label_scale_group(label_scale_dynamic.get()),
+            label_scale_icons: clamp_label_scale_group(label_scale_icons.get()),
         };
-        let _ = gloo_storage::LocalStorage::set("sequoia_settings", &settings);
+        let _ = gloo_storage::LocalStorage::set("sequoia_settings_v2", &settings);
     });
 
     // Enable sidebar transitions only after initial mount to avoid first-paint animation flash.
     Effect::new(move || {
         sidebar_ready.set(true);
+    });
+
+    // Resize listener: update is_mobile when crossing breakpoint
+    Effect::new({
+        move || {
+            use wasm_bindgen::prelude::*;
+            let Some(window) = web_sys::window() else {
+                return;
+            };
+
+            RESIZE_BINDING.with(|slot| {
+                if let Some(old) = slot.borrow_mut().take() {
+                    old.window
+                        .remove_event_listener_with_callback(
+                            "resize",
+                            old._callback.as_ref().unchecked_ref(),
+                        )
+                        .ok();
+                }
+            });
+
+            let cb = Closure::<dyn Fn()>::new(move || {
+                let (w, _) = canvas_dimensions();
+                let mobile = w < MOBILE_BREAKPOINT;
+                if mobile != is_mobile.get_untracked() {
+                    is_mobile.set(mobile);
+                    // Clear peek when switching to desktop
+                    if !mobile {
+                        peek_territory.set(None);
+                    }
+                }
+            });
+            window
+                .add_event_listener_with_callback("resize", cb.as_ref().unchecked_ref())
+                .ok();
+            RESIZE_BINDING.with(|slot| {
+                *slot.borrow_mut() = Some(ResizeBinding {
+                    window: window.clone(),
+                    _callback: cb,
+                });
+            });
+        }
     });
 
     // Lazy-mount sidebar panel on first open to keep initial boot focused on live map rendering.
@@ -551,45 +974,15 @@ pub fn App() -> impl IntoView {
         callback.forget();
     });
 
-    // Defer minimap mount until idle time so startup stays focused on territory rendering.
+    // Load icon atlas once deferred boot is ready so territory resource icons
+    // can render immediately without waiting for the resource-highlight toggle.
     Effect::new(move || {
-        if !deferred_boot_ready.get() || minimap_mount_scheduled.get_untracked() {
-            return;
-        }
-        minimap_mount_scheduled.set(true);
-
-        let Some(window) = web_sys::window() else {
-            minimap_loaded.set(true);
-            return;
-        };
-
-        let callback = wasm_bindgen::closure::Closure::once(move || {
-            minimap_loaded.set(true);
-        });
-        let mut scheduled = false;
-        if let Ok(idle_fn) =
-            Reflect::get(window.as_ref(), &JsValue::from_str("requestIdleCallback"))
-            && let Ok(idle_fn) = idle_fn.dyn_into::<Function>()
+        if !deferred_boot_ready.get() || !show_resource_icons.get() || icons_loaded.get_untracked()
         {
-            let _ = idle_fn.call1(window.as_ref(), callback.as_ref().unchecked_ref());
-            scheduled = true;
-        }
-        if !scheduled {
-            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
-                callback.as_ref().unchecked_ref(),
-                2_000,
-            );
-        }
-        callback.forget();
-    });
-
-    // Lazy-load icon atlas only when resource highlights are actually used.
-    Effect::new(move || {
-        if !deferred_boot_ready.get() || !resource_highlight.get() || icons_loaded.get_untracked() {
             return;
         }
         icons_loaded.set(true);
-        icons::load_resource_icons(loaded_icons);
+        icons::load_resource_atlas(loaded_icons);
     });
 
     // Start playback engine (runs continuously, only active when playing)
@@ -639,7 +1032,12 @@ pub fn App() -> impl IntoView {
                 match key.as_str() {
                     "Escape" => {
                         selected.set(None);
+                        selected_guild.set(None);
                         hovered.set(None);
+                        if sidebar_transient.get_untracked() {
+                            sidebar_open.set(false);
+                            sidebar_transient.set(false);
+                        }
                     }
                     "/" => {
                         e.prevent_default();
@@ -673,6 +1071,9 @@ pub fn App() -> impl IntoView {
                     "p" => {
                         resource_highlight.update(|v| *v = !*v);
                     }
+                    "m" => {
+                        show_minimap.update(|v| *v = !*v);
+                    }
                     "h" => {
                         let mode = map_mode.get_untracked();
                         match mode {
@@ -690,6 +1091,8 @@ pub fn App() -> impl IntoView {
                                         history_buffered_updates,
                                         history_buffer_mode_active,
                                         needs_live_resync,
+                                        history_scalar_sample: history_season_scalar_sample,
+                                        history_sr_leaderboard: history_season_leaderboard,
                                         geo_store: territory_geometry,
                                         guild_color_store: guild_colors,
                                         territories,
@@ -707,6 +1110,7 @@ pub fn App() -> impl IntoView {
                                     last_live_seq,
                                     needs_live_resync,
                                     live_handoff_resync_count,
+                                    history_sr_leaderboard: history_season_leaderboard,
                                     territories,
                                 });
                             }
@@ -720,28 +1124,36 @@ pub fn App() -> impl IntoView {
                     }
                     "[" => {
                         if map_mode.get_untracked() == MapMode::History {
-                            history::step_backward(
+                            history::step_backward(history::HistoryStepContext {
                                 history_timestamp,
                                 playback_active,
-                                map_mode,
-                                history_fetch_nonce,
-                                territory_geometry,
-                                guild_colors,
-                                territories,
-                            );
+                                fetch: history::HistoryFetchContext {
+                                    mode: map_mode,
+                                    history_fetch_nonce,
+                                    history_scalar_sample: history_season_scalar_sample,
+                                    history_sr_leaderboard: history_season_leaderboard,
+                                    geo_store: territory_geometry,
+                                    guild_color_store: guild_colors,
+                                    territories,
+                                },
+                            });
                         }
                     }
                     "]" => {
                         if map_mode.get_untracked() == MapMode::History {
-                            history::step_forward(
+                            history::step_forward(history::HistoryStepContext {
                                 history_timestamp,
                                 playback_active,
-                                map_mode,
-                                history_fetch_nonce,
-                                territory_geometry,
-                                guild_colors,
-                                territories,
-                            );
+                                fetch: history::HistoryFetchContext {
+                                    mode: map_mode,
+                                    history_fetch_nonce,
+                                    history_scalar_sample: history_season_scalar_sample,
+                                    history_sr_leaderboard: history_season_leaderboard,
+                                    geo_store: territory_geometry,
+                                    guild_color_store: guild_colors,
+                                    territories,
+                                },
+                            });
                         }
                     }
                     "r" | "0" => {
@@ -781,26 +1193,33 @@ pub fn App() -> impl IntoView {
                         let items = sidebar_items.get_untracked();
                         let idx = sidebar_index.get_untracked();
                         if let Some(name) = items.get(idx) {
-                            selected.set(Some(name.clone()));
+                            let map = territories.get_untracked();
+                            let has_active_search = !search_query.get_untracked().trim().is_empty();
+                            if has_active_search {
+                                // Search results are territory names.
+                                selected.set(Some(name.clone()));
+                                if let Some(ct) = map.get(name) {
+                                    let loc = &ct.territory.location;
+                                    let (cw, ch) = canvas_dimensions();
+                                    viewport.update(|vp| {
+                                        vp.fit_bounds(
+                                            loc.left() as f64 - 200.0,
+                                            loc.top() as f64 - 200.0,
+                                            loc.right() as f64 + 200.0,
+                                            loc.bottom() as f64 + 200.0,
+                                            cw,
+                                            ch,
+                                        );
+                                    });
+                                }
+                            } else {
+                                // Guild name (from leaderboard) — open guild panel
+                                selected_guild.set(Some(name.clone()));
+                            }
                             if map_mode.get_untracked() == MapMode::Live
                                 && !sidebar_open.get_untracked()
                             {
                                 sidebar_open.set(true);
-                            }
-                            let map = territories.get_untracked();
-                            if let Some(ct) = map.get(name) {
-                                let loc = &ct.territory.location;
-                                let (cw, ch) = canvas_dimensions();
-                                viewport.update(|vp| {
-                                    vp.fit_bounds(
-                                        loc.left() as f64 - 200.0,
-                                        loc.top() as f64 - 200.0,
-                                        loc.right() as f64 + 200.0,
-                                        loc.bottom() as f64 + 200.0,
-                                        cw,
-                                        ch,
-                                    );
-                                });
                             }
                         }
                     }
@@ -839,24 +1258,98 @@ pub fn App() -> impl IntoView {
         }
     });
 
+    // Suppress transition flash when crossing the mobile breakpoint.
+    // Temporarily disable sidebar_ready (which controls transition CSS) and re-enable after 50ms.
+    {
+        let prev_mobile: std::cell::Cell<Option<bool>> = std::cell::Cell::new(None);
+        Effect::new(move || {
+            let mobile = is_mobile.get();
+            let was = prev_mobile.get();
+            prev_mobile.set(Some(mobile));
+            if was.is_some() && was != Some(mobile) {
+                sidebar_ready.set(false);
+                if let Some(window) = web_sys::window() {
+                    let cb = wasm_bindgen::closure::Closure::once(move || {
+                        sidebar_ready.set(true);
+                    });
+                    let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                        cb.as_ref().unchecked_ref(),
+                        50,
+                    );
+                    cb.forget();
+                }
+            }
+        });
+    }
+
     view! {
         <div style="width: 100%; height: 100%; position: relative;">
             <div style="width: 100%; height: 100%; position: relative; overflow: hidden; background: #0c0e17;">
                 <MapCanvas />
-                {move || {
-                    if minimap_loaded.get() {
-                        view! { <Minimap /> }.into_any()
-                    } else {
-                        ().into_any()
+                // Minimap backdrop frame (desktop only)
+                <div
+                    style:display=move || if is_mobile.get() || !show_minimap.get() { "none" } else { "block" }
+                    style:bottom=move || if map_mode.get() == MapMode::History { "68px" } else { "16px" }
+                    style="position: absolute; left: 16px; z-index: 6; width: 200px; height: 280px; pointer-events: none; border: 1px solid rgba(58,63,92,0.6); border-radius: 4px; box-shadow: 0 4px 20px rgba(0,0,0,0.5), 0 0 1px rgba(168,85,247,0.12), inset 0 0 0 1px rgba(255,255,255,0.03);"
+                >
+                    // "MAP" label
+                    <div style="position: absolute; top: 6px; left: 8px; font-family: 'Silkscreen', monospace; font-size: 0.62rem; color: rgba(245,197,66,0.5); letter-spacing: 0.1em;">"MAP"</div>
+                    // Gold corner marks — top-left
+                    <div style="position: absolute; top: 0; left: 0; width: 8px; height: 1px; background: rgba(245,197,66,0.3);" />
+                    <div style="position: absolute; top: 0; left: 0; width: 1px; height: 8px; background: rgba(245,197,66,0.3);" />
+                    // Gold corner marks — top-right
+                    <div style="position: absolute; top: 0; right: 0; width: 8px; height: 1px; background: rgba(245,197,66,0.3);" />
+                    <div style="position: absolute; top: 0; right: 0; width: 1px; height: 8px; background: rgba(245,197,66,0.3);" />
+                    // Gold corner marks — bottom-left
+                    <div style="position: absolute; bottom: 0; left: 0; width: 8px; height: 1px; background: rgba(245,197,66,0.3);" />
+                    <div style="position: absolute; bottom: 0; left: 0; width: 1px; height: 8px; background: rgba(245,197,66,0.3);" />
+                    // Gold corner marks — bottom-right
+                    <div style="position: absolute; bottom: 0; right: 0; width: 8px; height: 1px; background: rgba(245,197,66,0.3);" />
+                    <div style="position: absolute; bottom: 0; right: 0; width: 1px; height: 8px; background: rgba(245,197,66,0.3);" />
+                </div>
+                // Mobile HUD buttons — bottom-right stack
+                <MobileHistoryToggle />
+                // Mobile FAB — opens sidebar
+                <button
+                    class="mobile-sidebar-fab"
+                    style:display=move || {
+                        if is_mobile.get() && !sidebar_open.get() { "flex" } else { "none" }
                     }
-                }}
+                    style="position: absolute; bottom: 16px; right: 16px; z-index: 20; width: 48px; height: 48px; border-radius: 12px; background: #13161f; border: 1px solid #3a3f5c; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 4px 16px rgba(0,0,0,0.5), 0 0 1px rgba(168,85,247,0.15); color: #f5c542; font-size: 1.4rem; font-family: 'JetBrains Mono', monospace; touch-action: manipulation;"
+                    on:click=move |_| {
+                        sidebar_open.set(true);
+                        sidebar_transient.set(false);
+                    }
+                >
+                    "\u{2630}"
+                </button>
             </div>
+            // Scrim overlay for mobile bottom sheet
+            <div
+                class="bottom-sheet-scrim"
+                class:scrim-visible=move || is_mobile.get() && sidebar_open.get()
+                on:click=move |_| {
+                    if is_mobile.get() {
+                        sidebar_open.set(false);
+                    }
+                }
+            />
             <div
                 class="sidebar-wrapper"
                 class:sidebar-ready=move || sidebar_ready.get()
-                style:transform=move || if sidebar_open.get() { "translateX(0)" } else { "translateX(100%)" }
+                class:sidebar-open=move || sidebar_open.get()
+                style:transform=move || {
+                    if is_mobile.get() {
+                        if sidebar_open.get() { "translateY(0)" } else { "translateY(100%)" }
+                    } else if sidebar_open.get() {
+                        "translateX(0)"
+                    } else {
+                        "translateX(100%)"
+                    }
+                }
                 style:pointer-events=move || if sidebar_open.get() { "auto" } else { "none" }
             >
+                <BottomSheetHandle />
                 <SidebarToggle />
                 {move || {
                     if sidebar_loaded.get() {
@@ -874,7 +1367,15 @@ pub fn App() -> impl IntoView {
                 }
             }}
         </div>
-        <Tooltip />
+        // Tooltip only on desktop; TerritoryPeekCard handles mobile feedback
+        {move || {
+            if !is_mobile.get() {
+                view! { <Tooltip /> }.into_any()
+            } else {
+                ().into_any()
+            }
+        }}
+        <TerritoryPeekCard />
     }
 }
 
@@ -882,13 +1383,17 @@ pub fn App() -> impl IntoView {
 #[component]
 fn SidebarToggle() -> impl IntoView {
     let SidebarOpen(sidebar_open) = expect_context();
+    let SidebarTransient(sidebar_transient) = expect_context();
 
     view! {
         <button
             class="sidebar-toggle"
             title=move || if sidebar_open.get() { "Hide sidebar" } else { "Show sidebar" }
             style="position: absolute; top: 16px; left: -44px; z-index: 11; width: 32px; height: 32px; background: #13161f; border: 1px solid #282c3e; border-radius: 6px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: border-color 0.15s, background 0.15s, color 0.15s; color: #5a5860; font-family: 'JetBrains Mono', monospace; font-size: 1.1rem; line-height: 1;"
-            on:click=move |_| sidebar_open.update(|v| *v = !*v)
+            on:click=move |_| {
+                sidebar_open.update(|v| *v = !*v);
+                sidebar_transient.set(false);
+            }
             on:mouseenter=move |e| {
                 if let Some(el) = e.target().and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok()) {
                     el.style().set_property("border-color", "rgba(245,197,66,0.4)").ok();
@@ -905,6 +1410,157 @@ fn SidebarToggle() -> impl IntoView {
             }
         >
             {move || if sidebar_open.get() { "\u{00BB}" } else { "\u{00AB}" }}
+        </button>
+    }
+}
+
+/// Swipe-to-dismiss drag handle for the mobile bottom sheet.
+#[component]
+fn BottomSheetHandle() -> impl IntoView {
+    use std::rc::Rc;
+
+    let SidebarOpen(sidebar_open) = expect_context();
+    let IsMobile(is_mobile) = expect_context();
+
+    let drag_start_y: Rc<std::cell::Cell<f64>> = Rc::new(std::cell::Cell::new(0.0));
+    let dragging: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
+
+    let drag_start_y_down = drag_start_y.clone();
+    let dragging_down = dragging.clone();
+    let drag_start_y_move = drag_start_y.clone();
+    let dragging_move = dragging.clone();
+    let drag_start_y_up = drag_start_y.clone();
+    let dragging_up = dragging.clone();
+
+    view! {
+        <div
+            class="bottom-sheet-handle"
+            on:pointerdown=move |e: web_sys::PointerEvent| {
+                if !is_mobile.get_untracked() { return; }
+                drag_start_y_down.set(e.client_y() as f64);
+                dragging_down.set(true);
+                if let Some(target) = e.target().and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok()) {
+                    target.set_pointer_capture(e.pointer_id()).ok();
+                }
+            }
+            on:pointermove=move |e: web_sys::PointerEvent| {
+                if !dragging_move.get() { return; }
+                let delta = (e.client_y() as f64 - drag_start_y_move.get()).max(0.0);
+                // Apply translate directly to sidebar wrapper parent
+                if let Some(target) = e.target()
+                    .and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok())
+                    .and_then(|el| el.parent_element())
+                    .and_then(|el| el.dyn_into::<web_sys::HtmlElement>().ok())
+                {
+                    target.style().set_property("transition", "none").ok();
+                    target.style().set_property("transform", &format!("translateY({}px)", delta)).ok();
+                }
+            }
+            on:pointerup=move |e: web_sys::PointerEvent| {
+                if !dragging_up.get() { return; }
+                dragging_up.set(false);
+                let delta = (e.client_y() as f64 - drag_start_y_up.get()).max(0.0);
+                if let Some(target) = e.target()
+                    .and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok())
+                    .and_then(|el| el.parent_element())
+                    .and_then(|el| el.dyn_into::<web_sys::HtmlElement>().ok())
+                {
+                    // Restore CSS transition
+                    target.style().remove_property("transition").ok();
+                    target.style().remove_property("transform").ok();
+                }
+                if delta > 80.0 {
+                    sidebar_open.set(false);
+                }
+            }
+        />
+    }
+}
+
+/// Mobile-only floating button to toggle history mode without opening the sidebar.
+#[component]
+fn MobileHistoryToggle() -> impl IntoView {
+    let IsMobile(is_mobile) = expect_context();
+    let SidebarOpen(sidebar_open) = expect_context();
+    let CurrentMode(map_mode) = expect_context();
+    let HistoryAvailable(history_available) = expect_context();
+    let HistoryTimestamp(history_timestamp) = expect_context();
+    let HistoryBoundsSignal(history_bounds) = expect_context();
+    let HistoryFetchNonce(history_fetch_nonce) = expect_context();
+    let PlaybackActive(playback_active) = expect_context();
+    let LastLiveSeq(last_live_seq) = expect_context();
+    let HistoryBufferedUpdates(history_buffered_updates) = expect_context();
+    let HistoryBufferModeActive(history_buffer_mode_active) = expect_context();
+    let HistorySeasonScalarSample(history_season_scalar_sample) = expect_context();
+    let HistorySeasonLeaderboard(history_season_leaderboard) = expect_context();
+    let NeedsLiveResync(needs_live_resync) = expect_context();
+    let LiveHandoffResyncCount(live_handoff_resync_count) = expect_context();
+    let TerritoryGeometryStore(geo_store) = expect_context();
+    let GuildColorStore(guild_color_store) = expect_context();
+    let territories: RwSignal<ClientTerritoryMap> = expect_context();
+
+    let is_history = move || map_mode.get() == MapMode::History;
+
+    view! {
+        <button
+            style:display=move || {
+                if is_mobile.get() && !sidebar_open.get() && history_available.get() && !is_history() {
+                    "flex"
+                } else {
+                    "none"
+                }
+            }
+            style:bottom=move || if is_history() { "76px" } else { "72px" }
+            style:background=move || if is_history() { "#f5c542" } else { "#13161f" }
+            style:color=move || if is_history() { "#13161f" } else { "#9a9590" }
+            style:border-color=move || if is_history() { "#f5c542" } else { "#3a3f5c" }
+            style:box-shadow=move || {
+                if is_history() {
+                    "0 0 12px rgba(245,197,66,0.4), 0 4px 16px rgba(0,0,0,0.5)"
+                } else {
+                    "0 4px 16px rgba(0,0,0,0.5), 0 0 1px rgba(168,85,247,0.15)"
+                }
+            }
+            style="position: absolute; right: 16px; z-index: 20; width: 48px; height: 48px; border-radius: 12px; border: 1px solid; align-items: center; justify-content: center; cursor: pointer; touch-action: manipulation; transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;"
+            on:click=move |_| {
+                if is_history() {
+                    history::exit_history_mode(history::ExitHistoryModeInput {
+                        mode: map_mode,
+                        playback_active,
+                        history_fetch_nonce,
+                        history_timestamp,
+                        history_buffered_updates,
+                        history_buffer_mode_active,
+                        last_live_seq,
+                        needs_live_resync,
+                        live_handoff_resync_count,
+                        history_sr_leaderboard: history_season_leaderboard,
+                        territories,
+                    });
+                } else {
+                    history::enter_history_mode(history::EnterHistoryModeInput {
+                        mode: map_mode,
+                        history_timestamp,
+                        history_bounds,
+                        history_fetch_nonce,
+                        history_buffered_updates,
+                        history_buffer_mode_active,
+                        needs_live_resync,
+                        history_scalar_sample: history_season_scalar_sample,
+                        history_sr_leaderboard: history_season_leaderboard,
+                        geo_store,
+                        guild_color_store,
+                        territories,
+                    });
+                }
+            }
+        >
+            <svg
+                width="18" height="18" viewBox="0 0 16 16" fill="currentColor"
+                xmlns="http://www.w3.org/2000/svg"
+            >
+                <path d="M8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0Zm0 14.4A6.4 6.4 0 1 1 8 1.6a6.4 6.4 0 0 1 0 12.8ZM8.4 4H7.2v4.8l4.2 2.52.6-1-3.6-2.12V4Z"/>
+            </svg>
         </button>
     }
 }
@@ -1007,11 +1663,43 @@ fn Tooltip() -> impl IntoView {
                             })}
                         </div>
                         {(!resources.is_empty()).then(|| {
-                            let icons_html = resource_icons_html(&resources);
-                            view! {
-                                <div style="font-size: 0.65rem; font-family: 'JetBrains Mono', monospace; margin-top: 3px; padding-top: 3px; border-top: 1px solid rgba(40,44,62,0.5); display: flex; flex-wrap: wrap; align-items: center; gap: 3px;">
-                                    <span style="display: contents;" inner_html=icons_html />
-                                </div>
+                            if resources.has_all() {
+                                let rainbow_style =
+                                    icons::sprite_style("rainbow", 11).unwrap_or_default();
+                                view! {
+                                    <div style="font-size: 0.65rem; font-family: 'JetBrains Mono', monospace; margin-top: 3px; padding-top: 3px; border-top: 1px solid rgba(40,44,62,0.5); display: flex; flex-wrap: wrap; align-items: center; gap: 3px;">
+                                        <span style="display:inline-flex;align-items:center;gap:3px;background:#1a1d2a;padding:1px 5px;border-radius:3px;border:1px solid #282c3e;">
+                                            <span style={rainbow_style} />
+                                            <span style="font-size:0.6rem;color:#e2e0d8;">"All"</span>
+                                        </span>
+                                    </div>
+                                }
+                                .into_any()
+                            } else {
+                                let badges = tooltip_resource_items(&resources)
+                                    .into_iter()
+                                    .filter(|(val, _, _, _)| *val > 0)
+                                    .map(|(val, is_double, icon, label)| {
+                                        let icon_style =
+                                            icons::sprite_style(icon, 11).unwrap_or_default();
+                                        let double_style = icon_style.clone();
+                                        let amount = format_resource_compact(val);
+                                        view! {
+                                            <span style="display:inline-flex;align-items:center;gap:3px;background:#1a1d2a;padding:1px 5px;border-radius:3px;border:1px solid #282c3e;">
+                                                <span style={icon_style} />
+                                                {(is_double).then(|| view! { <span style={double_style} /> })}
+                                                <span style="font-size:0.6rem;color:#e2e0d8;">{amount}</span>
+                                                <span style="font-size:0.52rem;color:#5a5860;">{label}</span>
+                                            </span>
+                                        }
+                                    })
+                                    .collect::<Vec<_>>();
+                                view! {
+                                    <div style="font-size: 0.65rem; font-family: 'JetBrains Mono', monospace; margin-top: 3px; padding-top: 3px; border-top: 1px solid rgba(40,44,62,0.5); display: flex; flex-wrap: wrap; align-items: center; gap: 3px;">
+                                        {badges}
+                                    </div>
+                                }
+                                .into_any()
                             }
                         })}
                         {cooldown.map(|(remaining, frac)| view! {
@@ -1029,6 +1717,94 @@ fn Tooltip() -> impl IntoView {
                             </div>
                         })}
                     </div>
+                </div>
+            }.into_any()
+        }}
+    }
+}
+
+/// Mobile peek card shown on territory tap. Displays summary info with a button to open full details.
+#[component]
+fn TerritoryPeekCard() -> impl IntoView {
+    let PeekTerritory(peek_territory) = expect_context();
+    let territories: RwSignal<ClientTerritoryMap> = expect_context();
+    let tick: RwSignal<i64> = expect_context();
+    let CurrentMode(mode) = expect_context();
+    let HistoryTimestamp(history_timestamp) = expect_context();
+    let Selected(selected) = expect_context();
+    let SidebarOpen(sidebar_open) = expect_context();
+
+    let peek_info = Memo::new(move |_| {
+        let reference_secs = if mode.get() == MapMode::History {
+            history_timestamp.get().unwrap_or_else(|| tick.get())
+        } else {
+            tick.get()
+        };
+        let name = peek_territory.get()?;
+        let map = territories.get();
+        let ct = map.get(&name)?;
+        let (r, g, b) = ct.guild_color;
+        let acquired = ct.territory.acquired.to_rfc3339();
+        let secs = chrono::DateTime::parse_from_rfc3339(&acquired)
+            .map(|dt| (reference_secs - dt.timestamp()).max(0))
+            .unwrap_or(0);
+        let held = format_hms(secs);
+        let treasury = TreasuryLevel::from_held_seconds(secs);
+        Some((
+            name,
+            ct.territory.guild.name.clone(),
+            ct.territory.guild.prefix.clone(),
+            held,
+            (r, g, b),
+            treasury,
+        ))
+    });
+
+    view! {
+        {move || {
+            let Some(info) = peek_info.get() else {
+                return view! { <div style="display:none;" /> }.into_any();
+            };
+            let (r, g, b) = info.4;
+            let treasury = info.5;
+            let (tr, tg, tb) = treasury.color_rgb();
+            let name = info.0.clone();
+            let is_history = mode.get_untracked() == MapMode::History;
+            let bottom_px = if is_history { 96 } else { 16 };
+            view! {
+                <div
+                    class="peek-card-animate"
+                    style:bottom=format!("{}px", bottom_px)
+                    style="position: fixed; left: 16px; right: 16px; z-index: 90; background: #161921; border: 1px solid #282c3e; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.6); display: flex; flex-direction: row;"
+                >
+                    <div style={format!("width: 4px; flex-shrink: 0; background: {};", rgba_css(r, g, b, 0.85))} />
+                    <div style="padding: 12px 14px; flex: 1; display: flex; flex-direction: column; gap: 4px;">
+                        <div style="font-size: 0.85rem; font-weight: 700; color: #e2e0d8; font-family: 'Silkscreen', monospace; line-height: 1.3;">
+                            <span style="color: #9a9590; font-weight: 400;">"[" {info.2.clone()} "] "</span>
+                            {info.1}
+                        </div>
+                        <div style="font-size: 0.72rem; color: #9a9590; font-family: 'JetBrains Mono', monospace;">
+                            {info.0.clone()}
+                        </div>
+                        <div style="font-size: 0.68rem; display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 2px;">
+                            <span style="color: #9a9590; font-family: 'Inter', system-ui, sans-serif;">"Held"</span>
+                            <span style="color: #e2e0d8; font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums;">{info.3}</span>
+                        </div>
+                        <div style="font-size: 0.68rem; font-family: 'JetBrains Mono', monospace; display: flex; align-items: center; gap: 4px;">
+                            <span style={format!("color: {}; font-size: 0.52rem;", rgba_css(tr, tg, tb, 1.0))}>{"\u{25C6}"}</span>
+                            <span style={format!("color: {};", rgba_css(tr, tg, tb, 0.9))}>{treasury.label()}</span>
+                        </div>
+                    </div>
+                    <button
+                        style="align-self: center; margin-right: 14px; min-height: 44px; min-width: 44px; padding: 8px 16px; background: #1a1d2a; border: 1px solid #3a3f5c; border-radius: 6px; color: #f5c542; font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; cursor: pointer; touch-action: manipulation; white-space: nowrap;"
+                        on:click=move |_| {
+                            selected.set(Some(name.clone()));
+                            sidebar_open.set(true);
+                            peek_territory.set(None);
+                        }
+                    >
+                        "Details \u{203A}"
+                    </button>
                 </div>
             }.into_any()
         }}

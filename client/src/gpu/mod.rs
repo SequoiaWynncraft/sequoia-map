@@ -1,26 +1,27 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 
 use wasm_bindgen::JsCast;
-use web_sys::HtmlCanvasElement;
+use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement};
 use wgpu::util::DeviceExt;
 
 use sequoia_shared::TreasuryLevel;
 use sequoia_shared::colors::hsl_to_rgb;
 
+use crate::app::NameColor;
+use crate::colors::brighten;
+use crate::icons::{ResourceAtlas, icon_uv};
+use crate::label_layout::{
+    IconKind, abbreviate_name, compute_label_layout_metrics, cooldown_color,
+    dynamic_label_next_update_age, dynamic_text_state, resource_icon_sequence, write_age,
+};
+use crate::renderer::{FrameMetrics, InvalidationReason, RenderCapabilities, SceneSnapshot};
 use crate::territory::ClientTerritoryMap;
 use crate::tiles::{LoadedTile, TileQuality};
+use crate::time_format::write_hms;
 use crate::viewport::Viewport;
 
-pub struct RenderFrameInput<'a> {
-    pub vp: &'a Viewport,
-    pub territories: &'a ClientTerritoryMap,
-    pub hovered: &'a Option<String>,
-    pub selected: &'a Option<String>,
-    pub tiles: &'a [LoadedTile],
-    pub world_bounds: Option<(f64, f64, f64, f64)>,
-    pub now: f64,
-    pub reference_time_secs: i64,
-}
+pub type RenderFrameInput<'a> = SceneSnapshot<'a>;
 
 // --- GPU data types ---
 
@@ -46,6 +47,11 @@ const QUAD_VERTICES: &[Vertex] = &[
 ];
 
 const QUAD_INDICES: &[u16] = &[0, 1, 2, 2, 1, 3];
+const QUAD_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 1] = [wgpu::VertexAttribute {
+    offset: 0,
+    shader_location: 0,
+    format: wgpu::VertexFormat::Float32x2,
+}];
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -64,7 +70,7 @@ pub struct TerritoryInstance {
     pub rect: [f32; 4],          // x, y, width, height (world coords)
     pub color: [f32; 4],         // r, g, b, 1.0 — target/static guild color
     pub state: [f32; 4],         // fill_alpha, border_alpha, flags, 0.0
-    pub cooldown: [f32; 4],      // cooldown_frac, treasury_r, treasury_g, treasury_b
+    pub cooldown: [f32; 4],      // acquired_time_rel_secs, unused, unused, unused
     pub anim_color: [f32; 4],    // from_r, from_g, from_b, 0.0
     pub anim_time: [f32; 4],     // start_time_relative_secs, duration_secs, 0, 0
     pub resource_data: [f32; 4], // mode, idx_a, idx_b, flags
@@ -89,6 +95,400 @@ struct TileRectUniform {
     rect: [f32; 4],
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct TextInstance {
+    rect: [f32; 4],    // world x, y, w, h
+    uv_rect: [f32; 4], // u0, v0, u1, v1
+    color: [f32; 4],   // rgba
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct IconInstance {
+    rect: [f32; 4],    // world x, y, w, h
+    uv_rect: [f32; 4], // u0, v0, u1, v1
+    tint: [f32; 4],    // rgba
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct ConnectionVertex {
+    world_pos: [f32; 2],
+    color: [f32; 4],
+}
+
+#[derive(Clone, Copy)]
+struct GlyphMeta {
+    uv_rect: [f32; 4],
+    advance: f32,
+    draw_offset_x: f32,
+    draw_width: f32,
+    draw_offset_y: f32,
+    draw_height: f32,
+}
+
+struct GpuTextRenderer {
+    pipeline: wgpu::RenderPipeline,
+    fill_bind_group: wgpu::BindGroup,
+    halo_bind_group: wgpu::BindGroup,
+    static_fill_buffer: wgpu::Buffer,
+    static_fill_count: u32,
+    static_fill_capacity: u32,
+    static_fill_instances: Vec<TextInstance>,
+    static_halo_buffer: wgpu::Buffer,
+    static_halo_count: u32,
+    static_halo_capacity: u32,
+    static_halo_instances: Vec<TextInstance>,
+    dynamic_fill_buffer: wgpu::Buffer,
+    dynamic_fill_count: u32,
+    dynamic_fill_capacity: u32,
+    dynamic_fill_instances: Vec<TextInstance>,
+    dynamic_halo_buffer: wgpu::Buffer,
+    dynamic_halo_count: u32,
+    dynamic_halo_capacity: u32,
+    dynamic_halo_instances: Vec<TextInstance>,
+    glyphs: HashMap<char, GlyphMeta>,
+    kerning: HashMap<u32, f32>,
+    line_height: f32,
+}
+
+struct GpuIconRenderer {
+    pipeline: wgpu::RenderPipeline,
+    bind_group: wgpu::BindGroup,
+    instance_buffer: wgpu::Buffer,
+    instance_count: u32,
+    instance_capacity: u32,
+    instances_buf: Vec<IconInstance>,
+    uv_by_kind: HashMap<IconKind, [f32; 4]>,
+}
+
+const GLYPH_ATLAS_FONT_PX: f64 = 96.0;
+const GLYPH_ATLAS_PADDING_PX: f64 = 6.0;
+const GLYPH_ATLAS_STROKE_FACTOR: f64 = 0.155;
+const GLYPH_ATLAS_STROKE_MIN_PX: f64 = 2.8;
+const GLYPH_ATLAS_BLEED_FACTOR: f32 = 0.62;
+const GLYPH_ATLAS_BLEED_EXTRA_PX: f32 = 1.1;
+const GLYPH_ATLAS_CHARS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 [](){}<>+-=_,.:;!?'/\\\\|@#$%^&*~`\\\"…";
+const GLYPH_ATLAS_COLS: usize = 16;
+const MINIMAP_W: f32 = 200.0;
+const MINIMAP_H: f32 = 280.0;
+const MINIMAP_MARGIN: f32 = 16.0;
+const MINIMAP_HISTORY_BOTTOM: f32 = 68.0;
+const MINIMAP_DEFAULT_WORLD_BOUNDS: (f64, f64, f64, f64) = (-2200.0, -6600.0, 1600.0, 400.0);
+
+#[inline]
+fn lerp_f32(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t.clamp(0.0, 1.0)
+}
+
+#[inline]
+fn smoothstep_f32(edge0: f32, edge1: f32, x: f32) -> f32 {
+    if edge0 >= edge1 {
+        return if x >= edge1 { 1.0 } else { 0.0 };
+    }
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+#[derive(Clone, Copy)]
+struct StaticLabelSizing {
+    detail_layout_alpha: f32,
+    tag_size: f32,
+    detail_size: f32,
+}
+
+#[inline]
+fn compute_static_label_sizing(ww: f32, hh: f32, scale: f32) -> Option<StaticLabelSizing> {
+    if ww < 8.0 || hh < 6.0 {
+        return None;
+    }
+
+    let detail_layout_x = smoothstep_f32(14.0, 36.0, ww);
+    let detail_layout_y = smoothstep_f32(9.0, 24.0, hh);
+    let detail_layout_alpha = (detail_layout_x * detail_layout_y).sqrt();
+
+    let px_per_world = scale.max(0.0001);
+    let zoom_out_boost = (1.0 + (0.55 - scale).max(0.0) * 0.40).clamp(1.0, 1.22);
+    // Continuous readability lift at mid zoom levels — wider and stronger.
+    let mid_zoom_ramp_in = smoothstep_f32(0.12, 0.44, scale);
+    let mid_zoom_ramp_out = 1.0 - smoothstep_f32(0.66, 0.98, scale);
+    let mid_zoom_boost = 1.0 + 0.35 * (mid_zoom_ramp_in * mid_zoom_ramp_out);
+
+    let min_tag_world = 14.0 / px_per_world;
+    let min_name_world = 12.5 / px_per_world;
+    let tag_floor = 6.4_f32.max(min_tag_world);
+    let tag_cap = 28.0_f32.max(tag_floor * 1.08);
+    let tag_size = (ww * 0.44 * zoom_out_boost * mid_zoom_boost).clamp(tag_floor, tag_cap);
+
+    let detail_floor = 5.6_f32.max(min_name_world);
+    let detail_cap = 16.0_f32.max(detail_floor * 1.08);
+    let detail_size = (tag_size * 0.56).clamp(detail_floor, detail_cap);
+
+    Some(StaticLabelSizing {
+        detail_layout_alpha,
+        tag_size,
+        detail_size,
+    })
+}
+
+/// Bottom Y bound of the static territory-name line, when that line is visible.
+fn static_name_bottom_bound(
+    use_static_gpu_labels: bool,
+    static_show_names: bool,
+    ww: f32,
+    hh: f32,
+    cy: f32,
+    scale: f32,
+    tag_scale: f32,
+    name_scale: f32,
+) -> Option<f32> {
+    if !use_static_gpu_labels || !static_show_names {
+        return None;
+    }
+
+    let sizing = compute_static_label_sizing(ww, hh, scale)?;
+    let detail_layout_alpha = sizing.detail_layout_alpha;
+    if detail_layout_alpha <= 0.02 {
+        return None;
+    }
+    let tag_size = sizing.tag_size * tag_scale.clamp(0.5, 4.0);
+    let detail_size = sizing.detail_size * name_scale.clamp(0.5, 4.0);
+
+    let tag_y = lerp_f32(cy, cy - (detail_size + 1.0) * 0.45, detail_layout_alpha);
+    let name_y = tag_y + tag_size * 0.5 + detail_size * 0.65;
+    Some(name_y + detail_size * 0.5)
+}
+
+fn name_color_rgba(name_color: NameColor, guild_rgb: (u8, u8, u8)) -> [f32; 4] {
+    match name_color {
+        NameColor::White => [220.0 / 255.0, 218.0 / 255.0, 210.0 / 255.0, 0.95],
+        NameColor::Guild => {
+            let (r, g, b) = brighten(guild_rgb.0, guild_rgb.1, guild_rgb.2, 1.6);
+            [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 0.95]
+        }
+        NameColor::Gold => [245.0 / 255.0, 197.0 / 255.0, 66.0 / 255.0, 0.95],
+        NameColor::Copper => [181.0 / 255.0, 103.0 / 255.0, 39.0 / 255.0, 0.95],
+        NameColor::Muted => [120.0 / 255.0, 116.0 / 255.0, 112.0 / 255.0, 0.86],
+    }
+}
+
+#[inline]
+fn kerning_key(prev: char, next: char) -> u32 {
+    ((prev as u32) << 16) | (next as u32)
+}
+
+fn gpu_console_diag_enabled() -> bool {
+    let Some(window) = web_sys::window() else {
+        return false;
+    };
+    js_sys::Reflect::get(
+        window.as_ref(),
+        &wasm_bindgen::JsValue::from_str("__SEQUOIA_GPU_DIAG__"),
+    )
+    .ok()
+    .and_then(|value| value.as_bool())
+    .unwrap_or(false)
+}
+
+fn gpu_is_firefox() -> bool {
+    web_sys::window()
+        .and_then(|w| w.navigator().user_agent().ok())
+        .map(|ua| {
+            let ua = ua.to_ascii_lowercase();
+            ua.contains("firefox") || ua.contains("fxios")
+        })
+        .unwrap_or(false)
+}
+
+fn get_2d_context(
+    canvas: &HtmlCanvasElement,
+    will_read_frequently: bool,
+) -> Option<CanvasRenderingContext2d> {
+    if will_read_frequently {
+        let options = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(
+            options.as_ref(),
+            &wasm_bindgen::JsValue::from_str("willReadFrequently"),
+            &wasm_bindgen::JsValue::from_bool(true),
+        );
+        if let Ok(Some(ctx)) = canvas.get_context_with_context_options("2d", options.as_ref())
+            && let Ok(ctx2d) = ctx.dyn_into::<CanvasRenderingContext2d>()
+        {
+            return Some(ctx2d);
+        }
+    }
+    canvas
+        .get_context("2d")
+        .ok()
+        .flatten()?
+        .dyn_into::<CanvasRenderingContext2d>()
+        .ok()
+}
+
+fn line_units(text: &str, glyphs: &HashMap<char, GlyphMeta>, kerning: &HashMap<u32, f32>) -> f32 {
+    let mut units = 0.0f32;
+    let mut prev: Option<char> = None;
+    for ch in text.chars() {
+        let Some(glyph) = glyphs.get(&ch).or_else(|| glyphs.get(&'?')) else {
+            continue;
+        };
+        if let Some(prev_ch) = prev {
+            units += kerning
+                .get(&kerning_key(prev_ch, ch))
+                .copied()
+                .unwrap_or(0.0);
+        }
+        units += glyph.advance;
+        prev = Some(ch);
+    }
+    units
+}
+
+fn fit_text_to_units(
+    text: &str,
+    max_units: f32,
+    glyphs: &HashMap<char, GlyphMeta>,
+    kerning: &HashMap<u32, f32>,
+) -> String {
+    if max_units <= 0.0 || line_units(text, glyphs, kerning) <= max_units {
+        return text.to_string();
+    }
+    let ellipsis = "...";
+    let ellipsis_units = line_units(ellipsis, glyphs, kerning);
+    if ellipsis_units >= max_units {
+        return ellipsis.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0.0f32;
+    let mut prev: Option<char> = None;
+    for ch in text.chars() {
+        let Some(next_units) = glyphs
+            .get(&ch)
+            .or_else(|| glyphs.get(&'?'))
+            .map(|g| g.advance)
+        else {
+            continue;
+        };
+        let kern = prev
+            .and_then(|prev_ch| kerning.get(&kerning_key(prev_ch, ch)).copied())
+            .unwrap_or(0.0);
+        if used + kern + next_units + ellipsis_units > max_units {
+            break;
+        }
+        used += kern + next_units;
+        out.push(ch);
+        prev = Some(ch);
+    }
+    if out.is_empty() {
+        ellipsis.to_string()
+    } else {
+        out.push_str(ellipsis);
+        out
+    }
+}
+
+fn push_text_line(
+    out: &mut Vec<TextInstance>,
+    glyphs: &HashMap<char, GlyphMeta>,
+    kerning: &HashMap<u32, f32>,
+    line_height: f32,
+    text: &str,
+    cx: f32,
+    cy: f32,
+    font_height_world: f32,
+    max_width_world: f32,
+    mut color: [f32; 4],
+) {
+    if text.is_empty() || font_height_world <= 0.0 || max_width_world <= 0.0 || line_height <= 0.0 {
+        return;
+    }
+
+    let units = line_units(text, glyphs, kerning);
+    if units <= 0.0 {
+        return;
+    }
+    let mut scale = font_height_world / line_height;
+    let width_world = units * scale;
+    if width_world > max_width_world {
+        scale *= (max_width_world / width_world).clamp(0.2, 1.0);
+    }
+    let mut cursor_x = cx - (units * scale) / 2.0;
+    let line_top_y = cy - font_height_world * 0.5;
+    color[3] = color[3].clamp(0.0, 1.0);
+    let mut prev: Option<char> = None;
+
+    for ch in text.chars() {
+        let Some(glyph) = glyphs.get(&ch).or_else(|| glyphs.get(&'?')) else {
+            continue;
+        };
+        if let Some(prev_ch) = prev {
+            cursor_x += kerning
+                .get(&kerning_key(prev_ch, ch))
+                .copied()
+                .unwrap_or(0.0)
+                * scale;
+        }
+        let step_world = glyph.advance * scale;
+        let w_world = glyph.draw_width * scale;
+        let x_world = cursor_x + glyph.draw_offset_x * scale;
+        let h_world = glyph.draw_height * scale;
+        let y_world = line_top_y + glyph.draw_offset_y * scale;
+        if w_world <= 0.0 {
+            cursor_x += step_world;
+            prev = Some(ch);
+            continue;
+        }
+        out.push(TextInstance {
+            rect: [x_world, y_world, w_world, h_world],
+            uv_rect: glyph.uv_rect,
+            color,
+        });
+        cursor_x += step_world;
+        prev = Some(ch);
+    }
+}
+
+fn push_text_line_dual(
+    fill_out: &mut Vec<TextInstance>,
+    halo_out: &mut Vec<TextInstance>,
+    glyphs: &HashMap<char, GlyphMeta>,
+    kerning: &HashMap<u32, f32>,
+    line_height: f32,
+    text: &str,
+    cx: f32,
+    cy: f32,
+    font_height_world: f32,
+    max_width_world: f32,
+    fill_color: [f32; 4],
+    halo_color: [f32; 4],
+) {
+    push_text_line(
+        halo_out,
+        glyphs,
+        kerning,
+        line_height,
+        text,
+        cx,
+        cy,
+        font_height_world,
+        max_width_world,
+        halo_color,
+    );
+    push_text_line(
+        fill_out,
+        glyphs,
+        kerning,
+        line_height,
+        text,
+        cx,
+        cy,
+        font_height_world,
+        max_width_world,
+        fill_color,
+    );
+}
+
 // --- Tile texture cache ---
 
 struct TileTexture {
@@ -111,7 +511,10 @@ pub struct GpuRenderer {
 
     // Viewport uniform (shared by all pipelines)
     viewport_buffer: wgpu::Buffer,
+    viewport_bind_group_layout: wgpu::BindGroupLayout,
     viewport_bind_group: wgpu::BindGroup,
+    minimap_viewport_buffer: wgpu::Buffer,
+    minimap_viewport_bind_group: wgpu::BindGroup,
 
     // Territory fill+border pipeline (instanced)
     territory_pipeline: wgpu::RenderPipeline,
@@ -131,6 +534,38 @@ pub struct GpuRenderer {
     tile_bind_group_layout: wgpu::BindGroupLayout,
     tile_sampler: wgpu::Sampler,
     tile_textures: HashMap<usize, TileTexture>,
+    tile_upload_canvas: Option<HtmlCanvasElement>,
+    tile_upload_ctx: Option<CanvasRenderingContext2d>,
+    tile_upload_canvas_size: (u32, u32),
+    tile_world_bounds: Option<(f64, f64, f64, f64)>,
+
+    // Connection line pipeline (full GPU mode only)
+    connection_pipeline: wgpu::RenderPipeline,
+    connection_fill_pipeline: wgpu::RenderPipeline,
+    connection_buffer: wgpu::Buffer,
+    connection_count: u32,
+    connection_capacity: u32,
+    connection_dirty: bool,
+    connection_vertices: Vec<ConnectionVertex>,
+    connection_drawn_set: HashSet<(u64, u64)>,
+    minimap_indicator_buffer: wgpu::Buffer,
+    minimap_indicator_capacity: u32,
+    minimap_bg_buffer: wgpu::Buffer,
+
+    // Text pipelines (static + dynamic)
+    text_renderer: Option<GpuTextRenderer>,
+    static_text_dirty: bool,
+    dynamic_text_dirty: bool,
+    static_zoom_bucket: i32,
+    dynamic_zoom_bucket: i32,
+    dynamic_reference_time_secs: i64,
+    dynamic_next_update_secs: i64,
+    dynamic_refresh_deferred: bool,
+    territory_name_cache: HashMap<String, (String, String)>,
+
+    // Resource icon pipeline
+    icon_renderer: Option<GpuIconRenderer>,
+    icon_dirty: bool,
 
     // Track current dimensions
     width: u32,
@@ -150,16 +585,69 @@ pub struct GpuRenderer {
     // Persistent instance buffer to avoid per-rebuild allocation
     instances_buf: Vec<TerritoryInstance>,
 
-    // FPS tracking
-    frame_count: u32,
-    fps_log_time: f64,
+    // Diagnostics
+    diag_static_rebuilds: u32,
+    diag_dynamic_rebuilds: u32,
+    diag_icon_rebuilds: u32,
+    diag_pan_only_zero_rebuild_frames: u32,
+    diag_last_vp: (f64, f64, f64),
+    diag_console_logging: bool,
+    last_render_time_ms: f64,
+    capabilities: RenderCapabilities,
+    frame_metrics: FrameMetrics,
 
     // Settings
     pub thick_cooldown_borders: bool,
     pub resource_highlight: bool,
+    pub use_static_gpu_labels: bool,
+    pub use_full_gpu_text: bool,
+    pub static_show_names: bool,
+    pub static_abbreviate_names: bool,
+    pub static_name_color: NameColor,
+    pub show_connections: bool,
+    pub bold_connections: bool,
+    pub white_guild_tags: bool,
+    pub dynamic_show_countdown: bool,
+    pub dynamic_show_granular_map_time: bool,
+    pub dynamic_show_resource_icons: bool,
+    pub label_scale_master: f32,
+    pub label_scale_static_tag: f32,
+    pub label_scale_static_name: f32,
+    pub label_scale_dynamic: f32,
+    pub label_scale_icons: f32,
 }
 
 impl GpuRenderer {
+    fn tile_world_bounds(tiles: &[LoadedTile]) -> Option<(f64, f64, f64, f64)> {
+        if tiles.is_empty() {
+            return None;
+        }
+        let mut min_x = f64::INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+        for tile in tiles {
+            let x1 = tile.x1.min(tile.x2) as f64;
+            let y1 = tile.z1.min(tile.z2) as f64;
+            let x2 = tile.x1.max(tile.x2) as f64 + 1.0;
+            let y2 = tile.z1.max(tile.z2) as f64 + 1.0;
+            min_x = min_x.min(x1);
+            min_y = min_y.min(y1);
+            max_x = max_x.max(x2);
+            max_y = max_y.max(y2);
+        }
+        Some((min_x, min_y, max_x, max_y))
+    }
+
+    #[inline]
+    fn quad_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Vertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &QUAD_VERTEX_ATTRIBUTES,
+        }
+    }
+
     /// Async initialization with a WebGL2-only path.
     pub async fn init(canvas: HtmlCanvasElement) -> Result<Self, String> {
         web_sys::console::log_1(&"wgpu init: using WebGL2 backend (WebGPU disabled)".into());
@@ -205,11 +693,17 @@ impl GpuRenderer {
 
         // WebGL2 adapters expose zero compute limits, so requesting the plain
         // default limits (which include compute) fails validation.
-        let required_limits = if backends == wgpu::Backends::GL {
+        let mut required_limits = if backends == wgpu::Backends::GL {
             wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits())
         } else {
             wgpu::Limits::default()
         };
+        // Some WebGL2 adapters (for example automation/headless environments) expose
+        // lower color-attachment limits than the downlevel default profile. Clamp
+        // to adapter-reported capability so init succeeds consistently.
+        required_limits.max_color_attachments = required_limits
+            .max_color_attachments
+            .min(adapter.limits().max_color_attachments);
 
         let (device, queue) = adapter
             .request_device(
@@ -243,6 +737,10 @@ impl GpuRenderer {
             .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
         {
             surface_config.alpha_mode = wgpu::CompositeAlphaMode::PreMultiplied;
+        }
+        // Firefox tends to pace smoother with lower swapchain queue depth.
+        if gpu_is_firefox() {
+            surface_config.desired_maximum_frame_latency = 1;
         }
         let format = surface_config.format;
 
@@ -307,6 +805,26 @@ impl GpuRenderer {
                 resource: viewport_buffer.as_entire_binding(),
             }],
         });
+        let minimap_viewport_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("minimap-viewport-ubo"),
+                contents: bytemuck::cast_slice(&[ViewportUniform {
+                    offset: [0.0, 0.0],
+                    scale: 1.0,
+                    time: 0.0,
+                    resolution: [width as f32 / dpr, height as f32 / dpr],
+                    _pad1: [0.0, 0.0],
+                }]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+        let minimap_viewport_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("minimap-viewport-bg"),
+            layout: &viewport_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: minimap_viewport_buffer.as_entire_binding(),
+            }],
+        });
 
         // --- Territory pipeline ---
         let territory_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -314,15 +832,7 @@ impl GpuRenderer {
             source: wgpu::ShaderSource::Wgsl(include_str!("territory.wgsl").into()),
         });
 
-        let vertex_layout = wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Vertex>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[wgpu::VertexAttribute {
-                offset: 0,
-                shader_location: 0,
-                format: wgpu::VertexFormat::Float32x2,
-            }],
-        };
+        let vertex_layout = Self::quad_vertex_layout();
 
         let instance_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<TerritoryInstance>() as u64,
@@ -571,7 +1081,7 @@ impl GpuRenderer {
             vertex: wgpu::VertexState {
                 module: &tile_shader,
                 entry_point: Some("vs_main"),
-                buffers: &[vertex_layout],
+                buffers: &[vertex_layout.clone()],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -595,7 +1105,130 @@ impl GpuRenderer {
             cache: None,
         });
 
-        Ok(Self {
+        // --- Connection pipeline ---
+        let connection_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("connection-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("connection.wgsl").into()),
+        });
+        let connection_vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<ConnectionVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: 8,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+            ],
+        };
+        let connection_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("connection-pl"),
+                bind_group_layouts: &[&viewport_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+        let connection_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("connection-pipeline"),
+            layout: Some(&connection_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &connection_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[connection_vertex_layout],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &connection_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        let connection_fill_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("connection-fill-pipeline"),
+                layout: Some(&connection_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &connection_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<ConnectionVertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[
+                            wgpu::VertexAttribute {
+                                offset: 0,
+                                shader_location: 0,
+                                format: wgpu::VertexFormat::Float32x2,
+                            },
+                            wgpu::VertexAttribute {
+                                offset: 8,
+                                shader_location: 1,
+                                format: wgpu::VertexFormat::Float32x4,
+                            },
+                        ],
+                    }],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &connection_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+        let connection_capacity = 4096u32;
+        let connection_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("connection-vertex-buf"),
+            size: (connection_capacity as u64) * std::mem::size_of::<ConnectionVertex>() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let minimap_indicator_capacity = 16u32;
+        let minimap_indicator_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("minimap-indicator-vertex-buf"),
+            size: (minimap_indicator_capacity as u64)
+                * std::mem::size_of::<ConnectionVertex>() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let minimap_bg_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("minimap-bg-vertex-buf"),
+            size: 6 * std::mem::size_of::<ConnectionVertex>() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut renderer = Self {
             device,
             queue,
             surface,
@@ -603,7 +1236,10 @@ impl GpuRenderer {
             vertex_buffer,
             index_buffer,
             viewport_buffer,
+            viewport_bind_group_layout,
             viewport_bind_group,
+            minimap_viewport_buffer,
+            minimap_viewport_bind_group,
             territory_pipeline,
             instance_buffer,
             instance_count: 0,
@@ -617,6 +1253,32 @@ impl GpuRenderer {
             tile_bind_group_layout,
             tile_sampler,
             tile_textures: HashMap::new(),
+            tile_upload_canvas: None,
+            tile_upload_ctx: None,
+            tile_upload_canvas_size: (0, 0),
+            tile_world_bounds: None,
+            connection_pipeline,
+            connection_fill_pipeline,
+            connection_buffer,
+            connection_count: 0,
+            connection_capacity,
+            connection_dirty: true,
+            connection_vertices: Vec::new(),
+            connection_drawn_set: HashSet::new(),
+            minimap_indicator_buffer,
+            minimap_indicator_capacity,
+            minimap_bg_buffer,
+            text_renderer: None,
+            static_text_dirty: false,
+            dynamic_text_dirty: false,
+            static_zoom_bucket: -1,
+            dynamic_zoom_bucket: -1,
+            dynamic_reference_time_secs: i64::MIN,
+            dynamic_next_update_secs: i64::MIN,
+            dynamic_refresh_deferred: false,
+            territory_name_cache: HashMap::new(),
+            icon_renderer: None,
+            icon_dirty: false,
             width,
             height,
             dpr,
@@ -624,16 +1286,766 @@ impl GpuRenderer {
             max_anim_end_ms: 0.0,
             start_time_ms: js_sys::Date::now(),
             instances_buf: Vec::new(),
-            frame_count: 0,
-            fps_log_time: 0.0,
+            diag_static_rebuilds: 0,
+            diag_dynamic_rebuilds: 0,
+            diag_icon_rebuilds: 0,
+            diag_pan_only_zero_rebuild_frames: 0,
+            diag_last_vp: (0.0, 0.0, 0.0),
+            diag_console_logging: gpu_console_diag_enabled(),
+            last_render_time_ms: 0.0,
+            capabilities: RenderCapabilities {
+                webgl2: backends == wgpu::Backends::GL,
+                gpu_text_msdf: true,
+                gpu_dynamic_labels: true,
+                compatibility_fallback: false,
+            },
+            frame_metrics: FrameMetrics::default(),
             thick_cooldown_borders: false,
             resource_highlight: false,
+            use_static_gpu_labels: false,
+            use_full_gpu_text: false,
+            static_show_names: true,
+            static_abbreviate_names: true,
+            static_name_color: NameColor::Guild,
+            show_connections: true,
+            bold_connections: false,
+            white_guild_tags: false,
+            dynamic_show_countdown: false,
+            dynamic_show_granular_map_time: false,
+            dynamic_show_resource_icons: true,
+            label_scale_master: 1.0,
+            label_scale_static_tag: 1.0,
+            label_scale_static_name: 1.0,
+            label_scale_dynamic: 1.0,
+            label_scale_icons: 1.0,
+        };
+
+        if !renderer.ensure_text_renderer() {
+            return Err("wgpu init (webgl): failed to initialize GPU text renderer".into());
+        }
+        renderer.use_static_gpu_labels = true;
+        renderer.use_full_gpu_text = true;
+
+        Ok(renderer)
+    }
+
+    fn ensure_text_renderer(&mut self) -> bool {
+        if self.text_renderer.is_some() {
+            return true;
+        }
+        let vertex_layout = Self::quad_vertex_layout();
+        self.text_renderer = Self::init_text_renderer(
+            &self.device,
+            &self.queue,
+            self.surface_config.format,
+            &self.viewport_bind_group_layout,
+            &vertex_layout,
+        );
+        self.text_renderer.is_some()
+    }
+
+    fn ensure_icon_renderer(&mut self, icons: &ResourceAtlas) -> bool {
+        if self.icon_renderer.is_some() {
+            return true;
+        }
+        let vertex_layout = Self::quad_vertex_layout();
+        self.icon_renderer = Self::init_icon_renderer(
+            &self.device,
+            &self.queue,
+            self.surface_config.format,
+            &self.viewport_bind_group_layout,
+            &vertex_layout,
+            icons,
+        );
+        self.icon_renderer.is_some()
+    }
+
+    fn init_text_renderer(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        viewport_bind_group_layout: &wgpu::BindGroupLayout,
+        vertex_layout: &wgpu::VertexBufferLayout<'_>,
+    ) -> Option<GpuTextRenderer> {
+        let Some((
+            text_bind_group_layout,
+            fill_bind_group,
+            halo_bind_group,
+            glyphs,
+            kerning,
+            line_height,
+        )) = Self::build_glyph_atlas(device, queue)
+        else {
+            web_sys::console::warn_1(
+                &"GPU text labels disabled: failed to build dual glyph atlases".into(),
+            );
+            return None;
+        };
+
+        let text_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("text-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("text.wgsl").into()),
+        });
+
+        let text_instance_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<TextInstance>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: 16,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: 32,
+                    shader_location: 3,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+            ],
+        };
+
+        let text_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("text-pl"),
+            bind_group_layouts: &[viewport_bind_group_layout, &text_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let text_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("text-pipeline"),
+            layout: Some(&text_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &text_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[vertex_layout.clone(), text_instance_layout],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &text_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let initial_capacity = 4096u32;
+        let make_buffer = |label: &'static str| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: (initial_capacity as u64) * std::mem::size_of::<TextInstance>() as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+
+        Some(GpuTextRenderer {
+            pipeline: text_pipeline,
+            fill_bind_group,
+            halo_bind_group,
+            static_fill_buffer: make_buffer("text-static-fill-buf"),
+            static_fill_count: 0,
+            static_fill_capacity: initial_capacity,
+            static_fill_instances: Vec::new(),
+            static_halo_buffer: make_buffer("text-static-halo-buf"),
+            static_halo_count: 0,
+            static_halo_capacity: initial_capacity,
+            static_halo_instances: Vec::new(),
+            dynamic_fill_buffer: make_buffer("text-dynamic-fill-buf"),
+            dynamic_fill_count: 0,
+            dynamic_fill_capacity: initial_capacity,
+            dynamic_fill_instances: Vec::new(),
+            dynamic_halo_buffer: make_buffer("text-dynamic-halo-buf"),
+            dynamic_halo_count: 0,
+            dynamic_halo_capacity: initial_capacity,
+            dynamic_halo_instances: Vec::new(),
+            glyphs,
+            kerning,
+            line_height,
         })
     }
 
-    /// Mark instance data as needing a rebuild (territory/hover/select/tick changed).
+    fn init_icon_renderer(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        viewport_bind_group_layout: &wgpu::BindGroupLayout,
+        vertex_layout: &wgpu::VertexBufferLayout<'_>,
+        icons: &ResourceAtlas,
+    ) -> Option<GpuIconRenderer> {
+        let document = web_sys::window()?.document()?;
+        let canvas = document
+            .create_element("canvas")
+            .ok()?
+            .dyn_into::<HtmlCanvasElement>()
+            .ok()?;
+        let ctx = get_2d_context(&canvas, true)?;
+        let atlas_w = icons.image.natural_width().max(1);
+        let atlas_h = icons.image.natural_height().max(1);
+        canvas.set_width(atlas_w);
+        canvas.set_height(atlas_h);
+        ctx.clear_rect(0.0, 0.0, atlas_w as f64, atlas_h as f64);
+        ctx.set_image_smoothing_enabled(false);
+        ctx.draw_image_with_html_image_element(&icons.image, 0.0, 0.0)
+            .ok()?;
+        ctx.set_image_smoothing_enabled(true);
+
+        let mut uv_by_kind = HashMap::with_capacity(6);
+        uv_by_kind.insert(IconKind::Emerald, icon_uv(0));
+        uv_by_kind.insert(IconKind::Ore, icon_uv(1));
+        uv_by_kind.insert(IconKind::Crops, icon_uv(2));
+        uv_by_kind.insert(IconKind::Fish, icon_uv(3));
+        uv_by_kind.insert(IconKind::Wood, icon_uv(4));
+        uv_by_kind.insert(IconKind::Rainbow, icon_uv(5));
+
+        let image_data = ctx
+            .get_image_data(0.0, 0.0, atlas_w as f64, atlas_h as f64)
+            .ok()?;
+        let pixels = image_data.data();
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("icon-atlas-tex"),
+            size: wgpu::Extent3d {
+                width: atlas_w,
+                height: atlas_h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * atlas_w),
+                rows_per_image: Some(atlas_h),
+            },
+            wgpu::Extent3d {
+                width: atlas_w,
+                height: atlas_h,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("icon-atlas-sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("icon-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("icon-bg"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+
+        let icon_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("icon-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("icon.wgsl").into()),
+        });
+        let icon_instance_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<IconInstance>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: 16,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: 32,
+                    shader_location: 3,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+            ],
+        };
+        let icon_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("icon-pl"),
+            bind_group_layouts: &[viewport_bind_group_layout, &bind_group_layout],
+            push_constant_ranges: &[],
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("icon-pipeline"),
+            layout: Some(&icon_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &icon_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[vertex_layout.clone(), icon_instance_layout],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &icon_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        let initial_capacity = 2048u32;
+        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("icon-instance-buf"),
+            size: (initial_capacity as u64) * std::mem::size_of::<IconInstance>() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Some(GpuIconRenderer {
+            pipeline,
+            bind_group,
+            instance_buffer,
+            instance_count: 0,
+            instance_capacity: initial_capacity,
+            instances_buf: Vec::new(),
+            uv_by_kind,
+        })
+    }
+
+    fn build_glyph_atlas(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Option<(
+        wgpu::BindGroupLayout,
+        wgpu::BindGroup,
+        wgpu::BindGroup,
+        HashMap<char, GlyphMeta>,
+        HashMap<u32, f32>,
+        f32,
+    )> {
+        let document = web_sys::window()?.document()?;
+        let canvas = document
+            .create_element("canvas")
+            .ok()?
+            .dyn_into::<HtmlCanvasElement>()
+            .ok()?;
+        let ctx = get_2d_context(&canvas, true)?;
+
+        let chars: Vec<char> = GLYPH_ATLAS_CHARS.chars().collect();
+        if chars.is_empty() {
+            return None;
+        }
+        let font = format!("{}px 'SilkscreenLocal', monospace", GLYPH_ATLAS_FONT_PX);
+        ctx.set_font(&font);
+        ctx.set_text_align("left");
+        ctx.set_text_baseline("alphabetic");
+
+        let mut max_advance = 0.0f64;
+        let mut max_left = 0.0f64;
+        let mut max_right = 0.0f64;
+        let mut max_ascent = 0.0f64;
+        let mut max_descent = 0.0f64;
+        let mut advances: HashMap<char, f32> = HashMap::with_capacity(chars.len());
+        let mut ink_bounds_x: HashMap<char, (f32, f32)> = HashMap::with_capacity(chars.len());
+        let mut ink_bounds_y: HashMap<char, (f32, f32)> = HashMap::with_capacity(chars.len());
+        for &ch in &chars {
+            let text = ch.to_string();
+            let metrics = ctx.measure_text(&text).ok();
+            let adv = metrics
+                .as_ref()
+                .map(|m| m.width())
+                .unwrap_or(GLYPH_ATLAS_FONT_PX * 0.55)
+                .max(1.0);
+            let measured_left = metrics
+                .as_ref()
+                .map(|m| m.actual_bounding_box_left())
+                .unwrap_or(0.0)
+                .max(0.0);
+            let measured_right = metrics
+                .as_ref()
+                .map(|m| m.actual_bounding_box_right())
+                .unwrap_or(adv)
+                .max(1.0);
+            let measured_ascent = metrics
+                .as_ref()
+                .map(|m| m.actual_bounding_box_ascent())
+                .unwrap_or(GLYPH_ATLAS_FONT_PX * 0.78)
+                .max(1.0);
+            let measured_descent = metrics
+                .as_ref()
+                .map(|m| m.actual_bounding_box_descent())
+                .unwrap_or(GLYPH_ATLAS_FONT_PX * 0.22)
+                .max(0.0);
+            let left = measured_left as f32;
+            let right = measured_right.max(adv - measured_left) as f32;
+            let ascent = measured_ascent as f32;
+            let descent = measured_descent as f32;
+            max_advance = max_advance.max(adv);
+            max_left = max_left.max(measured_left);
+            max_right = max_right.max(measured_right);
+            max_ascent = max_ascent.max(measured_ascent);
+            max_descent = max_descent.max(measured_descent);
+            advances.insert(ch, adv as f32);
+            ink_bounds_x.insert(ch, (left, right));
+            ink_bounds_y.insert(ch, (ascent, descent));
+        }
+
+        let mut kerning = HashMap::new();
+        for &a in &chars {
+            for &b in &chars {
+                let pair = format!("{a}{b}");
+                let pair_w = ctx.measure_text(&pair).map(|m| m.width()).unwrap_or(0.0) as f32;
+                let aw = advances.get(&a).copied().unwrap_or(0.0);
+                let bw = advances.get(&b).copied().unwrap_or(0.0);
+                let kern = pair_w - (aw + bw);
+                if kern.abs() > 0.01 {
+                    kerning.insert(kerning_key(a, b), kern);
+                }
+            }
+        }
+
+        let line_height_px = (max_ascent + max_descent).max(GLYPH_ATLAS_FONT_PX);
+        let stroke_px = ((GLYPH_ATLAS_FONT_PX * GLYPH_ATLAS_STROKE_FACTOR)
+            .max(GLYPH_ATLAS_STROKE_MIN_PX)) as f32;
+        let ink_bleed_px = stroke_px * GLYPH_ATLAS_BLEED_FACTOR + GLYPH_ATLAS_BLEED_EXTRA_PX;
+        let cell_w = (max_advance + max_left + max_right + GLYPH_ATLAS_PADDING_PX * 2.0)
+            .ceil()
+            .max(GLYPH_ATLAS_FONT_PX * 0.7);
+        let cell_h = (line_height_px + GLYPH_ATLAS_PADDING_PX * 2.0).ceil();
+        let cols = GLYPH_ATLAS_COLS;
+        let rows = chars.len().div_ceil(cols);
+        let atlas_w = (cell_w as usize * cols).max(1) as u32;
+        let atlas_h = (cell_h as usize * rows).max(1) as u32;
+        canvas.set_width(atlas_w);
+        canvas.set_height(atlas_h);
+        ctx.set_font(&font);
+        ctx.set_text_align("left");
+        ctx.set_text_baseline("alphabetic");
+
+        let mut glyphs = HashMap::with_capacity(chars.len());
+        let atlas_wf = atlas_w as f32;
+        let atlas_hf = atlas_h as f32;
+        for (i, ch) in chars.iter().copied().enumerate() {
+            let col = (i % cols) as f64;
+            let row = (i / cols) as f64;
+            let x = col * cell_w;
+            let y = row * cell_h;
+            let raw_advance = advances
+                .get(&ch)
+                .copied()
+                .unwrap_or((cell_w - GLYPH_ATLAS_PADDING_PX * 2.0).max(1.0) as f32);
+            let (left, right) = ink_bounds_x
+                .get(&ch)
+                .copied()
+                .unwrap_or((0.0, raw_advance.max(1.0)));
+            let (ascent, descent) = ink_bounds_y
+                .get(&ch)
+                .copied()
+                .unwrap_or((line_height_px as f32 * 0.78, line_height_px as f32 * 0.22));
+            let draw_offset_x = -left - ink_bleed_px;
+            let draw_width = (left + right + ink_bleed_px * 2.0)
+                .max(raw_advance)
+                .max(1.0);
+            let draw_offset_y = (max_ascent as f32 - ascent) - ink_bleed_px;
+            let draw_height = (ascent + descent + ink_bleed_px * 2.0).max(1.0);
+            let inset_x = (GLYPH_ATLAS_PADDING_PX * 0.25).max(0.5);
+            let inset_y = (GLYPH_ATLAS_PADDING_PX * 0.15).max(0.5);
+            let u0_px = (x + GLYPH_ATLAS_PADDING_PX + draw_offset_x as f64)
+                .max(x + inset_x)
+                .min(x + cell_w - 0.5);
+            let u1_px = (x + GLYPH_ATLAS_PADDING_PX + (draw_offset_x + draw_width) as f64)
+                .min(x + cell_w - 0.25)
+                .max(u0_px + 0.5);
+            let v0_px = (y + GLYPH_ATLAS_PADDING_PX + draw_offset_y as f64)
+                .max(y + inset_y)
+                .min(y + cell_h - 0.5);
+            let v1_px = (y + GLYPH_ATLAS_PADDING_PX + (draw_offset_y + draw_height) as f64)
+                .min(y + cell_h - 0.25)
+                .max(v0_px + 0.5);
+            let u0 = (u0_px as f32) / atlas_wf;
+            let v0 = (v0_px as f32) / atlas_hf;
+            let u1 = (u1_px as f32) / atlas_wf;
+            let v1 = (v1_px as f32) / atlas_hf;
+            glyphs.insert(
+                ch,
+                GlyphMeta {
+                    uv_rect: [u0, v0, u1, v1],
+                    advance: raw_advance,
+                    draw_offset_x,
+                    draw_width,
+                    draw_offset_y,
+                    draw_height,
+                },
+            );
+        }
+
+        ctx.clear_rect(0.0, 0.0, atlas_w as f64, atlas_h as f64);
+        ctx.set_fill_style_str("rgba(255,255,255,1.0)");
+        for (i, ch) in chars.iter().copied().enumerate() {
+            let col = (i % cols) as f64;
+            let row = (i / cols) as f64;
+            let x = col * cell_w;
+            let y = row * cell_h;
+            let baseline_y = y + GLYPH_ATLAS_PADDING_PX + max_ascent;
+            ctx.fill_text(&ch.to_string(), x + GLYPH_ATLAS_PADDING_PX, baseline_y)
+                .ok()?;
+        }
+        let fill_pixels = ctx
+            .get_image_data(0.0, 0.0, atlas_w as f64, atlas_h as f64)
+            .ok()?
+            .data();
+
+        ctx.clear_rect(0.0, 0.0, atlas_w as f64, atlas_h as f64);
+        ctx.set_stroke_style_str("rgba(255,255,255,1.0)");
+        ctx.set_line_join("round");
+        ctx.set_line_cap("round");
+        ctx.set_line_width(stroke_px as f64);
+        for (i, ch) in chars.iter().copied().enumerate() {
+            let col = (i % cols) as f64;
+            let row = (i / cols) as f64;
+            let x = col * cell_w;
+            let y = row * cell_h;
+            let baseline_y = y + GLYPH_ATLAS_PADDING_PX + max_ascent;
+            ctx.stroke_text(&ch.to_string(), x + GLYPH_ATLAS_PADDING_PX, baseline_y)
+                .ok()?;
+        }
+        let halo_pixels = ctx
+            .get_image_data(0.0, 0.0, atlas_w as f64, atlas_h as f64)
+            .ok()?
+            .data();
+
+        let make_texture = |label: &'static str| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: atlas_w,
+                    height: atlas_h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        };
+        let fill_texture = make_texture("glyph-atlas-fill-tex");
+        let halo_texture = make_texture("glyph-atlas-halo-tex");
+
+        let write_tex = |texture: &wgpu::Texture, pixels: &[u8]| {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                pixels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * atlas_w),
+                    rows_per_image: Some(atlas_h),
+                },
+                wgpu::Extent3d {
+                    width: atlas_w,
+                    height: atlas_h,
+                    depth_or_array_layers: 1,
+                },
+            );
+        };
+        write_tex(&fill_texture, &fill_pixels);
+        write_tex(&halo_texture, &halo_pixels);
+
+        let fill_view = fill_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let halo_view = halo_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("glyph-atlas-sampler"),
+            // Linear filtering reduces shimmer/aliasing when zooming text at non-integer scales.
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("text-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let fill_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("text-fill-bg"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&fill_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+        let halo_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("text-halo-bg"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&halo_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+        Some((
+            bind_group_layout,
+            fill_bind_group,
+            halo_bind_group,
+            glyphs,
+            kerning,
+            line_height_px as f32,
+        ))
+    }
+
+    /// Mark instance data as needing a rebuild (territory/hover/select/settings changed).
+    #[allow(dead_code)]
     pub fn mark_instance_dirty(&mut self) {
-        self.instance_dirty = true;
+        self.mark_dirty(InvalidationReason::Geometry);
+    }
+
+    /// Mark static label instances as needing a rebuild.
+    #[allow(dead_code)]
+    pub fn mark_text_dirty(&mut self) {
+        self.mark_dirty(InvalidationReason::StaticLabel);
+    }
+
+    #[allow(dead_code)]
+    pub fn mark_dynamic_text_dirty(&mut self) {
+        self.mark_dirty(InvalidationReason::DynamicLabel);
+    }
+
+    #[allow(dead_code)]
+    pub fn mark_icon_dirty(&mut self) {
+        self.mark_dirty(InvalidationReason::Resources);
+    }
+
+    #[allow(dead_code)]
+    pub fn mark_connection_dirty(&mut self) {
+        self.mark_dirty(InvalidationReason::Resources);
+    }
+
+    pub fn mark_dirty(&mut self, reason: InvalidationReason) {
+        match reason {
+            InvalidationReason::Geometry => self.instance_dirty = true,
+            InvalidationReason::StaticLabel => self.static_text_dirty = true,
+            InvalidationReason::DynamicLabel => self.dynamic_text_dirty = true,
+            InvalidationReason::Viewport => {
+                self.dynamic_text_dirty = true;
+                self.icon_dirty = true;
+            }
+            InvalidationReason::Resources => {
+                self.icon_dirty = true;
+                self.connection_dirty = true;
+            }
+        }
+    }
+
+    pub fn capabilities(&self) -> RenderCapabilities {
+        self.capabilities
+    }
+
+    pub fn frame_metrics(&self) -> FrameMetrics {
+        self.frame_metrics
+    }
+
+    #[allow(dead_code)]
+    pub fn supports_static_gpu_labels(&self) -> bool {
+        self.text_renderer.is_some()
     }
 
     /// Resize the surface when the canvas size changes.
@@ -649,12 +2061,50 @@ impl GpuRenderer {
         self.surface.configure(&self.device, &self.surface_config);
     }
 
+    fn ensure_tile_upload_context(&mut self) -> bool {
+        if self.tile_upload_canvas.is_some() && self.tile_upload_ctx.is_some() {
+            return true;
+        }
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            web_sys::console::warn_1(
+                &"Skipping tile upload: document is unavailable for upload canvas".into(),
+            );
+            return false;
+        };
+        let Some(canvas) = document
+            .create_element("canvas")
+            .ok()
+            .and_then(|element| element.dyn_into::<HtmlCanvasElement>().ok())
+        else {
+            web_sys::console::warn_1(
+                &"Skipping tile upload: failed to create upload canvas".into(),
+            );
+            return false;
+        };
+        let Some(ctx) = get_2d_context(&canvas, true) else {
+            web_sys::console::warn_1(
+                &"Skipping tile upload: failed to create upload 2d context".into(),
+            );
+            return false;
+        };
+        self.tile_upload_canvas = Some(canvas);
+        self.tile_upload_ctx = Some(ctx);
+        self.tile_upload_canvas_size = (0, 0);
+        true
+    }
+
     /// Upload tile images as GPU textures with pre-baked rect uniforms.
     pub fn upload_tiles(&mut self, tiles: &[LoadedTile]) {
-        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
-            web_sys::console::warn_1(&"Skipping tile upload: document is unavailable".into());
+        if !self.ensure_tile_upload_context() {
+            return;
+        }
+        let Some(upload_canvas) = self.tile_upload_canvas.as_ref().cloned() else {
             return;
         };
+        let Some(upload_ctx) = self.tile_upload_ctx.as_ref().cloned() else {
+            return;
+        };
+        let mut upload_size = self.tile_upload_canvas_size;
 
         for tile in tiles {
             let tile_id = tile.id;
@@ -671,28 +2121,17 @@ impl GpuRenderer {
                 continue;
             }
 
-            // Draw image to a temporary canvas to extract pixel data
-            let Some(tmp_canvas) = document
-                .create_element("canvas")
-                .ok()
-                .and_then(|element| element.dyn_into::<HtmlCanvasElement>().ok())
-            else {
-                continue;
-            };
-            tmp_canvas.set_width(w);
-            tmp_canvas.set_height(h);
-            let Some(tmp_ctx) = tmp_canvas
-                .get_context("2d")
-                .ok()
-                .flatten()
-                .and_then(|ctx| ctx.dyn_into::<web_sys::CanvasRenderingContext2d>().ok())
-            else {
-                continue;
-            };
-            tmp_ctx
+            // Reuse a persistent staging canvas/context to avoid per-tile DOM/context churn.
+            if upload_size != (w, h) {
+                upload_canvas.set_width(w);
+                upload_canvas.set_height(h);
+                upload_size = (w, h);
+            }
+            upload_ctx.clear_rect(0.0, 0.0, w as f64, h as f64);
+            upload_ctx
                 .draw_image_with_html_image_element(img, 0.0, 0.0)
                 .ok();
-            let image_data = match tmp_ctx.get_image_data(0.0, 0.0, w as f64, h as f64) {
+            let image_data = match upload_ctx.get_image_data(0.0, 0.0, w as f64, h as f64) {
                 Ok(d) => d,
                 Err(_) => continue,
             };
@@ -779,6 +2218,8 @@ impl GpuRenderer {
                 },
             );
         }
+        self.tile_upload_canvas_size = upload_size;
+        self.tile_world_bounds = Self::tile_world_bounds(tiles);
     }
 
     /// Build instance data from territories and upload to GPU.
@@ -792,10 +2233,10 @@ impl GpuRenderer {
         hovered: &Option<String>,
         selected: &Option<String>,
         now: f64,
-        reference_time_secs: i64,
         thick_cooldown_borders: bool,
     ) {
         let start_ms = self.start_time_ms;
+        let start_secs = start_ms / 1000.0;
 
         self.instances_buf.clear();
         self.instances_buf
@@ -816,31 +2257,24 @@ impl GpuRenderer {
 
                 let fill_alpha = if has_resource {
                     if is_selected {
-                        0.48
+                        0.52
                     } else if is_hovered {
-                        0.40
+                        0.44
                     } else {
-                        0.30
+                        0.34
                     }
                 } else if is_selected {
-                    0.35
+                    0.38
                 } else if is_hovered {
-                    0.30
+                    0.33
                 } else {
-                    0.22
+                    0.26
                 };
 
                 let flags = (is_hovered as u32) + (is_selected as u32) * 2;
 
-                let acquired_secs = ct.territory.acquired.timestamp();
-                let age_secs = (reference_time_secs - acquired_secs).max(0);
-                let cooldown_frac = if age_secs < 600 {
-                    ((600 - age_secs) as f32 / 600.0).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-
-                let treasury_color = TreasuryLevel::from_held_seconds(age_secs).color_f32();
+                let acquired_rel_secs =
+                    (ct.territory.acquired.timestamp() as f64 - start_secs) as f32;
 
                 // Encode animation params for GPU-side interpolation
                 let (anim_color, anim_time) = match ct.animation.as_ref() {
@@ -867,20 +2301,11 @@ impl GpuRenderer {
                     color: [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0],
                     state: [
                         fill_alpha,
-                        0.65,
+                        0.72,
                         flags as f32,
-                        if thick_cooldown_borders && cooldown_frac > 0.0 {
-                            2.0
-                        } else {
-                            1.0
-                        },
+                        if thick_cooldown_borders { 2.0 } else { 1.0 },
                     ],
-                    cooldown: [
-                        cooldown_frac,
-                        treasury_color[0],
-                        treasury_color[1],
-                        treasury_color[2],
-                    ],
+                    cooldown: [acquired_rel_secs, 0.0, 0.0, 0.0],
                     anim_color,
                     anim_time,
                     resource_data,
@@ -917,6 +2342,706 @@ impl GpuRenderer {
         }
     }
 
+    fn upload_text_buffer(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        label: &'static str,
+        instances: &[TextInstance],
+        buffer: &mut wgpu::Buffer,
+        count: &mut u32,
+        capacity: &mut u32,
+    ) {
+        *count = instances.len() as u32;
+        if *count > *capacity {
+            *capacity = (*count).next_power_of_two();
+            *buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: (*capacity as u64) * std::mem::size_of::<TextInstance>() as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        if !instances.is_empty() {
+            queue.write_buffer(buffer, 0, bytemuck::cast_slice(instances));
+        }
+    }
+
+    fn upload_icon_buffer(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        instances: &[IconInstance],
+        instance_buffer: &mut wgpu::Buffer,
+        instance_count: &mut u32,
+        instance_capacity: &mut u32,
+    ) {
+        *instance_count = instances.len() as u32;
+        if *instance_count > *instance_capacity {
+            *instance_capacity = (*instance_count).next_power_of_two();
+            *instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("icon-instance-buf"),
+                size: (*instance_capacity as u64) * std::mem::size_of::<IconInstance>() as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        if !instances.is_empty() {
+            queue.write_buffer(instance_buffer, 0, bytemuck::cast_slice(instances));
+        }
+    }
+
+    fn dynamic_zoom_bucket(scale: f64) -> i32 {
+        (scale * 20.0).floor() as i32
+    }
+
+    fn static_zoom_bucket(scale: f64) -> i32 {
+        // Finer bucketing minimizes visible stepping while zooming labels.
+        (scale * 320.0).floor() as i32
+    }
+
+    #[inline]
+    fn effective_scale(master: f32, group: f32) -> f32 {
+        let master = if master.is_finite() { master } else { 1.0 };
+        let group = if group.is_finite() { group } else { 1.0 };
+        (master * group).clamp(0.5, 4.0)
+    }
+
+    #[inline]
+    fn effective_static_tag_scale(&self) -> f32 {
+        Self::effective_scale(self.label_scale_master, self.label_scale_static_tag)
+    }
+
+    #[inline]
+    fn effective_static_name_scale(&self) -> f32 {
+        Self::effective_scale(self.label_scale_master, self.label_scale_static_name)
+    }
+
+    #[inline]
+    fn effective_dynamic_label_scale(&self) -> f32 {
+        Self::effective_scale(self.label_scale_master, self.label_scale_dynamic)
+    }
+
+    #[inline]
+    fn effective_icon_scale(&self) -> f32 {
+        Self::effective_scale(self.label_scale_master, self.label_scale_icons)
+    }
+
+    fn sync_territory_name_cache(&mut self, territories: &ClientTerritoryMap) {
+        self.territory_name_cache
+            .retain(|name, _| territories.contains_key(name));
+        for name in territories.keys() {
+            self.territory_name_cache
+                .entry(name.clone())
+                .or_insert_with(|| (abbreviate_name(name), name.clone()));
+        }
+    }
+
+    /// Build static text glyph instances (guild tag + optional territory name).
+    fn update_static_text_instances(&mut self, territories: &ClientTerritoryMap, vp: &Viewport) {
+        self.sync_territory_name_cache(territories);
+        let static_tag_scale = self.effective_static_tag_scale();
+        let static_name_scale = self.effective_static_name_scale();
+        let Some(text_renderer) = self.text_renderer.as_mut() else {
+            self.static_text_dirty = false;
+            return;
+        };
+
+        let mut fill_instances = std::mem::take(&mut text_renderer.static_fill_instances);
+        let mut halo_instances = std::mem::take(&mut text_renderer.static_halo_instances);
+        fill_instances.clear();
+        halo_instances.clear();
+
+        if !self.use_static_gpu_labels {
+            text_renderer.static_fill_instances = fill_instances;
+            text_renderer.static_halo_instances = halo_instances;
+            text_renderer.static_fill_count = 0;
+            text_renderer.static_halo_count = 0;
+            self.static_text_dirty = false;
+            return;
+        }
+
+        {
+            let glyphs = &text_renderer.glyphs;
+            let kerning = &text_renderer.kerning;
+            let line_height = text_renderer.line_height;
+            for (name, ct) in territories {
+                let loc = &ct.territory.location;
+                let ww = loc.width() as f32;
+                let hh = loc.height() as f32;
+                let Some(sizing) = compute_static_label_sizing(ww, hh, vp.scale as f32) else {
+                    continue;
+                };
+                let cx = loc.midpoint_x() as f32;
+                let cy = loc.midpoint_y() as f32;
+                let detail_layout_alpha = sizing.detail_layout_alpha;
+                let tag_size = sizing.tag_size * static_tag_scale;
+                let detail_size = sizing.detail_size * static_name_scale;
+                let px_per_world = (vp.scale as f32).max(0.0001);
+                // At far/mid zoom, allow labels to overflow territory bounds for readability.
+                let max_static_scale = static_tag_scale.max(static_name_scale);
+                let overflow_scale =
+                    (1.0 + (max_static_scale - 1.0).max(0.0) * 0.22).clamp(1.0, 1.35);
+                let overflow =
+                    (1.0 + (1.0 - smoothstep_f32(0.25, 0.65, px_per_world)) * 0.7) * overflow_scale;
+                let tag_padding = lerp_f32(3.0, 8.0, detail_layout_alpha);
+                let tag_max_w = (ww * overflow - tag_padding).max(3.0);
+                let tag_y = lerp_f32(cy, cy - (detail_size + 1.0) * 0.45, detail_layout_alpha);
+                let tag = ct.territory.guild.prefix.as_str();
+                let tag_color = if self.white_guild_tags {
+                    [220.0 / 255.0, 218.0 / 255.0, 210.0 / 255.0, 1.0]
+                } else {
+                    let (tr, tg, tb) =
+                        brighten(ct.guild_color.0, ct.guild_color.1, ct.guild_color.2, 1.6);
+                    [tr as f32 / 255.0, tg as f32 / 255.0, tb as f32 / 255.0, 1.0]
+                };
+                let tag_px = tag_size * px_per_world;
+                let tag_halo_boost = 1.0 - smoothstep_f32(9.6, 13.8, tag_px);
+                let tag_halo_alpha = (0.95 + tag_halo_boost * 0.04).clamp(0.0, 0.995);
+
+                push_text_line_dual(
+                    &mut fill_instances,
+                    &mut halo_instances,
+                    glyphs,
+                    kerning,
+                    line_height,
+                    tag,
+                    cx,
+                    tag_y,
+                    tag_size,
+                    tag_max_w,
+                    tag_color,
+                    [0.0, 0.0, 0.0, tag_halo_alpha],
+                );
+
+                if self.static_show_names && detail_layout_alpha > 0.02 {
+                    let fallback_abbrev;
+                    let base_name = if let Some((abbreviated, full)) =
+                        self.territory_name_cache.get(name.as_str())
+                    {
+                        if self.static_abbreviate_names {
+                            abbreviated.as_str()
+                        } else {
+                            full.as_str()
+                        }
+                    } else if self.static_abbreviate_names {
+                        fallback_abbrev = abbreviate_name(name);
+                        fallback_abbrev.as_str()
+                    } else {
+                        name.as_str()
+                    };
+                    let name_max_w = (ww * overflow - 10.0).max(4.0);
+                    let units_per_world = line_height / detail_size.max(0.001);
+                    let fitted =
+                        fit_text_to_units(base_name, name_max_w * units_per_world, glyphs, kerning);
+                    let name_y = tag_y + tag_size * 0.5 + detail_size * 0.65;
+                    let mut name_rgba = name_color_rgba(self.static_name_color, ct.guild_color);
+                    name_rgba[3] *= detail_layout_alpha.clamp(0.0, 1.0);
+                    let name_px = detail_size * px_per_world;
+                    let name_halo_boost = 1.0 - smoothstep_f32(8.4, 12.2, name_px);
+                    let name_halo_alpha = ((0.90 + name_halo_boost * 0.08)
+                        * detail_layout_alpha.clamp(0.0, 1.0))
+                    .clamp(0.0, 0.99);
+                    push_text_line_dual(
+                        &mut fill_instances,
+                        &mut halo_instances,
+                        glyphs,
+                        kerning,
+                        line_height,
+                        &fitted,
+                        cx,
+                        name_y,
+                        detail_size,
+                        name_max_w,
+                        name_rgba,
+                        [0.0, 0.0, 0.0, name_halo_alpha],
+                    );
+                }
+            }
+        }
+
+        text_renderer.static_fill_instances = fill_instances;
+        text_renderer.static_halo_instances = halo_instances;
+
+        Self::upload_text_buffer(
+            &self.device,
+            &self.queue,
+            "text-static-fill-buf",
+            &text_renderer.static_fill_instances,
+            &mut text_renderer.static_fill_buffer,
+            &mut text_renderer.static_fill_count,
+            &mut text_renderer.static_fill_capacity,
+        );
+        Self::upload_text_buffer(
+            &self.device,
+            &self.queue,
+            "text-static-halo-buf",
+            &text_renderer.static_halo_instances,
+            &mut text_renderer.static_halo_buffer,
+            &mut text_renderer.static_halo_count,
+            &mut text_renderer.static_halo_capacity,
+        );
+
+        self.diag_static_rebuilds = self.diag_static_rebuilds.saturating_add(1);
+        self.static_text_dirty = false;
+    }
+
+    fn update_dynamic_text_instances(
+        &mut self,
+        territories: &ClientTerritoryMap,
+        vp: &Viewport,
+        reference_time_secs: i64,
+    ) {
+        let static_tag_scale = self.effective_static_tag_scale();
+        let static_name_scale = self.effective_static_name_scale();
+        let dynamic_label_scale = self.effective_dynamic_label_scale();
+        let Some(text_renderer) = self.text_renderer.as_mut() else {
+            self.dynamic_text_dirty = false;
+            return;
+        };
+
+        let mut fill_instances = std::mem::take(&mut text_renderer.dynamic_fill_instances);
+        let mut halo_instances = std::mem::take(&mut text_renderer.dynamic_halo_instances);
+        fill_instances.clear();
+        halo_instances.clear();
+
+        if !self.use_full_gpu_text {
+            text_renderer.dynamic_fill_instances = fill_instances;
+            text_renderer.dynamic_halo_instances = halo_instances;
+            text_renderer.dynamic_fill_count = 0;
+            text_renderer.dynamic_halo_count = 0;
+            self.dynamic_text_dirty = false;
+            return;
+        }
+
+        let mut next_update_secs = i64::MAX;
+        let mut text_buf = String::with_capacity(16);
+        {
+            let glyphs = &text_renderer.glyphs;
+            let kerning = &text_renderer.kerning;
+            let line_height = text_renderer.line_height;
+            for (_name, ct) in territories {
+                let loc = &ct.territory.location;
+                let ww = loc.width() as f32;
+                let hh = loc.height() as f32;
+                let sw = ww * vp.scale as f32;
+                let sh = hh * vp.scale as f32;
+                if sw < 10.0 || sh < 8.0 {
+                    continue;
+                }
+                if sw < 28.0 || sh < 18.0 {
+                    continue;
+                }
+
+                let state =
+                    dynamic_text_state(reference_time_secs, ct.territory.acquired.timestamp());
+                let next_age = dynamic_label_next_update_age(
+                    state.age_secs,
+                    self.dynamic_show_countdown,
+                    self.dynamic_show_granular_map_time,
+                );
+                next_update_secs =
+                    next_update_secs.min(ct.territory.acquired.timestamp() + next_age);
+
+                let metrics = compute_label_layout_metrics(sw as f64, sh as f64, false);
+                let detail_layout_alpha = metrics.detail_layout_alpha;
+
+                let box_size = ww.min(hh);
+                let px_per_world = (vp.scale as f32).max(0.0001);
+                let zoom_out_boost =
+                    (1.0 + (0.55 - vp.scale as f32).max(0.0) * 0.28).clamp(1.0, 1.16);
+                let min_tag_world = 8.9 / px_per_world;
+                let min_time_world = 7.8 / px_per_world;
+                let min_cooldown_world = 8.1 / px_per_world;
+                let tag_floor = 5.6_f32.max(min_tag_world);
+                let tag_cap = 76.0_f32.max(tag_floor * 1.08);
+                let time_floor = 5.6_f32.max(min_time_world);
+                let time_cap = 44.0_f32.max(time_floor * 1.08);
+                let cooldown_floor = 6.4_f32.max(min_cooldown_world);
+                let cooldown_cap = 49.5_f32.max(cooldown_floor * 1.08);
+                let tag_size = (box_size * 0.236 * zoom_out_boost).clamp(tag_floor, tag_cap)
+                    * dynamic_label_scale;
+                let detail_size = (box_size * 0.125).clamp(5.2, 38.0) * dynamic_label_scale;
+                let time_size_full = (box_size * 0.135 * zoom_out_boost)
+                    .clamp(time_floor, time_cap)
+                    * dynamic_label_scale;
+                let time_size = if state.is_fresh {
+                    time_size_full
+                } else {
+                    (time_size_full * 0.78).max(5.0)
+                };
+                let cooldown_size = (box_size * 0.154 * zoom_out_boost)
+                    .clamp(cooldown_floor, cooldown_cap)
+                    * dynamic_label_scale;
+                let line_gap = (box_size * 0.036).clamp(1.4, 14.0) * dynamic_label_scale;
+
+                let cx = loc.midpoint_x() as f32;
+                let cy = loc.midpoint_y() as f32;
+                let static_name_bottom = static_name_bottom_bound(
+                    self.use_static_gpu_labels,
+                    self.static_show_names,
+                    ww,
+                    hh,
+                    cy,
+                    vp.scale as f32,
+                    static_tag_scale,
+                    static_name_scale,
+                );
+                let stacked_total_h = tag_size + detail_size + time_size + line_gap * 2.0;
+                let stacked_top_y = cy - stacked_total_h / 2.0;
+                let mut time_y =
+                    stacked_top_y + tag_size + line_gap + detail_size + line_gap + time_size / 2.0;
+                if let Some(name_bottom_y) = static_name_bottom {
+                    let min_time_y = name_bottom_y + time_size * 0.5 + line_gap * 0.8;
+                    time_y = time_y.max(min_time_y);
+                }
+                let compact_bottom_y = cy + tag_size / 2.0;
+                let stacked_bottom_y = time_y + time_size / 2.0;
+                let mut content_bottom_y =
+                    lerp_f32(compact_bottom_y, stacked_bottom_y, detail_layout_alpha);
+                if let Some(name_bottom_y) = static_name_bottom {
+                    content_bottom_y = content_bottom_y.max(name_bottom_y + line_gap * 0.6);
+                }
+
+                let show_dynamic_cooldown =
+                    self.dynamic_show_countdown && state.is_fresh && self.dynamic_show_countdown;
+                let show_dynamic_time = !show_dynamic_cooldown;
+
+                if show_dynamic_time {
+                    if self.dynamic_show_granular_map_time {
+                        write_hms(&mut text_buf, state.age_secs);
+                    } else {
+                        write_age(&mut text_buf, state.age_secs);
+                    }
+                    let fill_color = if state.is_fresh {
+                        let urgency = 1.0 - state.cooldown_frac as f64;
+                        let (cr, cg, cb) = cooldown_color(urgency);
+                        [
+                            cr as f32 / 255.0,
+                            cg as f32 / 255.0,
+                            cb as f32 / 255.0,
+                            0.95,
+                        ]
+                    } else {
+                        let (tr, tg, tb) =
+                            TreasuryLevel::from_held_seconds(state.age_secs).color_rgb();
+                        [
+                            tr as f32 / 255.0,
+                            tg as f32 / 255.0,
+                            tb as f32 / 255.0,
+                            0.86,
+                        ]
+                    };
+                    push_text_line_dual(
+                        &mut fill_instances,
+                        &mut halo_instances,
+                        glyphs,
+                        kerning,
+                        line_height,
+                        &text_buf,
+                        cx,
+                        time_y,
+                        time_size,
+                        (ww - 8.0).max(3.0),
+                        fill_color,
+                        [0.0, 0.0, 0.0, 0.965],
+                    );
+                }
+
+                if show_dynamic_cooldown {
+                    let remaining = 600 - state.age_secs;
+                    text_buf.clear();
+                    let _ = write!(&mut text_buf, "{}:{:02}", remaining / 60, remaining % 60);
+                    let cooldown_gap = (3.5 / vp.scale as f32).max(0.0) + line_gap * 0.35;
+                    let cd_y = content_bottom_y + cooldown_size / 2.0 + cooldown_gap;
+                    let urgency = 1.0 - state.cooldown_frac as f64;
+                    let (cr, cg, cb) = cooldown_color(urgency);
+                    let cd_alpha = 0.88 + urgency as f32 * 0.12;
+                    push_text_line_dual(
+                        &mut fill_instances,
+                        &mut halo_instances,
+                        glyphs,
+                        kerning,
+                        line_height,
+                        &text_buf,
+                        cx,
+                        cd_y,
+                        cooldown_size,
+                        (ww - 8.0).max(3.0),
+                        [
+                            cr as f32 / 255.0,
+                            cg as f32 / 255.0,
+                            cb as f32 / 255.0,
+                            cd_alpha,
+                        ],
+                        [0.0, 0.0, 0.0, 0.99],
+                    );
+                }
+            }
+        }
+
+        text_renderer.dynamic_fill_instances = fill_instances;
+        text_renderer.dynamic_halo_instances = halo_instances;
+
+        Self::upload_text_buffer(
+            &self.device,
+            &self.queue,
+            "text-dynamic-fill-buf",
+            &text_renderer.dynamic_fill_instances,
+            &mut text_renderer.dynamic_fill_buffer,
+            &mut text_renderer.dynamic_fill_count,
+            &mut text_renderer.dynamic_fill_capacity,
+        );
+        Self::upload_text_buffer(
+            &self.device,
+            &self.queue,
+            "text-dynamic-halo-buf",
+            &text_renderer.dynamic_halo_instances,
+            &mut text_renderer.dynamic_halo_buffer,
+            &mut text_renderer.dynamic_halo_count,
+            &mut text_renderer.dynamic_halo_capacity,
+        );
+
+        self.dynamic_next_update_secs = if next_update_secs == i64::MAX {
+            reference_time_secs + 1
+        } else {
+            next_update_secs
+        };
+        self.diag_dynamic_rebuilds = self.diag_dynamic_rebuilds.saturating_add(1);
+        self.dynamic_text_dirty = false;
+    }
+
+    fn update_icon_instances(
+        &mut self,
+        territories: &ClientTerritoryMap,
+        vp: &Viewport,
+        reference_time_secs: i64,
+    ) {
+        let static_tag_scale = self.effective_static_tag_scale();
+        let static_name_scale = self.effective_static_name_scale();
+        let dynamic_label_scale = self.effective_dynamic_label_scale();
+        let icon_scale = self.effective_icon_scale();
+        let Some(renderer) = self.icon_renderer.as_mut() else {
+            self.icon_dirty = false;
+            return;
+        };
+        renderer.instances_buf.clear();
+        if !self.use_full_gpu_text || !self.dynamic_show_resource_icons {
+            renderer.instance_count = 0;
+            self.icon_dirty = false;
+            return;
+        }
+
+        for (_name, ct) in territories {
+            let loc = &ct.territory.location;
+            let ww = loc.width() as f32;
+            let hh = loc.height() as f32;
+            let sw = ww * vp.scale as f32;
+            let sh = hh * vp.scale as f32;
+            if sw <= 55.0 || sh <= 35.0 || ct.territory.resources.is_empty() {
+                continue;
+            }
+
+            let state = dynamic_text_state(reference_time_secs, ct.territory.acquired.timestamp());
+            let metrics = compute_label_layout_metrics(sw as f64, sh as f64, false);
+            let detail_layout_alpha = metrics.detail_layout_alpha;
+            if detail_layout_alpha <= 0.001 {
+                continue;
+            }
+
+            let icon_kinds = resource_icon_sequence(&ct.territory.resources);
+            if icon_kinds.is_empty() {
+                continue;
+            }
+
+            let box_size = ww.min(hh);
+            let px_per_world = (vp.scale as f32).max(0.0001);
+            let zoom_out_boost = (1.0 + (0.55 - vp.scale as f32).max(0.0) * 0.28).clamp(1.0, 1.16);
+            let min_tag_world = 8.9 / px_per_world;
+            let min_time_world = 7.8 / px_per_world;
+            let min_cooldown_world = 8.1 / px_per_world;
+            let tag_floor = 5.6_f32.max(min_tag_world);
+            let tag_cap = 76.0_f32.max(tag_floor * 1.08);
+            let time_floor = 5.6_f32.max(min_time_world);
+            let time_cap = 44.0_f32.max(time_floor * 1.08);
+            let cooldown_floor = 6.4_f32.max(min_cooldown_world);
+            let cooldown_cap = 49.5_f32.max(cooldown_floor * 1.08);
+            let tag_size =
+                (box_size * 0.236 * zoom_out_boost).clamp(tag_floor, tag_cap) * dynamic_label_scale;
+            let detail_size = (box_size * 0.125).clamp(5.2, 38.0) * dynamic_label_scale;
+            let time_size_full = (box_size * 0.135 * zoom_out_boost).clamp(time_floor, time_cap)
+                * dynamic_label_scale;
+            let time_size = if state.is_fresh {
+                time_size_full
+            } else {
+                (time_size_full * 0.78).max(5.0)
+            };
+            let cooldown_size = (box_size * 0.154 * zoom_out_boost)
+                .clamp(cooldown_floor, cooldown_cap)
+                * dynamic_label_scale;
+            let line_gap = (box_size * 0.036).clamp(1.4, 14.0) * dynamic_label_scale;
+
+            let cx = loc.midpoint_x() as f32;
+            let cy = loc.midpoint_y() as f32;
+            let static_name_bottom = static_name_bottom_bound(
+                self.use_static_gpu_labels,
+                self.static_show_names,
+                ww,
+                hh,
+                cy,
+                vp.scale as f32,
+                static_tag_scale,
+                static_name_scale,
+            );
+            let stacked_total_h = tag_size + detail_size + time_size + line_gap * 2.0;
+            let stacked_top_y = cy - stacked_total_h / 2.0;
+            let mut time_y =
+                stacked_top_y + tag_size + line_gap + detail_size + line_gap + time_size / 2.0;
+            if let Some(name_bottom_y) = static_name_bottom {
+                let min_time_y = name_bottom_y + time_size * 0.5 + line_gap * 0.8;
+                time_y = time_y.max(min_time_y);
+            }
+            let compact_bottom_y = cy + tag_size / 2.0;
+            let stacked_bottom_y = time_y + time_size / 2.0;
+            let mut content_bottom_y =
+                lerp_f32(compact_bottom_y, stacked_bottom_y, detail_layout_alpha);
+            if let Some(name_bottom_y) = static_name_bottom {
+                content_bottom_y = content_bottom_y.max(name_bottom_y + line_gap * 0.6);
+            }
+            let cooldown_anchor_y = content_bottom_y
+                + cooldown_size / 2.0
+                + (lerp_f32(3.0, 4.0, detail_layout_alpha) / vp.scale as f32);
+
+            // Slightly larger icon footprint (+~12.5%) for better readability at gameplay zooms.
+            let icon_size_px = ((sw.min(sh) * 0.27).clamp(13.0, 38.0) * icon_scale).round();
+            let icon_size_world = (icon_size_px / vp.scale as f32).max(1.0);
+            let icon_gap_world = icon_size_world * 1.3;
+            let icon_offset_world =
+                (lerp_f32(3.0, 4.0, detail_layout_alpha) / vp.scale as f32).max(0.0);
+            let icon_y = if state.is_fresh && self.dynamic_show_countdown {
+                cooldown_anchor_y + cooldown_size / 2.0 + icon_size_world / 2.0 + icon_offset_world
+            } else {
+                content_bottom_y + icon_size_world / 2.0 + icon_offset_world
+            };
+            let total_w = (icon_kinds.len() as f32 - 1.0) * icon_gap_world + icon_size_world;
+            let mut dx = cx - total_w / 2.0;
+            for kind in icon_kinds {
+                let Some(uv) = renderer.uv_by_kind.get(&kind).copied() else {
+                    continue;
+                };
+                renderer.instances_buf.push(IconInstance {
+                    rect: [
+                        dx,
+                        icon_y - icon_size_world / 2.0,
+                        icon_size_world,
+                        icon_size_world,
+                    ],
+                    uv_rect: uv,
+                    tint: [1.0, 1.0, 1.0, 1.0],
+                });
+                dx += icon_gap_world;
+            }
+        }
+
+        let instances = renderer.instances_buf.as_slice();
+        Self::upload_icon_buffer(
+            &self.device,
+            &self.queue,
+            instances,
+            &mut renderer.instance_buffer,
+            &mut renderer.instance_count,
+            &mut renderer.instance_capacity,
+        );
+        self.diag_icon_rebuilds = self.diag_icon_rebuilds.saturating_add(1);
+        self.icon_dirty = false;
+    }
+
+    fn update_connection_vertices(&mut self, territories: &ClientTerritoryMap, scale: f64) {
+        self.connection_vertices.clear();
+        if !self.show_connections {
+            self.connection_count = 0;
+            self.connection_dirty = false;
+            return;
+        }
+
+        let zoom_fade = smoothstep_f32(0.15, 0.45, scale as f32);
+        if zoom_fade < 0.001 {
+            self.connection_count = 0;
+            self.connection_dirty = false;
+            return;
+        }
+
+        self.connection_drawn_set.clear();
+        for ct in territories.values() {
+            let loc = &ct.territory.location;
+            let name_hash = ct.name_hash;
+            let ax = loc.midpoint_x() as f32;
+            let ay = loc.midpoint_y() as f32;
+
+            for conn_name in &ct.territory.connections {
+                let Some(conn_ct) = territories.get(conn_name) else {
+                    continue;
+                };
+                let conn_hash = conn_ct.name_hash;
+                let edge = if name_hash < conn_hash {
+                    (name_hash, conn_hash)
+                } else {
+                    (conn_hash, name_hash)
+                };
+                if !self.connection_drawn_set.insert(edge) {
+                    continue;
+                }
+                let conn_loc = &conn_ct.territory.location;
+                let bx = conn_loc.midpoint_x() as f32;
+                let by = conn_loc.midpoint_y() as f32;
+
+                let color = if self.bold_connections {
+                    let (cr, cg, cb) = ct.guild_color;
+                    let lum = 0.299 * cr as f64 + 0.587 * cg as f64 + 0.114 * cb as f64;
+                    let dark_boost = (1.0 - lum / 255.0).clamp(0.0, 1.0);
+                    let brighten_factor = 1.4 + dark_boost * 0.8;
+                    let alpha = (0.35 + dark_boost * 0.20) as f32 * zoom_fade;
+                    let (r, g, b) = brighten(cr, cg, cb, brighten_factor);
+                    [
+                        r as f32 / 255.0,
+                        g as f32 / 255.0,
+                        b as f32 / 255.0,
+                        alpha.clamp(0.0, 1.0),
+                    ]
+                } else {
+                    [1.0, 1.0, 1.0, 0.12 * zoom_fade]
+                };
+
+                self.connection_vertices.push(ConnectionVertex {
+                    world_pos: [ax, ay],
+                    color,
+                });
+                self.connection_vertices.push(ConnectionVertex {
+                    world_pos: [bx, by],
+                    color,
+                });
+            }
+        }
+
+        self.connection_count = self.connection_vertices.len() as u32;
+        if self.connection_count > self.connection_capacity {
+            self.connection_capacity = self.connection_count.next_power_of_two();
+            self.connection_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("connection-vertex-buf"),
+                size: (self.connection_capacity as u64)
+                    * std::mem::size_of::<ConnectionVertex>() as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        if !self.connection_vertices.is_empty() {
+            self.queue.write_buffer(
+                &self.connection_buffer,
+                0,
+                bytemuck::cast_slice(&self.connection_vertices),
+            );
+        }
+        self.connection_dirty = false;
+    }
+
     /// Render a full frame. Returns true if animations are active.
     pub fn render(&mut self, frame: RenderFrameInput<'_>) -> bool {
         let RenderFrameInput {
@@ -928,27 +3053,16 @@ impl GpuRenderer {
             world_bounds,
             now,
             reference_time_secs,
+            interaction_active,
+            icons,
+            show_minimap,
+            history_mode,
         } = frame;
-
-        // FPS counter — log every 2 seconds
-        self.frame_count += 1;
-        if self.fps_log_time == 0.0 {
-            self.fps_log_time = now;
-        } else {
-            let elapsed = now - self.fps_log_time;
-            if elapsed >= 2000.0 {
-                let fps = self.frame_count as f64 / (elapsed / 1000.0);
-                web_sys::console::log_1(
-                    &format!(
-                        "fps: {fps:.1} ({} frames / {:.0}ms)",
-                        self.frame_count, elapsed
-                    )
-                    .into(),
-                );
-                self.frame_count = 0;
-                self.fps_log_time = now;
-            }
-        }
+        let frame_start_ms = now;
+        let mut draw_calls: u32 = 0;
+        let mut tile_draw_calls: u32 = 0;
+        let mut bytes_uploaded: u64 = 0;
+        let minimap_world_bounds = self.tile_world_bounds.or(world_bounds);
 
         // CSS pixel dimensions for viewport/culling (shaders work in CSS space)
         let w = self.width as f32 / self.dpr;
@@ -963,9 +3077,17 @@ impl GpuRenderer {
                 scale: vp.scale as f32,
                 time: ((now - self.start_time_ms) / 1000.0) as f32,
                 resolution: [w, h],
-                _pad1: [0.0, 0.0],
+                _pad1: [
+                    (reference_time_secs as f64 - self.start_time_ms / 1000.0) as f32,
+                    0.0,
+                ],
             }]),
         );
+        bytes_uploaded += std::mem::size_of::<ViewportUniform>() as u64;
+
+        let mut did_static_rebuild = false;
+        let mut did_dynamic_rebuild = false;
+        let mut did_icon_rebuild = false;
 
         // Update instance buffer only when state has changed.
         // Animation color interpolation is GPU-side — no per-frame rebuild needed.
@@ -975,10 +3097,138 @@ impl GpuRenderer {
                 hovered,
                 selected,
                 now,
-                reference_time_secs,
                 self.thick_cooldown_borders,
             );
+            bytes_uploaded +=
+                (self.instance_count as u64) * std::mem::size_of::<TerritoryInstance>() as u64;
             self.instance_dirty = false;
+        }
+        if self.connection_dirty {
+            self.update_connection_vertices(territories, vp.scale);
+            bytes_uploaded +=
+                (self.connection_count as u64) * std::mem::size_of::<ConnectionVertex>() as u64;
+        }
+
+        if (self.use_full_gpu_text || self.use_static_gpu_labels) && self.text_renderer.is_none() {
+            if self.ensure_text_renderer() {
+                self.static_text_dirty = true;
+                self.dynamic_text_dirty = true;
+            } else {
+                // Fail closed: map rendering requires the GPU text pipeline.
+                return false;
+            }
+        }
+        if self.dynamic_show_resource_icons
+            && let Some(icon_set) = icons.as_ref()
+            && self.icon_renderer.is_none()
+        {
+            if self.ensure_icon_renderer(icon_set) {
+                self.icon_dirty = true;
+            } else {
+                // Keep the map running even if resource icon atlas init fails.
+                self.dynamic_show_resource_icons = false;
+            }
+        }
+
+        let static_zoom_bucket = Self::static_zoom_bucket(vp.scale);
+        if static_zoom_bucket != self.static_zoom_bucket {
+            self.static_zoom_bucket = static_zoom_bucket;
+            self.static_text_dirty = true;
+        }
+
+        if self.static_text_dirty {
+            self.update_static_text_instances(territories, vp);
+            if let Some(text_renderer) = self.text_renderer.as_ref() {
+                let per = std::mem::size_of::<TextInstance>() as u64;
+                bytes_uploaded += (text_renderer.static_fill_count as u64
+                    + text_renderer.static_halo_count as u64)
+                    * per;
+            }
+            did_static_rebuild = true;
+        }
+
+        let zoom_bucket = Self::dynamic_zoom_bucket(vp.scale);
+        if zoom_bucket != self.dynamic_zoom_bucket {
+            self.dynamic_zoom_bucket = zoom_bucket;
+            self.dynamic_text_dirty = true;
+            self.icon_dirty = true;
+            self.connection_dirty = true;
+        }
+        if reference_time_secs != self.dynamic_reference_time_secs {
+            let prev_reference = self.dynamic_reference_time_secs;
+            self.dynamic_reference_time_secs = reference_time_secs;
+            let stepped_back = prev_reference != i64::MIN && reference_time_secs < prev_reference;
+            let crossed_scheduled_boundary = self.dynamic_next_update_secs == i64::MIN
+                || reference_time_secs >= self.dynamic_next_update_secs;
+            if stepped_back || crossed_scheduled_boundary {
+                if interaction_active {
+                    self.dynamic_refresh_deferred = true;
+                } else {
+                    self.dynamic_text_dirty = true;
+                    self.dynamic_refresh_deferred = false;
+                    // Icons can move when cooldown line appears/disappears.
+                    if self.dynamic_show_countdown {
+                        self.icon_dirty = true;
+                    }
+                }
+            }
+        }
+        if !interaction_active && self.dynamic_refresh_deferred {
+            self.dynamic_text_dirty = true;
+            self.dynamic_refresh_deferred = false;
+            if self.dynamic_show_countdown {
+                self.icon_dirty = true;
+            }
+        }
+        if self.use_full_gpu_text && self.dynamic_text_dirty {
+            self.update_dynamic_text_instances(territories, vp, reference_time_secs);
+            if let Some(text_renderer) = self.text_renderer.as_ref() {
+                let per = std::mem::size_of::<TextInstance>() as u64;
+                bytes_uploaded += (text_renderer.dynamic_fill_count as u64
+                    + text_renderer.dynamic_halo_count as u64)
+                    * per;
+            }
+            did_dynamic_rebuild = true;
+        }
+        if self.use_full_gpu_text
+            && self.dynamic_show_resource_icons
+            && self.icon_dirty
+            && self.icon_renderer.is_some()
+        {
+            self.update_icon_instances(territories, vp, reference_time_secs);
+            if let Some(icon_renderer) = self.icon_renderer.as_ref() {
+                bytes_uploaded += (icon_renderer.instance_count as u64)
+                    * std::mem::size_of::<IconInstance>() as u64;
+            }
+            did_icon_rebuild = true;
+        }
+
+        let pan_only = (vp.scale - self.diag_last_vp.2).abs() < 0.000001
+            && ((vp.offset_x - self.diag_last_vp.0).abs() > 0.001
+                || (vp.offset_y - self.diag_last_vp.1).abs() > 0.001);
+        if pan_only && !did_static_rebuild && !did_dynamic_rebuild && !did_icon_rebuild {
+            self.diag_pan_only_zero_rebuild_frames =
+                self.diag_pan_only_zero_rebuild_frames.saturating_add(1);
+        }
+        self.diag_last_vp = (vp.offset_x, vp.offset_y, vp.scale);
+
+        if self.diag_console_logging
+            && (did_static_rebuild || did_dynamic_rebuild || did_icon_rebuild)
+        {
+            web_sys::console::log_1(
+                &format!(
+                    "gpu-diag static_rebuilds={} dynamic_rebuilds={} icon_rebuilds={} pan_zero_rebuild_frames={}",
+                    self.diag_static_rebuilds,
+                    self.diag_dynamic_rebuilds,
+                    self.diag_icon_rebuilds,
+                    self.diag_pan_only_zero_rebuild_frames
+                )
+                .into(),
+            );
+            self.diag_static_rebuilds = 0;
+            self.diag_dynamic_rebuilds = 0;
+            self.diag_icon_rebuilds = 0;
+            self.diag_pan_only_zero_rebuild_frames = 0;
         }
 
         // Pre-compute glow uniforms and write buffers BEFORE the render pass
@@ -1010,6 +3260,7 @@ impl GpuRenderer {
                         _pad: 0.0,
                     }]),
                 );
+                bytes_uploaded += std::mem::size_of::<GlowUniform>() as u64;
                 draw_sel_glow = true;
             }
         }
@@ -1044,6 +3295,7 @@ impl GpuRenderer {
                             _pad: 0.0,
                         }]),
                     );
+                    bytes_uploaded += std::mem::size_of::<GlowUniform>() as u64;
                     draw_hov_glow = true;
                 }
             }
@@ -1132,6 +3384,8 @@ impl GpuRenderer {
 
                     pass.set_bind_group(1, &tile_tex.bind_group, &[]);
                     pass.draw_indexed(0..6, 0, 0..1);
+                    draw_calls = draw_calls.saturating_add(1);
+                    tile_draw_calls = tile_draw_calls.saturating_add(1);
                 }
             }
 
@@ -1143,6 +3397,15 @@ impl GpuRenderer {
                 pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
                 pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                 pass.draw_indexed(0..6, 0, 0..self.instance_count);
+                draw_calls = draw_calls.saturating_add(1);
+            }
+
+            if self.connection_count > 0 {
+                pass.set_pipeline(&self.connection_pipeline);
+                pass.set_bind_group(0, &self.viewport_bind_group, &[]);
+                pass.set_vertex_buffer(0, self.connection_buffer.slice(..));
+                pass.draw(0..self.connection_count, 0..1);
+                draw_calls = draw_calls.saturating_add(1);
             }
 
             // Glow draws — uniforms already written before pass to avoid
@@ -1156,17 +3419,316 @@ impl GpuRenderer {
                 if draw_sel_glow {
                     pass.set_bind_group(1, &self.glow_bind_group_sel, &[]);
                     pass.draw_indexed(0..6, 0, 0..1);
+                    draw_calls = draw_calls.saturating_add(1);
                 }
 
                 if draw_hov_glow {
                     pass.set_bind_group(1, &self.glow_bind_group_hov, &[]);
                     pass.draw_indexed(0..6, 0, 0..1);
+                    draw_calls = draw_calls.saturating_add(1);
                 }
+            }
+
+            if self.use_static_gpu_labels
+                && let Some(text_renderer) = self.text_renderer.as_ref()
+            {
+                pass.set_pipeline(&text_renderer.pipeline);
+                pass.set_bind_group(0, &self.viewport_bind_group, &[]);
+                pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+
+                if text_renderer.static_halo_count > 0 {
+                    pass.set_bind_group(1, &text_renderer.halo_bind_group, &[]);
+                    pass.set_vertex_buffer(1, text_renderer.static_halo_buffer.slice(..));
+                    pass.draw_indexed(0..6, 0, 0..text_renderer.static_halo_count);
+                    draw_calls = draw_calls.saturating_add(1);
+                }
+                if text_renderer.static_fill_count > 0 {
+                    pass.set_bind_group(1, &text_renderer.fill_bind_group, &[]);
+                    pass.set_vertex_buffer(1, text_renderer.static_fill_buffer.slice(..));
+                    pass.draw_indexed(0..6, 0, 0..text_renderer.static_fill_count);
+                    draw_calls = draw_calls.saturating_add(1);
+                }
+
+                if self.use_full_gpu_text && text_renderer.dynamic_halo_count > 0 {
+                    pass.set_bind_group(1, &text_renderer.halo_bind_group, &[]);
+                    pass.set_vertex_buffer(1, text_renderer.dynamic_halo_buffer.slice(..));
+                    pass.draw_indexed(0..6, 0, 0..text_renderer.dynamic_halo_count);
+                    draw_calls = draw_calls.saturating_add(1);
+                }
+                if self.use_full_gpu_text && text_renderer.dynamic_fill_count > 0 {
+                    pass.set_bind_group(1, &text_renderer.fill_bind_group, &[]);
+                    pass.set_vertex_buffer(1, text_renderer.dynamic_fill_buffer.slice(..));
+                    pass.draw_indexed(0..6, 0, 0..text_renderer.dynamic_fill_count);
+                    draw_calls = draw_calls.saturating_add(1);
+                }
+            }
+
+            if self.use_full_gpu_text
+                && self.dynamic_show_resource_icons
+                && let Some(icon_renderer) = self.icon_renderer.as_ref()
+                && icon_renderer.instance_count > 0
+            {
+                pass.set_pipeline(&icon_renderer.pipeline);
+                pass.set_bind_group(0, &self.viewport_bind_group, &[]);
+                pass.set_bind_group(1, &icon_renderer.bind_group, &[]);
+                pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                pass.set_vertex_buffer(1, icon_renderer.instance_buffer.slice(..));
+                pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                pass.draw_indexed(0..6, 0, 0..icon_renderer.instance_count);
+                draw_calls = draw_calls.saturating_add(1);
+            }
+        }
+
+        if show_minimap {
+            let minimap_bottom = if history_mode {
+                MINIMAP_HISTORY_BOTTOM
+            } else {
+                MINIMAP_MARGIN
+            };
+            let minimap_x = MINIMAP_MARGIN;
+            let minimap_y = (h - MINIMAP_H - minimap_bottom).max(0.0);
+            let scissor_x = (minimap_x * self.dpr).floor().max(0.0) as u32;
+            let scissor_y = (minimap_y * self.dpr).floor().max(0.0) as u32;
+            let scissor_w =
+                ((MINIMAP_W * self.dpr).ceil() as u32).min(self.width.saturating_sub(scissor_x));
+            let scissor_h =
+                ((MINIMAP_H * self.dpr).ceil() as u32).min(self.height.saturating_sub(scissor_y));
+
+            if scissor_w > 0 && scissor_h > 0 {
+                let (world_min_x, world_min_y, world_max_x, world_max_y) =
+                    minimap_world_bounds.unwrap_or(MINIMAP_DEFAULT_WORLD_BOUNDS);
+                let world_w = ((world_max_x - world_min_x).max(1.0)) as f32;
+                let world_h = ((world_max_y - world_min_y).max(1.0)) as f32;
+                let minimap_scale = (MINIMAP_W / world_w).min(MINIMAP_H / world_h);
+                let used_w = world_w * minimap_scale;
+                let used_h = world_h * minimap_scale;
+                let minimap_offset_x =
+                    minimap_x + (MINIMAP_W - used_w) * 0.5 - (world_min_x as f32) * minimap_scale;
+                let minimap_offset_y =
+                    minimap_y + (MINIMAP_H - used_h) * 0.5 - (world_min_y as f32) * minimap_scale;
+
+                self.queue.write_buffer(
+                    &self.minimap_viewport_buffer,
+                    0,
+                    bytemuck::cast_slice(&[ViewportUniform {
+                        offset: [minimap_offset_x, minimap_offset_y],
+                        scale: minimap_scale,
+                        time: ((now - self.start_time_ms) / 1000.0) as f32,
+                        resolution: [w, h],
+                        _pad1: [
+                            (reference_time_secs as f64 - self.start_time_ms / 1000.0) as f32,
+                            0.0,
+                        ],
+                    }]),
+                );
+                bytes_uploaded += std::mem::size_of::<ViewportUniform>() as u64;
+
+                let (tl_wx, tl_wy) = vp.screen_to_world(0.0, 0.0);
+                let (br_wx, br_wy) = vp.screen_to_world(w as f64, h as f64);
+                let left = tl_wx.min(br_wx) as f32;
+                let right = tl_wx.max(br_wx) as f32;
+                let top = tl_wy.min(br_wy) as f32;
+                let bottom = tl_wy.max(br_wy) as f32;
+                let world_min_x_f = world_min_x as f32;
+                let world_min_y_f = world_min_y as f32;
+                let world_max_x_f = world_max_x as f32;
+                let world_max_y_f = world_max_y as f32;
+                let left = left.clamp(world_min_x_f, world_max_x_f);
+                let right = right.clamp(world_min_x_f, world_max_x_f);
+                let top = top.clamp(world_min_y_f, world_max_y_f);
+                let bottom = bottom.clamp(world_min_y_f, world_max_y_f);
+                let color = [245.0 / 255.0, 197.0 / 255.0, 66.0 / 255.0, 0.95];
+                let indicator_vertices = [
+                    ConnectionVertex {
+                        world_pos: [left, top],
+                        color,
+                    },
+                    ConnectionVertex {
+                        world_pos: [right, top],
+                        color,
+                    },
+                    ConnectionVertex {
+                        world_pos: [right, top],
+                        color,
+                    },
+                    ConnectionVertex {
+                        world_pos: [right, bottom],
+                        color,
+                    },
+                    ConnectionVertex {
+                        world_pos: [right, bottom],
+                        color,
+                    },
+                    ConnectionVertex {
+                        world_pos: [left, bottom],
+                        color,
+                    },
+                    ConnectionVertex {
+                        world_pos: [left, bottom],
+                        color,
+                    },
+                    ConnectionVertex {
+                        world_pos: [left, top],
+                        color,
+                    },
+                ];
+                let indicator_count = if right > left && bottom > top {
+                    8u32
+                } else {
+                    0u32
+                };
+                if indicator_count > self.minimap_indicator_capacity {
+                    self.minimap_indicator_capacity = indicator_count.next_power_of_two();
+                    self.minimap_indicator_buffer =
+                        self.device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("minimap-indicator-vertex-buf"),
+                            size: (self.minimap_indicator_capacity as u64)
+                                * std::mem::size_of::<ConnectionVertex>() as u64,
+                            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                            mapped_at_creation: false,
+                        });
+                }
+                if indicator_count > 0 {
+                    self.queue.write_buffer(
+                        &self.minimap_indicator_buffer,
+                        0,
+                        bytemuck::cast_slice(&indicator_vertices),
+                    );
+                    bytes_uploaded +=
+                        (indicator_count as u64) * std::mem::size_of::<ConnectionVertex>() as u64;
+                }
+
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("minimap-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+                pass.set_scissor_rect(scissor_x, scissor_y, scissor_w, scissor_h);
+
+                // Minimap background fill
+                {
+                    let bg_color = [19.0 / 255.0, 22.0 / 255.0, 31.0 / 255.0, 0.88_f32];
+                    let (wmx, wmy, wmxx, wmxy) =
+                        minimap_world_bounds.unwrap_or(MINIMAP_DEFAULT_WORLD_BOUNDS);
+                    let pad = 200.0_f32;
+                    let bg_vertices = [
+                        ConnectionVertex {
+                            world_pos: [wmx as f32 - pad, wmy as f32 - pad],
+                            color: bg_color,
+                        },
+                        ConnectionVertex {
+                            world_pos: [wmxx as f32 + pad, wmy as f32 - pad],
+                            color: bg_color,
+                        },
+                        ConnectionVertex {
+                            world_pos: [wmxx as f32 + pad, wmxy as f32 + pad],
+                            color: bg_color,
+                        },
+                        ConnectionVertex {
+                            world_pos: [wmx as f32 - pad, wmy as f32 - pad],
+                            color: bg_color,
+                        },
+                        ConnectionVertex {
+                            world_pos: [wmxx as f32 + pad, wmxy as f32 + pad],
+                            color: bg_color,
+                        },
+                        ConnectionVertex {
+                            world_pos: [wmx as f32 - pad, wmxy as f32 + pad],
+                            color: bg_color,
+                        },
+                    ];
+                    self.queue.write_buffer(
+                        &self.minimap_bg_buffer,
+                        0,
+                        bytemuck::cast_slice(&bg_vertices),
+                    );
+                    pass.set_pipeline(&self.connection_fill_pipeline);
+                    pass.set_bind_group(0, &self.minimap_viewport_bind_group, &[]);
+                    pass.set_vertex_buffer(0, self.minimap_bg_buffer.slice(..));
+                    pass.draw(0..6, 0..1);
+                    draw_calls = draw_calls.saturating_add(1);
+                }
+
+                if !tiles.is_empty() {
+                    pass.set_pipeline(&self.tile_pipeline);
+                    pass.set_bind_group(0, &self.minimap_viewport_bind_group, &[]);
+                    pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                    pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                    for tile in tiles {
+                        let Some(tile_tex) = self.tile_textures.get(&tile.id) else {
+                            continue;
+                        };
+                        pass.set_bind_group(1, &tile_tex.bind_group, &[]);
+                        pass.draw_indexed(0..6, 0, 0..1);
+                        draw_calls = draw_calls.saturating_add(1);
+                        tile_draw_calls = tile_draw_calls.saturating_add(1);
+                    }
+                }
+
+                if self.instance_count > 0 {
+                    pass.set_pipeline(&self.territory_pipeline);
+                    pass.set_bind_group(0, &self.minimap_viewport_bind_group, &[]);
+                    pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                    pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+                    pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                    pass.draw_indexed(0..6, 0, 0..self.instance_count);
+                    draw_calls = draw_calls.saturating_add(1);
+                }
+
+                if self.connection_count > 0 {
+                    pass.set_pipeline(&self.connection_pipeline);
+                    pass.set_bind_group(0, &self.minimap_viewport_bind_group, &[]);
+                    pass.set_vertex_buffer(0, self.connection_buffer.slice(..));
+                    pass.draw(0..self.connection_count, 0..1);
+                    draw_calls = draw_calls.saturating_add(1);
+                }
+
+                pass.set_pipeline(&self.connection_pipeline);
+                pass.set_bind_group(0, &self.minimap_viewport_bind_group, &[]);
+                pass.set_vertex_buffer(0, self.minimap_indicator_buffer.slice(..));
+                pass.draw(0..indicator_count, 0..1);
+                draw_calls = draw_calls.saturating_add(1);
             }
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
+        let frame_cpu_ms = (js_sys::Date::now() - frame_start_ms).max(0.0);
+        let fps_estimate = if self.last_render_time_ms > 0.0 {
+            let dt = (frame_start_ms - self.last_render_time_ms).max(0.0001);
+            1000.0 / dt
+        } else {
+            0.0
+        };
+        self.last_render_time_ms = frame_start_ms;
+        let text_instances = self
+            .text_renderer
+            .as_ref()
+            .map(|text| {
+                text.static_fill_count
+                    + text.static_halo_count
+                    + text.dynamic_fill_count
+                    + text.dynamic_halo_count
+            })
+            .unwrap_or(0);
+        self.frame_metrics = FrameMetrics {
+            frame_cpu_ms,
+            draw_calls,
+            tile_draw_calls,
+            bytes_uploaded,
+            resolution_scale: self.dpr,
+            territory_instances: self.instance_count,
+            text_instances,
+            fps_estimate,
+        };
 
         // Check if any animations are still running (cached during instance rebuild)
         now < self.max_anim_end_ms

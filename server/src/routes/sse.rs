@@ -1,10 +1,10 @@
 use std::convert::Infallible;
-use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::State;
 use axum::response::Sse;
 use axum::response::sse::{Event, KeepAlive};
+use bytes::Bytes;
 use futures::stream::Stream;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
@@ -23,12 +23,16 @@ pub async fn territory_events(
             (snapshot.seq, snapshot.snapshot_json.clone())
         };
         if !data.is_empty() {
-            yield Ok(
-                Event::default()
-                    .id(seq.to_string())
-                    .event("snapshot")
-                    .data(Arc::unwrap_or_clone(data)),
-            );
+            if let Some(payload) = event_payload(data.as_ref()) {
+                yield Ok(
+                    Event::default()
+                        .id(seq.to_string())
+                        .event("snapshot")
+                        .data(payload),
+                );
+            } else {
+                warn!("snapshot payload is not valid utf-8; skipping SSE snapshot event");
+            }
         }
 
         // Subscribe to updates
@@ -42,11 +46,19 @@ pub async fn territory_events(
                         PreSerializedEvent::Snapshot { seq, json } => ("snapshot", seq, json),
                         PreSerializedEvent::Update { seq, json, .. } => ("update", seq, json),
                     };
+                    let Some(payload) = event_payload(data.as_ref()) else {
+                        warn!(
+                            seq,
+                            event = event_type,
+                            "event payload is not valid utf-8; dropping SSE event"
+                        );
+                        continue;
+                    };
                     yield Ok(
                         Event::default()
                             .id(seq.to_string())
                             .event(event_type)
-                            .data(Arc::unwrap_or_clone(data)),
+                            .data(payload),
                     );
                 }
                 Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(skipped)) => {
@@ -60,11 +72,15 @@ pub async fn territory_events(
                         (snapshot.seq, snapshot.snapshot_json.clone())
                     };
                     if !data.is_empty() {
+                        let Some(payload) = event_payload(data.as_ref()) else {
+                            warn!("snapshot payload is not valid utf-8; skipping SSE snapshot replay");
+                            continue;
+                        };
                         yield Ok(
                             Event::default()
                                 .id(seq.to_string())
                                 .event("snapshot")
-                                .data(Arc::unwrap_or_clone(data)),
+                                .data(payload),
                         );
                     }
                 }
@@ -77,4 +93,8 @@ pub async fn territory_events(
             .interval(Duration::from_secs(SSE_KEEPALIVE_SECS))
             .text("keep-alive"),
     )
+}
+
+fn event_payload(bytes: &Bytes) -> Option<&str> {
+    std::str::from_utf8(bytes.as_ref()).ok()
 }

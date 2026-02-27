@@ -4,11 +4,12 @@ use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
-use sequoia_shared::history::HistoryEvents;
+use sequoia_shared::history::{HistoryEvents, HistorySrSamples, HistorySrSnapshot};
 
 use crate::app::{
-    CurrentMode, GuildColorStore, HistoryBoundsSignal, HistoryFetchNonce, HistoryTimestamp,
-    MapMode, PlaybackActive, PlaybackSpeed, TerritoryGeometryStore,
+    CurrentMode, GuildColorStore, HistoryBoundsSignal, HistoryFetchNonce, HistorySeasonLeaderboard,
+    HistorySeasonScalarSample, HistoryTimestamp, MapMode, PlaybackActive, PlaybackSpeed,
+    TerritoryGeometryStore,
 };
 use crate::territory::{ClientTerritoryMap, apply_changes};
 
@@ -20,6 +21,12 @@ struct PlaybackIntervalBinding {
 
 thread_local! {
     static PLAYBACK_INTERVAL_BINDING: RefCell<Option<PlaybackIntervalBinding>> = const { RefCell::new(None) };
+}
+
+fn parse_rfc3339_secs(raw: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|dt| dt.timestamp())
 }
 
 /// Fetch upcoming events from the history API.
@@ -56,6 +63,31 @@ async fn fetch_events(
         .map_err(|e| format!("parse error: {e}"))
 }
 
+/// Fetch season rating snapshots for the given window.
+async fn fetch_sr_samples(from_secs: i64, to_secs: i64) -> Result<Vec<HistorySrSnapshot>, String> {
+    let from_dt = chrono::DateTime::from_timestamp(from_secs, 0).ok_or("invalid from timestamp")?;
+    let to_dt = chrono::DateTime::from_timestamp(to_secs, 0).ok_or("invalid to timestamp")?;
+    let url = format!(
+        "/api/history/sr-samples?from={}&to={}",
+        from_dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        to_dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    );
+
+    let resp = gloo_net::http::Request::get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("fetch error: {e}"))?;
+
+    if !resp.ok() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+
+    resp.json::<HistorySrSamples>()
+        .await
+        .map(|payload| payload.samples)
+        .map_err(|e| format!("parse error: {e}"))
+}
+
 /// Returns an animation duration (ms) scaled to the current playback speed.
 /// Faster playback = shorter or no transition to avoid animation pile-up.
 fn playback_animation_duration(speed: f64) -> f64 {
@@ -85,6 +117,8 @@ pub fn start_playback_engine() {
     let PlaybackSpeed(speed) = expect_context();
     let HistoryBoundsSignal(bounds) = expect_context();
     let HistoryFetchNonce(fetch_nonce) = expect_context();
+    let HistorySeasonScalarSample(history_scalar_sample) = expect_context();
+    let HistorySeasonLeaderboard(history_sr_leaderboard) = expect_context();
     let territories: RwSignal<ClientTerritoryMap> = expect_context();
     let TerritoryGeometryStore(geo_store) = expect_context();
     let GuildColorStore(guild_color_store) = expect_context();
@@ -102,6 +136,8 @@ pub fn start_playback_engine() {
     let last_ts: StoredValue<i64> = StoredValue::new(0);
     // Sequence cursor for deterministic pagination across history events.
     let next_after_seq: StoredValue<u64> = StoredValue::new(0);
+    // Season SR snapshots buffered from /api/history/sr-samples.
+    let sr_buffer: StoredValue<Vec<HistorySrSnapshot>> = StoredValue::new(Vec::new());
 
     // Playback tick interval (100ms)
     let Some(window) = web_sys::window() else {
@@ -126,16 +162,21 @@ pub fn start_playback_engine() {
                     if let Some((earliest, _)) = bounds.get_untracked() {
                         timestamp.set(Some(earliest));
                         event_buffer.set_value(Vec::new());
+                        sr_buffer.set_value(Vec::new());
                         buffer_end.set_value(0);
                         next_after_seq.set_value(0);
                         frac_acc.set_value(0.0);
                         crate::history::fetch_and_apply_with(
                             earliest,
-                            mode,
-                            fetch_nonce,
-                            geo_store,
-                            guild_color_store,
-                            territories,
+                            crate::history::HistoryFetchContext {
+                                mode,
+                                history_fetch_nonce: fetch_nonce,
+                                history_scalar_sample,
+                                history_sr_leaderboard,
+                                geo_store,
+                                guild_color_store,
+                                territories,
+                            },
                         );
                     }
                     return;
@@ -159,11 +200,29 @@ pub fn start_playback_engine() {
         let prev_ts = last_ts.get_value();
         if prev_ts != 0 && (current_ts - prev_ts).abs() > advance_whole.max(2) {
             event_buffer.set_value(Vec::new());
+            sr_buffer.set_value(Vec::new());
             buffer_end.set_value(0);
             next_after_seq.set_value(0);
             frac_acc.set_value(0.0);
         }
         last_ts.set_value(current_ts);
+
+        let mut samples = sr_buffer.get_value();
+        let mut latest_sample_entries: Option<Vec<sequoia_shared::history::HistoryGuildSrEntry>> =
+            None;
+        let mut remaining_samples = Vec::new();
+        for sample in samples.drain(..) {
+            let sample_ts = parse_rfc3339_secs(&sample.sampled_at).unwrap_or(i64::MAX);
+            if sample_ts <= current_ts {
+                latest_sample_entries = Some(sample.entries);
+            } else {
+                remaining_samples.push(sample);
+            }
+        }
+        if let Some(entries) = latest_sample_entries {
+            history_sr_leaderboard.set(Some(entries));
+        }
+        sr_buffer.set_value(remaining_samples);
 
         // Process events that have been passed
         let mut events = event_buffer.get_value();
@@ -196,7 +255,9 @@ pub fn start_playback_engine() {
                             uuid: String::new(),
                             name: name.clone(),
                             prefix: prefix.clone(),
-                            color: None,
+                            color: e
+                                .prev_guild_color
+                                .or_else(|| guild_colors.get(name).copied()),
                         }),
                         _ => None,
                     };
@@ -207,10 +268,12 @@ pub fn start_playback_engine() {
                             uuid: e.guild_uuid.clone(),
                             name: e.guild_name.clone(),
                             prefix: e.guild_prefix.clone(),
-                            color: guild_colors.get(&e.guild_name).copied(),
+                            color: e
+                                .guild_color
+                                .or_else(|| guild_colors.get(&e.guild_name).copied()),
                         },
                         previous_guild,
-                        acquired: e.timestamp.clone(),
+                        acquired: e.acquired_at.clone().unwrap_or_else(|| e.timestamp.clone()),
                         location: location.clone(),
                         resources: resources.clone(),
                         connections: connections.clone(),
@@ -294,10 +357,36 @@ pub fn start_playback_engine() {
                 }
 
                 if !errored {
+                    let mut sr_fetch_failed = false;
+                    let all_sr_samples = match fetch_sr_samples(fetch_from, to).await {
+                        Ok(samples) => samples,
+                        Err(e) => {
+                            web_sys::console::warn_1(
+                                &format!("Playback SR sample fetch error: {e}").into(),
+                            );
+                            retry_after.set_value(js_sys::Date::now() + 5000.0);
+                            sr_fetch_failed = true;
+                            Vec::new()
+                        }
+                    };
+
                     let mut buf = event_buffer.get_value();
                     buf.extend(all_events);
                     event_buffer.set_value(buf);
-                    buffer_end.set_value(to);
+
+                    let mut sr_buf = sr_buffer.get_value();
+                    sr_buf.extend(all_sr_samples);
+                    sr_buf.sort_by(|a, b| {
+                        parse_rfc3339_secs(&a.sampled_at)
+                            .unwrap_or(i64::MAX)
+                            .cmp(&parse_rfc3339_secs(&b.sampled_at).unwrap_or(i64::MAX))
+                    });
+                    sr_buf.dedup_by(|a, b| a.sampled_at == b.sampled_at);
+                    sr_buffer.set_value(sr_buf);
+
+                    if !sr_fetch_failed {
+                        buffer_end.set_value(to);
+                    }
                     next_after_seq.set_value(cursor_seq);
                 }
                 fetching.set_value(false);

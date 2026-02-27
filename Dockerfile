@@ -1,7 +1,7 @@
 ### Stage 1: Build the client (WASM via Trunk)
 FROM rust:1.88-bookworm AS client-build
 
-RUN apt-get update && apt-get install -y --no-install-recommends binaryen brotli gzip && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends brotli gzip && rm -rf /var/lib/apt/lists/*
 RUN rustup target add wasm32-unknown-unknown
 RUN --mount=type=cache,id=sequoia-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=sequoia-cargo-git,target=/usr/local/cargo/git,sharing=locked \
@@ -21,7 +21,6 @@ RUN --mount=type=cache,id=sequoia-cargo-registry,target=/usr/local/cargo/registr
     --mount=type=cache,id=sequoia-client-target,target=/app/target,sharing=locked \
     --mount=type=cache,id=sequoia-trunk-cache,target=/app/.trunk,sharing=locked \
     trunk build --release
-RUN find dist -type f -name '*_bg.wasm' -exec wasm-opt -O3 -o {} {} \;
 RUN find dist -type f \( -name '*.wasm' -o -name '*.js' -o -name '*.css' -o -name '*.html' -o -name '*.json' -o -name '*.svg' \) -exec sh -c 'brotli -f -q 11 "$1" -o "$1.br"; gzip -f -k -9 "$1"' _ {} \;
 
 ### Stage 2: Build the server
@@ -50,6 +49,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 WORKDIR /app
 
 COPY --from=server-build /app/sequoia-server /app/sequoia-server
+COPY --from=server-build /app/server/migrations /app/server/migrations
 COPY --from=client-build /app/client/dist /app/client/dist
 
 ENV RUST_LOG=info

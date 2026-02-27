@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use axum::Json;
@@ -5,8 +6,10 @@ use axum::extract::{Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::IntoResponse;
 use chrono::{DateTime, Utc};
+use sequoia_shared::SeasonScalarSample;
 use sequoia_shared::history::{
-    HistoryBounds, HistoryEvent, HistoryEvents, HistorySnapshot, OwnershipRecord,
+    HistoryBounds, HistoryEvent, HistoryEvents, HistoryGuildSrEntry, HistorySnapshot,
+    HistorySrSamples, HistorySrSnapshot, OwnershipRecord,
 };
 use serde::Deserialize;
 
@@ -15,12 +18,19 @@ use crate::state::AppState;
 type HistoryEventRow = (
     i64,
     DateTime<Utc>,
+    DateTime<Utc>,
     String,
     String,
     String,
     String,
+    Option<i16>,
+    Option<i16>,
+    Option<i16>,
     Option<String>,
     Option<String>,
+    Option<i16>,
+    Option<i16>,
+    Option<i16>,
 );
 type HistoryBoundsRow = (
     Option<DateTime<Utc>>,
@@ -28,6 +38,229 @@ type HistoryBoundsRow = (
     i64,
     Option<i64>,
 );
+type SeasonScalarRow = (DateTime<Utc>, i32, f64, f64, f64, i32);
+type SeasonObservationRow = (
+    DateTime<Utc>,
+    i32,
+    String,
+    String,
+    String,
+    i16,
+    i32,
+    Option<i32>,
+    Option<i32>,
+);
+
+#[derive(Debug, Clone)]
+struct SeasonObservation {
+    observed_at: DateTime<Utc>,
+    season_id: i32,
+    guild_name: String,
+    guild_uuid: String,
+    guild_prefix: String,
+    territory_count: i16,
+    season_rating: i32,
+    sr_gain_5m: Option<i32>,
+    sample_rank: Option<i32>,
+}
+
+impl From<SeasonObservationRow> for SeasonObservation {
+    fn from(value: SeasonObservationRow) -> Self {
+        let (
+            observed_at,
+            season_id,
+            guild_name,
+            guild_uuid,
+            guild_prefix,
+            territory_count,
+            season_rating,
+            sr_gain_5m,
+            sample_rank,
+        ) = value;
+        Self {
+            observed_at,
+            season_id,
+            guild_name,
+            guild_uuid,
+            guild_prefix,
+            territory_count,
+            season_rating,
+            sr_gain_5m,
+            sample_rank,
+        }
+    }
+}
+
+fn parse_rgb_triplet(r: Option<i16>, g: Option<i16>, b: Option<i16>) -> Option<(u8, u8, u8)> {
+    match (r, g, b) {
+        (Some(r), Some(g), Some(b)) => Some((
+            u8::try_from(r).ok()?,
+            u8::try_from(g).ok()?,
+            u8::try_from(b).ok()?,
+        )),
+        _ => None,
+    }
+}
+
+fn with_fallback_color(
+    color: Option<(u8, u8, u8)>,
+    guild_name: &str,
+    fallback_colors: &HashMap<String, (u8, u8, u8)>,
+) -> Option<(u8, u8, u8)> {
+    color.or_else(|| fallback_colors.get(guild_name).copied())
+}
+
+async fn merged_fallback_colors(
+    state: &AppState,
+    pool: &sqlx::PgPool,
+) -> Result<HashMap<String, (u8, u8, u8)>, StatusCode> {
+    let mut fallback_colors = state.guild_colors.read().await.clone();
+    let persisted_rows: Vec<(String, i16, i16, i16)> =
+        sqlx::query_as("SELECT guild_name, color_r, color_g, color_b FROM guild_color_cache")
+            .fetch_all(pool)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    for (guild_name, color_r, color_g, color_b) in persisted_rows {
+        let Some(color) = parse_rgb_triplet(Some(color_r), Some(color_g), Some(color_b)) else {
+            continue;
+        };
+        // Prefer in-memory live Athena colors when present.
+        fallback_colors.entry(guild_name).or_insert(color);
+    }
+
+    Ok(fallback_colors)
+}
+
+fn cmp_by_rating_then_territories_then_name(
+    a: &SeasonObservation,
+    b: &SeasonObservation,
+) -> Ordering {
+    b.season_rating
+        .cmp(&a.season_rating)
+        .then_with(|| b.territory_count.cmp(&a.territory_count))
+        .then_with(|| a.guild_name.cmp(&b.guild_name))
+}
+
+fn build_sr_entries(
+    mut rows: Vec<SeasonObservation>,
+    prefer_sample_rank: bool,
+) -> Vec<HistoryGuildSrEntry> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+
+    if prefer_sample_rank {
+        rows.sort_by(|a, b| {
+            a.sample_rank
+                .unwrap_or(i32::MAX)
+                .cmp(&b.sample_rank.unwrap_or(i32::MAX))
+                .then_with(|| cmp_by_rating_then_territories_then_name(a, b))
+        });
+    } else {
+        rows.sort_by(cmp_by_rating_then_territories_then_name);
+    }
+
+    rows.into_iter()
+        .enumerate()
+        .map(|(idx, row)| {
+            let fallback_rank = u32::try_from(idx + 1).unwrap_or(u32::MAX);
+            let season_rank = if prefer_sample_rank {
+                row.sample_rank
+                    .and_then(|rank| u32::try_from(rank).ok())
+                    .filter(|rank| *rank > 0)
+                    .unwrap_or(fallback_rank)
+            } else {
+                fallback_rank
+            };
+
+            HistoryGuildSrEntry {
+                guild_uuid: row.guild_uuid,
+                guild_name: row.guild_name,
+                guild_prefix: row.guild_prefix,
+                sampled_at: row.observed_at.to_rfc3339(),
+                season_id: row.season_id,
+                season_rating: i64::from(row.season_rating),
+                season_rank,
+                sr_gain_5m: row.sr_gain_5m.map(i64::from),
+            }
+        })
+        .collect()
+}
+
+fn build_sr_samples(rows: Vec<SeasonObservation>) -> Vec<HistorySrSnapshot> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+
+    let mut grouped: Vec<HistorySrSnapshot> = Vec::new();
+    let mut current_at: Option<DateTime<Utc>> = None;
+    let mut current_rows: Vec<SeasonObservation> = Vec::new();
+
+    for row in rows {
+        match current_at {
+            Some(observed_at) if observed_at == row.observed_at => {
+                current_rows.push(row);
+            }
+            Some(observed_at) => {
+                grouped.push(HistorySrSnapshot {
+                    sampled_at: observed_at.to_rfc3339(),
+                    entries: build_sr_entries(std::mem::take(&mut current_rows), true),
+                });
+                current_at = Some(row.observed_at);
+                current_rows.push(row);
+            }
+            None => {
+                current_at = Some(row.observed_at);
+                current_rows.push(row);
+            }
+        }
+    }
+
+    if let Some(observed_at) = current_at {
+        grouped.push(HistorySrSnapshot {
+            sampled_at: observed_at.to_rfc3339(),
+            entries: build_sr_entries(current_rows, true),
+        });
+    }
+
+    grouped
+}
+
+async fn season_leaderboard_at(
+    pool: &sqlx::PgPool,
+    guild_names: &[String],
+    target: DateTime<Utc>,
+) -> Result<Option<Vec<HistoryGuildSrEntry>>, StatusCode> {
+    if guild_names.is_empty() {
+        return Ok(None);
+    }
+
+    let rows: Vec<SeasonObservationRow> = sqlx::query_as(
+        "SELECT observed_at, season_id, guild_name, guild_uuid, guild_prefix, territory_count, \
+                season_rating, sr_gain_5m, sample_rank \
+         FROM ( \
+             SELECT DISTINCT ON (guild_name) observed_at, season_id, guild_name, guild_uuid, \
+                    guild_prefix, territory_count, season_rating, sr_gain_5m, sample_rank \
+             FROM season_guild_observations \
+             WHERE observed_at <= $1 AND guild_name = ANY($2) \
+             ORDER BY guild_name, observed_at DESC \
+         ) latest",
+    )
+    .bind(target)
+    .bind(guild_names)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if rows.is_empty() {
+        return Ok(None);
+    }
+
+    let observations: Vec<SeasonObservation> =
+        rows.into_iter().map(SeasonObservation::from).collect();
+    Ok(Some(build_sr_entries(observations, false)))
+}
 
 #[derive(Deserialize)]
 pub struct AtQuery {
@@ -44,8 +277,24 @@ pub struct EventsQuery {
     limit: i64,
 }
 
+#[derive(Deserialize)]
+pub struct SrSamplesQuery {
+    from: String,
+    to: String,
+}
+
 fn default_limit() -> i64 {
     500
+}
+
+fn parse_time_window(from: &str, to: &str) -> Result<(DateTime<Utc>, DateTime<Utc>), StatusCode> {
+    let from = from
+        .parse::<DateTime<Utc>>()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let to = to
+        .parse::<DateTime<Utc>>()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    Ok((from, to))
 }
 
 /// `GET /api/history/at?t={rfc3339}` — Reconstruct ownership at a point in time.
@@ -59,58 +308,135 @@ pub async fn history_at(
         .t
         .parse::<DateTime<Utc>>()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let fallback_colors = merged_fallback_colors(&state, pool).await?;
 
-    // 1. Find nearest snapshot before target
-    let snapshot_row: Option<(i64, DateTime<Utc>, serde_json::Value)> = sqlx::query_as(
-        "SELECT id, created_at, ownership FROM territory_snapshots \
-         WHERE created_at <= $1 ORDER BY created_at DESC LIMIT 1",
-    )
-    .bind(target)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let season_scalar_fut = async {
+        sqlx::query_as::<_, SeasonScalarRow>(
+            "SELECT sampled_at, season_id, scalar_weighted, scalar_raw, confidence, sample_count \
+             FROM season_scalar_samples \
+             WHERE sampled_at <= $1 \
+             ORDER BY sampled_at DESC \
+             LIMIT 1",
+        )
+        .bind(target)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map(|row| {
+            row.map(
+                |(sampled_at, season_id, scalar_weighted, scalar_raw, confidence, sample_count)| {
+                    SeasonScalarSample {
+                        sampled_at: sampled_at.to_rfc3339(),
+                        season_id,
+                        scalar_weighted,
+                        scalar_raw,
+                        confidence,
+                        sample_count: u32::try_from(sample_count.max(0)).unwrap_or(u32::MAX),
+                    }
+                },
+            )
+        })
+    };
+    let snapshot_fut = async {
+        sqlx::query_as::<_, (i64, DateTime<Utc>, serde_json::Value)>(
+            "SELECT id, created_at, ownership FROM territory_snapshots \
+             WHERE created_at <= $1 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(target)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    };
+    let events_fut = async {
+        sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                String,
+                String,
+                Option<i16>,
+                Option<i16>,
+                Option<i16>,
+                DateTime<Utc>,
+            ),
+        >(
+            "SELECT territory, guild_uuid, guild_name, guild_prefix, \
+                    guild_color_r, guild_color_g, guild_color_b, acquired_at \
+             FROM territory_events \
+             WHERE recorded_at > COALESCE( \
+                   (SELECT created_at FROM territory_snapshots WHERE created_at <= $1 \
+                    ORDER BY created_at DESC LIMIT 1), \
+                   '1970-01-01T00:00:00Z'::timestamptz \
+                 ) \
+               AND recorded_at <= $2 \
+             ORDER BY stream_seq ASC",
+        )
+        .bind(target)
+        .bind(target)
+        .fetch_all(pool)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    };
+    let (season_scalar, snapshot_row, event_rows) =
+        tokio::try_join!(season_scalar_fut, snapshot_fut, events_fut)?;
 
-    let (mut ownership, snapshot_time) = match snapshot_row {
-        Some((_id, created_at, ownership_json)) => {
+    let mut ownership = match snapshot_row {
+        Some((_id, _created_at, ownership_json)) => {
             let ownership: HashMap<String, OwnershipRecord> =
                 serde_json::from_value(ownership_json)
                     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            (ownership, Some(created_at))
+            ownership
         }
-        None => (HashMap::new(), None),
+        None => HashMap::new(),
     };
 
-    // 2. Replay events from snapshot time to target
-    let events_from = snapshot_time.unwrap_or(DateTime::UNIX_EPOCH);
-
-    let event_rows: Vec<(String, String, String, String, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT territory, guild_uuid, guild_name, guild_prefix, \
-                acquired_at \
-         FROM territory_events \
-         WHERE recorded_at > $1 AND recorded_at <= $2 \
-         ORDER BY stream_seq ASC",
-    )
-    .bind(events_from)
-    .bind(target)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    for (territory, guild_uuid, guild_name, guild_prefix, acquired_at) in event_rows {
+    for (
+        territory,
+        guild_uuid,
+        guild_name,
+        guild_prefix,
+        guild_color_r,
+        guild_color_g,
+        guild_color_b,
+        acquired_at,
+    ) in event_rows
+    {
+        let guild_color = with_fallback_color(
+            parse_rgb_triplet(guild_color_r, guild_color_g, guild_color_b),
+            &guild_name,
+            &fallback_colors,
+        );
         ownership.insert(
             territory,
             OwnershipRecord {
                 guild_uuid,
                 guild_name,
                 guild_prefix,
+                guild_color,
                 acquired_at: acquired_at.to_rfc3339(),
             },
         );
     }
 
+    for record in ownership.values_mut() {
+        record.guild_color =
+            with_fallback_color(record.guild_color, &record.guild_name, &fallback_colors);
+    }
+
+    let mut guild_names: Vec<String> = ownership
+        .values()
+        .map(|record| record.guild_name.clone())
+        .collect();
+    guild_names.sort();
+    guild_names.dedup();
+    let season_leaderboard = season_leaderboard_at(pool, &guild_names, target).await?;
+
     let snapshot = HistorySnapshot {
         timestamp: target.to_rfc3339(),
         ownership,
+        season_scalar,
+        season_leaderboard,
     };
 
     // Cache older timestamps aggressively, recent ones briefly
@@ -132,24 +458,20 @@ pub async fn history_events(
 ) -> Result<impl IntoResponse, StatusCode> {
     let pool = state.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 
-    let from: DateTime<Utc> = query
-        .from
-        .parse::<DateTime<Utc>>()
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    let to: DateTime<Utc> = query
-        .to
-        .parse::<DateTime<Utc>>()
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let (from, to) = parse_time_window(&query.from, &query.to)?;
     let limit = query.limit.clamp(1, 1000);
     let after_seq = match query.after_seq {
         Some(seq) => Some(i64::try_from(seq).map_err(|_| StatusCode::BAD_REQUEST)?),
         None => None,
     };
+    let fallback_colors = merged_fallback_colors(&state, pool).await?;
 
     let rows: Vec<HistoryEventRow> = if let Some(after_seq) = after_seq {
         sqlx::query_as(
-            "SELECT stream_seq, recorded_at, territory, guild_uuid, guild_name, guild_prefix, \
-                    prev_guild_name, prev_guild_prefix \
+            "SELECT stream_seq, recorded_at, acquired_at, territory, guild_uuid, guild_name, \
+                    guild_prefix, guild_color_r, guild_color_g, guild_color_b, \
+                    prev_guild_name, prev_guild_prefix, \
+                    prev_guild_color_r, prev_guild_color_g, prev_guild_color_b \
              FROM territory_events \
              WHERE stream_seq > $1 AND recorded_at > $2 AND recorded_at <= $3 \
              ORDER BY stream_seq ASC \
@@ -164,8 +486,10 @@ pub async fn history_events(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     } else {
         sqlx::query_as(
-            "SELECT stream_seq, recorded_at, territory, guild_uuid, guild_name, guild_prefix, \
-                    prev_guild_name, prev_guild_prefix \
+            "SELECT stream_seq, recorded_at, acquired_at, territory, guild_uuid, guild_name, \
+                    guild_prefix, guild_color_r, guild_color_g, guild_color_b, \
+                    prev_guild_name, prev_guild_prefix, \
+                    prev_guild_color_r, prev_guild_color_g, prev_guild_color_b \
              FROM territory_events \
              WHERE recorded_at > $1 AND recorded_at <= $2 \
              ORDER BY stream_seq ASC \
@@ -184,23 +508,46 @@ pub async fn history_events(
     for (
         stream_seq,
         recorded_at,
+        acquired_at,
         territory,
         guild_uuid,
         guild_name,
         guild_prefix,
+        guild_color_r,
+        guild_color_g,
+        guild_color_b,
         prev_guild_name,
         prev_guild_prefix,
+        prev_guild_color_r,
+        prev_guild_color_g,
+        prev_guild_color_b,
     ) in rows.into_iter().take(limit as usize)
     {
+        let guild_color = with_fallback_color(
+            parse_rgb_triplet(guild_color_r, guild_color_g, guild_color_b),
+            &guild_name,
+            &fallback_colors,
+        );
+        let prev_guild_color = prev_guild_name.as_deref().and_then(|name| {
+            with_fallback_color(
+                parse_rgb_triplet(prev_guild_color_r, prev_guild_color_g, prev_guild_color_b),
+                name,
+                &fallback_colors,
+            )
+        });
+
         events.push(HistoryEvent {
             stream_seq: u64::try_from(stream_seq).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
             timestamp: recorded_at.to_rfc3339(),
+            acquired_at: Some(acquired_at.to_rfc3339()),
             territory,
             guild_uuid,
             guild_name,
             guild_prefix,
+            guild_color,
             prev_guild_name,
             prev_guild_prefix,
+            prev_guild_color,
         });
     }
 
@@ -211,6 +558,41 @@ pub async fn history_events(
     );
 
     Ok((headers, Json(HistoryEvents { events, has_more })))
+}
+
+/// `GET /api/history/sr-samples?from={t}&to={t}` — Season rating snapshots over a time window.
+pub async fn history_sr_samples(
+    State(state): State<AppState>,
+    Query(query): Query<SrSamplesQuery>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let pool = state.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let (from, to) = parse_time_window(&query.from, &query.to)?;
+
+    let season_sr_rows: Vec<SeasonObservation> = sqlx::query_as::<_, SeasonObservationRow>(
+        "SELECT observed_at, season_id, guild_name, guild_uuid, guild_prefix, territory_count, \
+                season_rating, sr_gain_5m, sample_rank \
+         FROM season_guild_observations \
+         WHERE observed_at > $1 AND observed_at <= $2 \
+         ORDER BY observed_at ASC, sample_rank ASC NULLS LAST, season_rating DESC, \
+                  territory_count DESC, guild_name ASC",
+    )
+    .bind(from)
+    .bind(to)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .into_iter()
+    .map(SeasonObservation::from)
+    .collect();
+    let samples = build_sr_samples(season_sr_rows);
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=60"),
+    );
+
+    Ok((headers, Json(HistorySrSamples { samples })))
 }
 
 /// `GET /api/history/bounds` — Returns earliest/latest timestamps and event count.
@@ -248,10 +630,12 @@ mod tests {
 
     use chrono::Utc;
     use reqwest::StatusCode;
-    use sequoia_shared::history::HistoryEvents;
+    use sequoia_shared::history::{HistoryEvents, HistorySnapshot, HistorySrSamples};
     use sqlx::postgres::PgPoolOptions;
 
     use crate::state::AppState;
+
+    const REAL_DB_TEST_LOCK: i64 = 73_019_001;
 
     fn lazy_test_pool() -> sqlx::PgPool {
         PgPoolOptions::new()
@@ -297,6 +681,16 @@ mod tests {
             .status();
         assert_eq!(events_status, StatusCode::BAD_REQUEST);
 
+        let sr_samples_status = client
+            .get(format!(
+                "{base_url}/api/history/sr-samples?from=nope&to=also-nope"
+            ))
+            .send()
+            .await
+            .expect("history sr samples request")
+            .status();
+        assert_eq!(sr_samples_status, StatusCode::BAD_REQUEST);
+
         server_handle.abort();
         let _ = server_handle.await;
     }
@@ -313,11 +707,18 @@ mod tests {
             .connect(&database_url)
             .await
             .expect("connect real postgres");
-        sqlx::migrate!("./migrations")
-            .run(&pool)
+        let mut lock_conn = pool.acquire().await.expect("acquire lock connection");
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(REAL_DB_TEST_LOCK)
+            .execute(&mut *lock_conn)
+            .await
+            .expect("acquire history test db lock");
+        crate::db_migrations::run(&pool)
             .await
             .expect("run migrations");
-        sqlx::query("TRUNCATE TABLE territory_events, territory_snapshots RESTART IDENTITY")
+        sqlx::query(
+            "TRUNCATE TABLE territory_events, territory_snapshots, season_scalar_samples, season_guild_observations, guild_color_cache RESTART IDENTITY",
+        )
             .execute(&pool)
             .await
             .expect("truncate history tables");
@@ -363,6 +764,53 @@ mod tests {
         .await
         .expect("insert event 2");
 
+        sqlx::query(
+            "INSERT INTO guild_color_cache (guild_name, color_r, color_g, color_b) \
+             VALUES ($1, $2, $3, $4), ($5, $6, $7, $8)",
+        )
+        .bind("GuildOne")
+        .bind(10_i16)
+        .bind(20_i16)
+        .bind(30_i16)
+        .bind("GuildTwo")
+        .bind(40_i16)
+        .bind(50_i16)
+        .bind(60_i16)
+        .execute(&pool)
+        .await
+        .expect("insert guild color cache rows");
+
+        let sr_sample_time = now - chrono::TimeDelta::seconds(30);
+        sqlx::query(
+            "INSERT INTO season_guild_observations \
+             (observed_at, season_id, guild_name, guild_uuid, guild_prefix, territory_count, \
+              season_rating, sr_gain_5m, sample_rank) \
+             VALUES \
+             ($1, $2, $3, $4, $5, $6, $7, $8, $9), \
+             ($10, $11, $12, $13, $14, $15, $16, $17, $18)",
+        )
+        .bind(sr_sample_time)
+        .bind(29_i32)
+        .bind("GuildTwo")
+        .bind("g2")
+        .bind("G2")
+        .bind(6_i16)
+        .bind(1200_i32)
+        .bind(150_i32)
+        .bind(1_i32)
+        .bind(sr_sample_time)
+        .bind(29_i32)
+        .bind("GuildOne")
+        .bind("g1")
+        .bind("G1")
+        .bind(4_i16)
+        .bind(900_i32)
+        .bind(100_i32)
+        .bind(2_i32)
+        .execute(&pool)
+        .await
+        .expect("insert season guild observations");
+
         let state = AppState::new(Some(pool));
         let (addr, server_handle) = spawn_test_server(state).await;
         let base_url = format!("http://{addr}");
@@ -391,6 +839,34 @@ mod tests {
         assert_eq!(all_events.events.len(), 2);
         assert_eq!(all_events.events[0].stream_seq, 1);
         assert_eq!(all_events.events[1].stream_seq, 2);
+        assert_eq!(all_events.events[0].guild_color, Some((10, 20, 30)));
+        assert_eq!(all_events.events[1].guild_color, Some((40, 50, 60)));
+        assert_eq!(all_events.events[1].prev_guild_color, Some((10, 20, 30)));
+
+        let sr_samples_url = {
+            let mut url = reqwest::Url::parse(&format!("{base_url}/api/history/sr-samples"))
+                .expect("history sr samples url");
+            url.query_pairs_mut()
+                .append_pair("from", "1970-01-01T00:00:00Z")
+                .append_pair("to", &to);
+            url
+        };
+        let sr_samples = client
+            .get(sr_samples_url)
+            .send()
+            .await
+            .expect("sr samples request")
+            .error_for_status()
+            .expect("sr samples status")
+            .json::<HistorySrSamples>()
+            .await
+            .expect("parse sr samples");
+        assert_eq!(sr_samples.samples.len(), 1);
+        let sr_sample = &sr_samples.samples[0];
+        assert_eq!(sr_sample.entries.len(), 2);
+        assert_eq!(sr_sample.entries[0].guild_name, "GuildTwo");
+        assert_eq!(sr_sample.entries[0].season_rank, 1);
+        assert_eq!(sr_sample.entries[0].sr_gain_5m, Some(150_i64));
 
         let paged_url = {
             let mut url = reqwest::Url::parse(&format!("{base_url}/api/history/events"))
@@ -415,6 +891,149 @@ mod tests {
         assert_eq!(paged_events.events.len(), 1);
         assert_eq!(paged_events.events[0].stream_seq, 2);
         assert!(!paged_events.has_more);
+        assert_eq!(paged_events.events[0].guild_color, Some((40, 50, 60)));
+        assert_eq!(paged_events.events[0].prev_guild_color, Some((10, 20, 30)));
+
+        let at_url = {
+            let mut url =
+                reqwest::Url::parse(&format!("{base_url}/api/history/at")).expect("history at url");
+            url.query_pairs_mut().append_pair("t", &to);
+            url
+        };
+        let snapshot = client
+            .get(at_url)
+            .send()
+            .await
+            .expect("history at request")
+            .error_for_status()
+            .expect("history at status")
+            .json::<HistorySnapshot>()
+            .await
+            .expect("parse history snapshot");
+        let alpha = snapshot
+            .ownership
+            .get("Alpha")
+            .expect("alpha should exist in reconstructed snapshot");
+        assert_eq!(alpha.guild_name, "GuildTwo");
+        assert_eq!(alpha.guild_color, Some((40, 50, 60)));
+        let season_leaderboard = snapshot
+            .season_leaderboard
+            .expect("season leaderboard should be present");
+        assert_eq!(season_leaderboard.len(), 1);
+        assert_eq!(season_leaderboard[0].guild_name, "GuildTwo");
+        assert_eq!(season_leaderboard[0].season_rank, 1);
+        assert_eq!(season_leaderboard[0].season_rating, 1200);
+
+        sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(REAL_DB_TEST_LOCK)
+            .execute(&mut *lock_conn)
+            .await
+            .expect("release history test db lock");
+
+        server_handle.abort();
+        let _ = server_handle.await;
+    }
+
+    #[tokio::test]
+    async fn history_at_includes_latest_scalar_sample_at_or_before_timestamp() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            eprintln!("Skipping history scalar sample test: DATABASE_URL is not set");
+            return;
+        };
+
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&database_url)
+            .await
+            .expect("connect real postgres");
+        let mut lock_conn = pool.acquire().await.expect("acquire lock connection");
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(REAL_DB_TEST_LOCK)
+            .execute(&mut *lock_conn)
+            .await
+            .expect("acquire history scalar test db lock");
+        crate::db_migrations::run(&pool)
+            .await
+            .expect("run migrations");
+        sqlx::query(
+            "TRUNCATE TABLE territory_events, territory_snapshots, season_scalar_samples, season_guild_observations, guild_color_cache RESTART IDENTITY",
+        )
+        .execute(&pool)
+        .await
+        .expect("truncate tables");
+
+        let before = Utc::now() - chrono::TimeDelta::minutes(30);
+        let sample_time = Utc::now() - chrono::TimeDelta::minutes(5);
+        let after = Utc::now();
+
+        sqlx::query(
+            "INSERT INTO season_scalar_samples \
+             (sampled_at, season_id, scalar_weighted, scalar_raw, confidence, sample_count) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(sample_time)
+        .bind(29_i32)
+        .bind(2.15_f64)
+        .bind(2.40_f64)
+        .bind(0.72_f64)
+        .bind(5_i32)
+        .execute(&pool)
+        .await
+        .expect("insert scalar sample");
+
+        let state = AppState::new(Some(pool));
+        let (addr, server_handle) = spawn_test_server(state).await;
+        let base_url = format!("http://{addr}");
+        let client = reqwest::Client::new();
+
+        let at_after_url = {
+            let mut url = reqwest::Url::parse(&format!("{base_url}/api/history/at"))
+                .expect("history at url (after sample)");
+            url.query_pairs_mut().append_pair("t", &after.to_rfc3339());
+            url
+        };
+        let at_after = client
+            .get(at_after_url)
+            .send()
+            .await
+            .expect("history at request (after sample)")
+            .error_for_status()
+            .expect("history at status (after sample)")
+            .json::<HistorySnapshot>()
+            .await
+            .expect("parse history snapshot (after sample)");
+
+        let sample = at_after
+            .season_scalar
+            .expect("season scalar should be attached");
+        assert_eq!(sample.season_id, 29);
+        assert_eq!(sample.sample_count, 5);
+        assert!((sample.scalar_weighted - 2.15).abs() < 1e-9);
+
+        let at_before_url = {
+            let mut url = reqwest::Url::parse(&format!("{base_url}/api/history/at"))
+                .expect("history at url (before sample)");
+            url.query_pairs_mut().append_pair("t", &before.to_rfc3339());
+            url
+        };
+        let at_before = client
+            .get(at_before_url)
+            .send()
+            .await
+            .expect("history at request (before sample)")
+            .error_for_status()
+            .expect("history at status (before sample)")
+            .json::<HistorySnapshot>()
+            .await
+            .expect("parse history snapshot (before sample)");
+
+        assert!(at_before.season_scalar.is_none());
+
+        sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(REAL_DB_TEST_LOCK)
+            .execute(&mut *lock_conn)
+            .await
+            .expect("release history scalar test db lock");
 
         server_handle.abort();
         let _ = server_handle.await;

@@ -23,7 +23,7 @@ struct InstanceInput {
     @location(1) rect: vec4<f32>,       // x, y, width, height (world coords)
     @location(2) color: vec4<f32>,      // r, g, b, 1.0 — target/static guild color
     @location(3) state: vec4<f32>,      // fill_alpha, border_alpha, flags, 0.0
-    @location(4) cooldown: vec4<f32>,   // cooldown_frac, treasury_r, treasury_g, treasury_b
+    @location(4) cooldown: vec4<f32>,   // acquired_time_rel_secs, unused, unused, unused
     @location(5) anim_color: vec4<f32>,    // from_r, from_g, from_b, 0.0
     @location(6) anim_time: vec4<f32>,     // start_time_rel, duration_secs, 0, 0
     @location(7) resource_data: vec4<f32>,  // mode, idx_a, idx_b, flags
@@ -35,11 +35,10 @@ struct VertexOutput {
     @location(1) state: vec4<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) size_px: vec2<f32>,
-    @location(4) cooldown_frac: f32,
-    @location(5) treasury_color: vec3<f32>,
-    @location(6) anim_color: vec3<f32>,
-    @location(7) anim_time: vec2<f32>,
-    @location(8) resource_data: vec4<f32>,
+    @location(4) acquired_rel_secs: f32,
+    @location(5) anim_color: vec3<f32>,
+    @location(6) anim_time: vec2<f32>,
+    @location(7) resource_data: vec4<f32>,
 };
 
 fn world_to_ndc(world_pos: vec2<f32>) -> vec4<f32> {
@@ -58,8 +57,7 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
     out.state = instance.state;
     out.uv = vertex.quad_pos;
     out.size_px = instance.rect.zw * vp.scale;
-    out.cooldown_frac = instance.cooldown.x;
-    out.treasury_color = instance.cooldown.yzw;
+    out.acquired_rel_secs = instance.cooldown.x;
     out.anim_color = instance.anim_color.xyz;
     out.anim_time = instance.anim_time.xy;
     out.resource_data = instance.resource_data;
@@ -199,9 +197,15 @@ fn compute_resource_fill(rd: vec4<f32>, uv: vec2<f32>, size_px: vec2<f32>, guild
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let fill_alpha = in.state.x;
+    let zoom_fill_boost = smoothstep(0.40, 0.12, vp.scale) * 0.24;
     let border_alpha = in.state.y;
     let flags = in.state.z;
-    let cooldown_frac = in.cooldown_frac;
+    let reference_rel_secs = vp._pad1.x;
+    let age_secs = max(reference_rel_secs - in.acquired_rel_secs, 0.0);
+    var cooldown_frac: f32 = 0.0;
+    if age_secs < 600.0 {
+        cooldown_frac = clamp((600.0 - age_secs) / 600.0, 0.0, 1.0);
+    }
 
     let is_hovered = (u32(flags) & 1u) != 0u;
     let is_selected = (u32(flags) & 2u) != 0u;
@@ -231,9 +235,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // All sizes in world blocks × vp.scale → CSS pixels
     // Proportions stay constant at every zoom level — no fwidth floor
-    let border_mult = in.state.w;
-    let border_width = 3.5 * border_mult * vp.scale;
-    let feather = 0.4 * vp.scale;
+    var border_mult = 1.0;
+    if cooldown_frac > 0.0 {
+        border_mult = in.state.w;
+    }
+    let border_width = max(3.5 * border_mult * vp.scale, 0.8);
+    let feather = max(0.4 * vp.scale, 0.15);
 
     // Outer edge AA: fade alpha at territory boundary
     let outer_x = smoothstep(0.0, feather, dx);
@@ -257,7 +264,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Fill zone — compute color and alpha with all effects
     var fill_color = compute_resource_fill(in.resource_data, in.uv, in.size_px, base_color);
-    var f_alpha = fill_alpha;
+    var f_alpha = fill_alpha + zoom_fill_boost;
+    var cooldown_strip_mix: f32 = 0.0;
+    var cooldown_strip_color: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
 
     // Flash overlay (warm gold)
     if flash > 0.0 {
@@ -315,12 +324,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let pulse = (sin(vp.time * frequency * 6.2832) * 0.5 + 0.5) * pulse_intensity;
 
         // Strip: grows from left, brightens with urgency, pulses when urgent
-        let strip_h = clamp(in.size_px.y * 0.08, 3.0, 6.0);
+        let strip_h = clamp(in.size_px.y * 0.11, 4.0, 8.0);
         let px_from_bottom = (1.0 - in.uv.y) * in.size_px.y;
         if px_from_bottom < strip_h && in.uv.x < (1.0 - cooldown_frac) {
-            let strip_alpha = 0.4 + urgency * 0.5 + pulse * 0.1;
+            let strip_alpha = 0.55 + urgency * 0.35 + pulse * 0.10;
             fill_color = mix(fill_color, cd_color, strip_alpha);
             f_alpha = max(f_alpha, strip_alpha);
+            cooldown_strip_mix = max(cooldown_strip_mix, 0.75 + urgency * 0.2 + pulse * 0.05);
+            cooldown_strip_color = cd_color;
         }
 
         // Fill wash: smooth ramp from urgency 0.5→1.0
@@ -334,8 +345,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // Blend border and fill with anti-aliased transition
-    let color = mix(fill_color, base_color, border_t);
-    let alpha = mix(f_alpha, b_alpha, border_t) * outer_aa;
+    var color = mix(fill_color, base_color, border_t);
+    var alpha = mix(f_alpha, b_alpha, border_t) * outer_aa;
+    if cooldown_strip_mix > 0.0 {
+        color = mix(color, cooldown_strip_color, cooldown_strip_mix);
+        alpha = max(alpha, 0.9);
+    }
 
     return vec4<f32>(color, alpha);
 }

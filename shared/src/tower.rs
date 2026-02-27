@@ -52,18 +52,24 @@ pub const VOLLEY_LABELS: [&str; 4] = ["Off", "20s", "15s", "10s"];
 /// Per-connected-territory bonus multiplier (30% per connection).
 const CONNECTION_BONUS: f64 = 0.30;
 
-/// HQ bonus multiplier (additional 100%).
-const HQ_BONUS: f64 = 1.0;
+/// HQ external base multiplier (+50% before any externals).
+const HQ_EXTERNAL_BASE: f64 = 1.5;
+
+/// Per-external multiplier for HQ (+25% per external).
+const HQ_EXTERNAL_BONUS: f64 = 0.25;
 
 /// Apply connection and HQ multipliers to a base stat value.
 ///
 /// `connections` = number of allied-owned connected territories.
 /// `externals` = number of external connections (BFS within 3 hops).
 pub fn calc_stat(base: f64, is_hq: bool, connections: u32, externals: u32) -> f64 {
-    let total_connections = connections + externals;
-    let conn_mult = 1.0 + (total_connections as f64 * CONNECTION_BONUS);
-    let hq_mult = if is_hq { 1.0 + HQ_BONUS } else { 1.0 };
-    base * conn_mult * hq_mult
+    let conn_mult = 1.0 + (connections as f64 * CONNECTION_BONUS);
+    if is_hq {
+        let ext_mult = HQ_EXTERNAL_BASE + (externals as f64 * HQ_EXTERNAL_BONUS);
+        base * conn_mult * ext_mult
+    } else {
+        base * conn_mult
+    }
 }
 
 /// Compute average DPS for given damage level & attack rate level with multipliers.
@@ -167,7 +173,7 @@ pub fn find_externals(
 }
 
 /// Count guild-owned connections and compute externals via BFS (max 3 hops
-/// through same-guild chains, excluding direct connections).
+/// through same-guild chains, including direct connections).
 ///
 /// `territory_name` — the selected territory.
 /// `territory_connections` — its direct connection list.
@@ -217,7 +223,7 @@ pub fn count_guild_connections<'a>(
         }
     }
 
-    // Externals = all reachable same-guild territories (connections included)
+    // Externals include depth-1 direct neighbors and same-guild nodes out to 3 hops.
     visited.remove(territory_name);
     let ext = visited.len() as u32;
 
@@ -232,5 +238,190 @@ pub fn format_stat(val: f64) -> String {
         format!("{:.0}k", val / 1_000.0)
     } else {
         format!("{:.0}", val)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DefenseRating, calc_dps, calc_ehp, calc_stat, count_guild_connections, find_externals,
+        format_stat,
+    };
+    use std::collections::{HashMap, HashSet};
+
+    fn assert_close(actual: f64, expected: f64) {
+        let diff = (actual - expected).abs();
+        assert!(
+            diff < 1e-9,
+            "expected {expected}, got {actual} (diff: {diff})"
+        );
+    }
+
+    #[test]
+    fn count_guild_connections_includes_direct_neighbors_in_externals() {
+        let map = HashMap::from([
+            (
+                "A".to_string(),
+                (
+                    "guild-a".to_string(),
+                    vec!["B".to_string(), "C".to_string(), "D".to_string()],
+                ),
+            ),
+            (
+                "B".to_string(),
+                (
+                    "guild-a".to_string(),
+                    vec!["A".to_string(), "E".to_string()],
+                ),
+            ),
+            (
+                "C".to_string(),
+                (
+                    "guild-a".to_string(),
+                    vec!["A".to_string(), "F".to_string()],
+                ),
+            ),
+            (
+                "D".to_string(),
+                ("guild-b".to_string(), vec!["A".to_string()]),
+            ),
+            (
+                "E".to_string(),
+                ("guild-a".to_string(), vec!["B".to_string()]),
+            ),
+            (
+                "F".to_string(),
+                ("guild-a".to_string(), vec!["C".to_string()]),
+            ),
+        ]);
+
+        let connections = map.get("A").expect("A exists").1.as_slice();
+        let (guild_conn, total_conn, externals) =
+            count_guild_connections("A", connections, "guild-a", |name| {
+                map.get(name)
+                    .map(|(guild, conns)| (guild.as_str(), conns.as_slice()))
+            });
+
+        assert_eq!(guild_conn, 2);
+        assert_eq!(total_conn, 3);
+        assert_eq!(externals, 4);
+    }
+
+    #[test]
+    fn count_guild_connections_caps_externals_at_three_hops() {
+        let map = HashMap::from([
+            (
+                "A".to_string(),
+                ("guild-a".to_string(), vec!["B".to_string()]),
+            ),
+            (
+                "B".to_string(),
+                (
+                    "guild-a".to_string(),
+                    vec!["A".to_string(), "E".to_string()],
+                ),
+            ),
+            (
+                "E".to_string(),
+                (
+                    "guild-a".to_string(),
+                    vec!["B".to_string(), "H".to_string()],
+                ),
+            ),
+            (
+                "H".to_string(),
+                (
+                    "guild-a".to_string(),
+                    vec!["E".to_string(), "I".to_string()],
+                ),
+            ),
+            (
+                "I".to_string(),
+                ("guild-a".to_string(), vec!["H".to_string()]),
+            ),
+        ]);
+
+        let connections = map.get("A").expect("A exists").1.as_slice();
+        let (guild_conn, total_conn, externals) =
+            count_guild_connections("A", connections, "guild-a", |name| {
+                map.get(name)
+                    .map(|(guild, conns)| (guild.as_str(), conns.as_slice()))
+            });
+
+        assert_eq!(guild_conn, 1);
+        assert_eq!(total_conn, 1);
+        assert_eq!(externals, 3);
+    }
+
+    #[test]
+    fn calc_stat_non_hq_uses_only_connection_multiplier() {
+        let stat = calc_stat(1000.0, false, 4, 24);
+        assert_close(stat, 2200.0);
+    }
+
+    #[test]
+    fn calc_stat_hq_uses_external_and_connection_formula() {
+        let stat = calc_stat(5400.0, true, 4, 24);
+        // 5400 * (1 + 0.3*4) * (1.5 + 0.25*24) = 89100
+        assert_close(stat, 89_100.0);
+    }
+
+    #[test]
+    fn calc_dps_base_case() {
+        let dps = calc_dps(0, 0, false, 0, 0);
+        assert_close(dps, 625.0);
+    }
+
+    #[test]
+    fn calc_ehp_base_case() {
+        let ehp = calc_ehp(0, 0, false, 0, 0);
+        assert_close(ehp, 300_000.0 / 0.9);
+    }
+
+    #[test]
+    fn calc_dps_clamps_level_above_11() {
+        let clamped = calc_dps(99, 42, false, 0, 0);
+        let max_level = calc_dps(11, 11, false, 0, 0);
+        assert_close(clamped, max_level);
+    }
+
+    #[test]
+    fn defense_rating_from_sum_boundaries() {
+        assert_eq!(DefenseRating::from_sum(0), DefenseRating::VeryLow);
+        assert_eq!(DefenseRating::from_sum(8), DefenseRating::VeryLow);
+        assert_eq!(DefenseRating::from_sum(9), DefenseRating::Low);
+        assert_eq!(DefenseRating::from_sum(16), DefenseRating::Low);
+        assert_eq!(DefenseRating::from_sum(17), DefenseRating::Medium);
+        assert_eq!(DefenseRating::from_sum(28), DefenseRating::Medium);
+        assert_eq!(DefenseRating::from_sum(29), DefenseRating::High);
+        assert_eq!(DefenseRating::from_sum(38), DefenseRating::High);
+        assert_eq!(DefenseRating::from_sum(39), DefenseRating::VeryHigh);
+    }
+
+    #[test]
+    fn format_stat_millions_thousands_hundreds() {
+        assert_eq!(format_stat(1_250_000.0), "1.2M");
+        assert_eq!(format_stat(12_000.0), "12k");
+        assert_eq!(format_stat(999.0), "999");
+    }
+
+    #[test]
+    fn find_externals_respects_max_hops() {
+        let graph = HashMap::from([
+            ("A".to_string(), vec!["B".to_string()]),
+            ("B".to_string(), vec!["A".to_string(), "C".to_string()]),
+            ("C".to_string(), vec!["B".to_string(), "D".to_string()]),
+            ("D".to_string(), vec!["C".to_string()]),
+        ]);
+
+        let externals = find_externals("A", &graph, 2);
+        assert_eq!(externals, HashSet::from(["B".to_string(), "C".to_string()]));
+    }
+
+    #[test]
+    fn find_externals_empty_graph() {
+        let graph = HashMap::new();
+        let externals = find_externals("A", &graph, 3);
+        assert!(externals.is_empty());
     }
 }

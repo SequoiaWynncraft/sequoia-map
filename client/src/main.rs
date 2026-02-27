@@ -6,9 +6,11 @@ mod colors;
 mod gpu;
 mod history;
 mod icons;
-mod minimap;
+mod label_layout;
 mod playback;
 mod render_loop;
+mod renderer;
+mod season_scalar;
 mod sidebar;
 mod spatial;
 mod sse;
@@ -21,31 +23,55 @@ mod viewport;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod gpu {
-    use crate::territory::ClientTerritoryMap;
+    use crate::app::NameColor;
+    use crate::renderer::{FrameMetrics, InvalidationReason, RenderCapabilities, SceneSnapshot};
     use crate::tiles::LoadedTile;
-    use crate::viewport::Viewport;
 
-    pub struct RenderFrameInput<'a> {
-        pub vp: &'a Viewport,
-        pub territories: &'a ClientTerritoryMap,
-        pub hovered: &'a Option<String>,
-        pub selected: &'a Option<String>,
-        pub tiles: &'a [LoadedTile],
-        pub world_bounds: Option<(f64, f64, f64, f64)>,
-        pub now: f64,
-        pub reference_time_secs: i64,
-    }
+    pub type RenderFrameInput<'a> = SceneSnapshot<'a>;
 
     pub struct GpuRenderer {
         pub thick_cooldown_borders: bool,
         pub resource_highlight: bool,
+        pub use_static_gpu_labels: bool,
+        pub use_full_gpu_text: bool,
+        pub static_show_names: bool,
+        pub static_abbreviate_names: bool,
+        pub static_name_color: NameColor,
+        pub show_connections: bool,
+        pub bold_connections: bool,
+        pub white_guild_tags: bool,
+        pub dynamic_show_countdown: bool,
+        pub dynamic_show_granular_map_time: bool,
+        pub dynamic_show_resource_icons: bool,
+        pub label_scale_master: f32,
+        pub label_scale_static_tag: f32,
+        pub label_scale_static_name: f32,
+        pub label_scale_dynamic: f32,
+        pub label_scale_icons: f32,
+        capabilities: RenderCapabilities,
+        metrics: FrameMetrics,
     }
 
+    #[allow(dead_code)]
     impl GpuRenderer {
         pub async fn init(_canvas: web_sys::HtmlCanvasElement) -> Result<Self, String> {
             Err("not wasm".into())
         }
         pub fn mark_instance_dirty(&mut self) {}
+        pub fn mark_text_dirty(&mut self) {}
+        pub fn mark_dynamic_text_dirty(&mut self) {}
+        pub fn mark_icon_dirty(&mut self) {}
+        pub fn mark_connection_dirty(&mut self) {}
+        pub fn mark_dirty(&mut self, _reason: InvalidationReason) {}
+        pub fn capabilities(&self) -> RenderCapabilities {
+            self.capabilities
+        }
+        pub fn frame_metrics(&self) -> FrameMetrics {
+            self.metrics
+        }
+        pub fn supports_static_gpu_labels(&self) -> bool {
+            false
+        }
         pub fn resize(&mut self, _w: u32, _h: u32, _dpr: f32) {}
         pub fn upload_tiles(&mut self, _tiles: &[LoadedTile]) {}
         pub fn render(&mut self, frame: RenderFrameInput<'_>) -> bool {
@@ -58,6 +84,10 @@ mod gpu {
                 frame.world_bounds,
                 frame.now,
                 frame.reference_time_secs,
+                frame.interaction_active,
+                frame.icons,
+                frame.show_minimap,
+                frame.history_mode,
             );
             false
         }

@@ -42,6 +42,26 @@ cd client && trunk serve
 DATABASE_URL="postgres://user:pass@localhost:5432/sequoia" cargo run -p sequoia-server
 ```
 
+If `trunk serve` exits immediately with a `--no-color` parsing error, run it as:
+
+```bash
+cd client && NO_COLOR=true trunk serve
+```
+
+### Development (Docker Hot Reload)
+
+Run the full dev stack (Postgres + Rust server hot reload + Trunk hot reload):
+
+```bash
+POSTGRES_PASSWORD=changeme docker compose -f docker-compose.dev.yml up --build
+```
+
+- Client dev server: `http://localhost:8080`
+- Server API: `http://localhost:3000/api/...`
+- Postgres (optional host access): `localhost:55432` (override with `POSTGRES_PORT`)
+- Server reload: `cargo watch` (watches `server/` and `shared/`)
+- Client reload: Trunk watch/rebuild in `client/`
+
 ### Docker Compose
 
 ```bash
@@ -77,6 +97,21 @@ sequoia-map/
   client/   — Leptos CSR app compiled to WASM, wgpu canvas renderer, sidebar UI
 ```
 
+## Font Renderer Modes
+
+Map label rendering now has four modes in `Settings -> Font -> Font Renderer`:
+
+- `Auto` (default): uses Firefox behavior on Firefox and Classic behavior elsewhere.
+- `Classic`: always uses the stable Canvas2D classic layout.
+- `Dynamic`: keeps the previous Auto behavior (GPU static labels on Firefox mobile, dynamic Canvas2D layout otherwise).
+- `GPU`: enables the experimental full GPU map-overlay path (static labels + dynamic map text + resource icons).
+
+Notes:
+
+- `GPU` mode initializes dual glyph atlases (fill + halo) and an icon atlas lazily.
+- `Auto`/`Classic` behavior remains unchanged; full-stack GPU rendering is gated behind `GPU` mode only.
+- If GPU text/icon resources fail to initialize, map overlays fall back to Canvas2D rendering.
+
 
 ## Environment Variables
 
@@ -87,6 +122,8 @@ sequoia-map/
 | `DB_MAX_CONNECTIONS` | SQLx PostgreSQL pool max connections | `10` |
 | `SSE_BROADCAST_BUFFER` | In-memory SSE broadcast channel capacity | `256` |
 | `SEQ_LIVE_HANDOFF_V1` | Enable sequence-aware live-state handoff | `true` |
+| `GUILDS_ONLINE_CACHE_TTL_SECS` | Cache freshness threshold used by `/api/guilds/online` | `120` |
+| `GUILDS_ONLINE_MAX_CONCURRENCY` | Max concurrent upstream guild fetches in `/api/guilds/online` | `8` |
 | `DOCKER_LOG_MAX_SIZE` | Docker log max size before rotation (Compose) | `10m` |
 | `DOCKER_LOG_MAX_FILE` | Docker log file count to retain (Compose) | `5` |
 | `BACKUP_INTERVAL_HOURS` | Interval between automatic PostgreSQL backups | `6` |
@@ -132,6 +169,10 @@ Prometheus metrics exposed by `/api/metrics`:
 | `sequoia_persist_failures_total` | counter | Total update persistence failures |
 | `sequoia_dropped_update_events_total` | counter | Total updates dropped before broadcast |
 | `sequoia_persisted_update_events_total` | counter | Total updates persisted before broadcast |
+| `sequoia_guilds_online_requests_total` | counter | Total `/api/guilds/online` requests |
+| `sequoia_guilds_online_cache_hits_total` | counter | Total guild rows served from cache by `/api/guilds/online` |
+| `sequoia_guilds_online_cache_misses_total` | counter | Total guild rows requiring upstream fetch in `/api/guilds/online` |
+| `sequoia_guilds_online_upstream_errors_total` | counter | Total upstream failures while serving `/api/guilds/online` |
 
 Predefined alerts in `ops/prometheus/alerts/sequoia-map-alerts.yml`:
 
@@ -158,6 +199,7 @@ Coolify/VPS deployment notes:
   - poller update persistence into `territory_events`
   - `/api/history/bounds`
   - `/api/history/events`
+  - `/api/history/sr-samples`
   - `/api/history/at`
 - Route integration tests also cover:
   - invalid history query params returning `400`

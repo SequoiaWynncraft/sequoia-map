@@ -1,0 +1,5 @@
+[advisories]
+ignore = [
+  # Transitive from current leptos/tachys stack; no direct remediation available in this lockset.
+  "RUSTSEC-2024-0436",
+]

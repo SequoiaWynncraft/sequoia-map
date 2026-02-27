@@ -248,3 +248,86 @@
 .sidebar-toggle {
   pointer-events: auto;
 }
+
+/* --- Mobile bottom sheet layout --- */
+@media (max-width: 767px) {
+  .sidebar-wrapper {
+    top: auto;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    max-height: 70vh;
+    transform: translateY(100%);
+    display: flex;
+    flex-direction: column;
+  }
+  .sidebar-wrapper .sidebar-inner {
+    width: 100% !important;
+    min-width: 100% !important;
+    height: auto !important;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    border-left: none;
+    border-top: 1px solid #282c3e;
+    border-radius: 16px 16px 0 0;
+  }
+  .sidebar-toggle { display: none !important; }
+  .mobile-sidebar-fab { display: flex; }
+  .bottom-sheet-scrim { display: block; }
+}
+
+/* Drag handle (mobile only) */
+.bottom-sheet-handle {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 0 4px;
+  cursor: grab;
+  touch-action: none;
+}
+.bottom-sheet-handle::before {
+  content: '';
+  width: 36px;
+  height: 4px;
+  border-radius: 2px;
+  background: #3a3f5c;
+}
+@media (max-width: 767px) {
+  .bottom-sheet-handle { display: flex; }
+}
+
+/* Scrim overlay */
+.bottom-sheet-scrim {
+  position: fixed; inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 9; opacity: 0; pointer-events: none;
+  transition: opacity 0.3s ease;
+}
+.bottom-sheet-scrim.scrim-visible {
+  opacity: 1; pointer-events: auto;
+}
+
+/* Peek card animation */
+@keyframes peek-card-enter {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.peek-card-animate {
+  animation: peek-card-enter 0.2s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Mobile timeline — larger slider thumbs */
+@media (max-width: 767px) {
+  .timeline-slider::-webkit-slider-thumb { width: 24px; height: 24px; margin-top: -10px; }
+  .timeline-slider::-moz-range-thumb { width: 24px; height: 24px; }
+  .timeline-slider::-webkit-slider-runnable-track { height: 6px; }
+  .timeline-slider::-moz-range-track { height: 6px; }
+}
+
+/* Desktop: hide mobile-only elements */
+@media (min-width: 768px) {
+  .mobile-sidebar-fab { display: none; }
+  .bottom-sheet-scrim { display: none; }
+}

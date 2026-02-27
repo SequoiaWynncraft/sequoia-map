@@ -101,3 +101,93 @@ pub fn interpolate_hsl(from: (f64, f64, f64), to: (f64, f64, f64), t: f64) -> (f
 
     (h, s, l)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{guild_color, hsl_to_rgb, interpolate_hsl, rgb_to_hsl};
+
+    fn assert_close(actual: f64, expected: f64) {
+        let diff = (actual - expected).abs();
+        assert!(
+            diff < 1e-9,
+            "expected {expected}, got {actual} (diff: {diff})"
+        );
+    }
+
+    #[test]
+    fn roundtrip_rgb_through_hsl_is_identity() {
+        let samples = [
+            (0, 0, 0),
+            (255, 255, 255),
+            (128, 128, 128),
+            (255, 0, 0),
+            (0, 255, 0),
+            (0, 0, 255),
+            (37, 91, 201),
+            (250, 180, 20),
+        ];
+
+        for (r, g, b) in samples {
+            let (h, s, l) = rgb_to_hsl(r, g, b);
+            assert_eq!(hsl_to_rgb(h, s, l), (r, g, b));
+        }
+    }
+
+    #[test]
+    fn rgb_to_hsl_gray_has_zero_saturation() {
+        let (h, s, l) = rgb_to_hsl(128, 128, 128);
+        assert_close(h, 0.0);
+        assert_close(s, 0.0);
+        assert_close(l, 128.0 / 255.0);
+    }
+
+    #[test]
+    fn rgb_to_hsl_pure_primaries() {
+        let (h_r, s_r, l_r) = rgb_to_hsl(255, 0, 0);
+        assert_close(h_r, 0.0);
+        assert_close(s_r, 1.0);
+        assert_close(l_r, 0.5);
+
+        let (h_g, s_g, l_g) = rgb_to_hsl(0, 255, 0);
+        assert_close(h_g, 120.0);
+        assert_close(s_g, 1.0);
+        assert_close(l_g, 0.5);
+
+        let (h_b, s_b, l_b) = rgb_to_hsl(0, 0, 255);
+        assert_close(h_b, 240.0);
+        assert_close(s_b, 1.0);
+        assert_close(l_b, 0.5);
+    }
+
+    #[test]
+    fn interpolate_hsl_wraps_shortest_path() {
+        let from = (350.0, 0.6, 0.4);
+        let to = (10.0, 0.8, 0.5);
+
+        let mid = interpolate_hsl(from, to, 0.5);
+        assert_close(mid.0, 0.0);
+        assert_close(mid.1, 0.7);
+        assert_close(mid.2, 0.45);
+    }
+
+    #[test]
+    fn interpolate_hsl_at_t0_and_t1() {
+        let from = (42.0, 0.1, 0.2);
+        let to = (300.0, 0.9, 0.8);
+
+        assert_eq!(interpolate_hsl(from, to, 0.0), from);
+        assert_eq!(interpolate_hsl(from, to, 1.0), to);
+    }
+
+    #[test]
+    fn guild_color_is_deterministic() {
+        let a = guild_color("The Hive");
+        let b = guild_color("The Hive");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn guild_color_varies_for_different_names() {
+        assert_ne!(guild_color("The Hive"), guild_color("Canyon Condors"));
+    }
+}

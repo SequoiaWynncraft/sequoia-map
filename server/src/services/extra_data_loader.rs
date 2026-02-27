@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use tracing::{info, warn};
@@ -17,6 +18,7 @@ pub async fn run(state: AppState) {
             Ok(data) => {
                 let count = data.len();
                 *state.extra_terr.write().await = data;
+                state.extra_data_dirty.store(true, Ordering::Release);
                 info!("loaded extra territory data for {count} territories");
             }
             Err(e) => {

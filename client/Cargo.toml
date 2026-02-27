@@ -7,36 +7,11 @@ version.workspace = true
 sequoia-shared = { path = "../shared" }
 leptos = { version = "0.7", default-features = false, features = ["csr"] }
 web-sys = { version = "0.3", features = [
-    "Window",
-    "Navigator",
-    "Document",
-    "Element",
-    "HtmlElement",
-    "HtmlCanvasElement",
-    "HtmlInputElement",
-    "HtmlImageElement",
     "CanvasRenderingContext2d",
-    "ImageData",
-    "EventSource",
-    "MessageEvent",
-    "Event",
-    "PointerEvent",
-    "WheelEvent",
-    "TouchEvent",
-    "Touch",
-    "TouchList",
-    "KeyboardEvent",
-    "MouseEvent",
     "DomRect",
-    "CssStyleDeclaration",
-    "Performance",
-    "EventTarget",
-    "AddEventListenerOptions",
     "TextMetrics",
-    "ScrollIntoViewOptions",
-    "ScrollLogicalPosition",
 ] }
-wgpu = { version = "24.0", default-features = false, features = ["wgsl", "webgpu", "webgl"] }
+wgpu = { version = "24.0", default-features = false, features = ["wgsl", "webgl"] }
 bytemuck = { version = "1", features = ["derive"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

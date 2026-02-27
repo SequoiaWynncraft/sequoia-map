@@ -18,7 +18,7 @@ pub async fn run(state: AppState) {
         let now = Utc::now();
 
         state.guild_cache.retain(|_, cached| {
-            now.signed_duration_since(cached.cached_at).num_seconds() < GUILD_CACHE_TTL_SECS
+            now.signed_duration_since(cached.fetched_at).num_seconds() < GUILD_CACHE_TTL_SECS
         });
 
         let evicted = before - state.guild_cache.len();
