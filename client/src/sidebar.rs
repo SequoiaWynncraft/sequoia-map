@@ -1,24 +1,31 @@
-use std::collections::HashMap;
-
 use leptos::prelude::*;
+use std::collections::HashMap;
 use wasm_bindgen::JsCast;
 
+use sequoia_shared::history::HistoryHeatMeta;
 use sequoia_shared::{Resources, TreasuryLevel, passive_sr_per_5s, passive_sr_per_hour};
 
 use crate::app::{
-    AbbreviateNames, AutoSrScalarEnabled, BoldConnections, CurrentMode, DEFAULT_LABEL_SCALE_GROUP,
-    DEFAULT_LABEL_SCALE_MASTER, DEFAULT_LABEL_SCALE_STATIC_NAME, GuildColorStore, GuildOnlineData,
+    AbbreviateNames, AutoSrScalarEnabled, BoldConnections, CONNECTION_OPACITY_SCALE_MAX,
+    CONNECTION_OPACITY_SCALE_MIN, CONNECTION_THICKNESS_SCALE_MAX, CONNECTION_THICKNESS_SCALE_MIN,
+    ConnectionOpacityScale, ConnectionThicknessScale, CurrentMode,
+    DEFAULT_CONNECTION_OPACITY_SCALE, DEFAULT_CONNECTION_THICKNESS_SCALE,
+    DEFAULT_LABEL_SCALE_GROUP, DEFAULT_LABEL_SCALE_MASTER, DEFAULT_LABEL_SCALE_STATIC_NAME,
+    DEFAULT_LABEL_SCALE_STATIC_TAG, GuildColorStore, GuildOnlineData, HeatEntriesByTerritory,
+    HeatFallbackApplied, HeatHistoryBasis, HeatHistoryBasisSetting, HeatLiveSource,
+    HeatLiveSourceSetting, HeatMetaState, HeatModeEnabled, HeatSelectedSeasonId, HeatWindowLabel,
     HistoryAvailable, HistoryBoundsSignal, HistoryBufferModeActive, HistoryBufferedUpdates,
     HistoryFetchNonce, HistorySeasonLeaderboard, HistorySeasonScalarSample, HistoryTimestamp,
     IsMobile, LABEL_SCALE_GROUP_MAX, LABEL_SCALE_GROUP_MIN, LABEL_SCALE_MASTER_MAX,
     LABEL_SCALE_MASTER_MIN, LabelScaleDynamic, LabelScaleIcons, LabelScaleMaster, LabelScaleStatic,
     LabelScaleStaticName, LastLiveSeq, LeaderboardSortBySr, LiveHandoffResyncCount,
     LiveSeasonScalarSample, ManualSrScalar, MapMode, NameColor, NameColorSetting, NeedsLiveResync,
-    PlaybackActive, ResourceHighlight, SIDEBAR_WIDTH, Selected, SelectedGuild, ShowCountdown,
+    PlaybackActive, ResourceHighlight, Selected, SelectedGuild, ShowCompoundMapTime, ShowCountdown,
     ShowGranularMapTime, ShowLeaderboardOnline, ShowLeaderboardSrGain, ShowLeaderboardSrValue,
     ShowLeaderboardTerritoryCount, ShowMinimap, ShowNames, ShowResourceIcons, SidebarIndex,
     SidebarItems, SidebarOpen, SidebarTransient, TerritoryGeometryStore, ThickCooldownBorders,
-    WhiteGuildTags, canvas_dimensions, clamp_label_scale_group, clamp_label_scale_master,
+    WhiteGuildTags, canvas_dimensions, clamp_connection_opacity_scale,
+    clamp_connection_thickness_scale, clamp_label_scale_group, clamp_label_scale_master,
 };
 use crate::colors::rgba_css;
 use crate::history;
@@ -172,7 +179,7 @@ pub fn Sidebar() -> impl IntoView {
             class="sidebar-inner"
             class:sidebar-animate=move || sidebar_open.get()
             style:display=move || if sidebar_open.get() { "flex" } else { "none" }
-            style=format!("width: {}px; min-width: {}px; height: 100%; background: #13161f; border-left: 1px solid #282c3e; display: flex; flex-direction: column; z-index: 10; box-shadow: -4px 0 20px rgba(0,0,0,0.4), inset 1px 0 0 rgba(168,85,247,0.04);", SIDEBAR_WIDTH as u32, SIDEBAR_WIDTH as u32)
+            style="width: 100%; min-width: 100%; height: 100%; background: #13161f; border-left: 1px solid #282c3e; display: flex; flex-direction: column; z-index: 10; box-shadow: -4px 0 20px rgba(0,0,0,0.4), inset 1px 0 0 rgba(168,85,247,0.04);"
         >
             <SidebarHeader />
             <SearchBar />
@@ -305,13 +312,17 @@ fn SearchBar() -> impl IntoView {
 
 #[component]
 fn SettingsPanel() -> impl IntoView {
+    let territories: RwSignal<ClientTerritoryMap> = expect_context();
     let AbbreviateNames(abbreviate_names) = expect_context();
     let show_connections: RwSignal<bool> = expect_context();
     let ShowCountdown(show_countdown) = expect_context();
     let ShowGranularMapTime(show_granular_map_time) = expect_context();
+    let ShowCompoundMapTime(show_compound_map_time) = expect_context();
     let ShowNames(show_names) = expect_context();
     let ThickCooldownBorders(thick_cooldown_borders) = expect_context();
     let BoldConnections(bold_connections) = expect_context();
+    let ConnectionOpacityScale(connection_opacity_scale) = expect_context();
+    let ConnectionThicknessScale(connection_thickness_scale) = expect_context();
     let ResourceHighlight(resource_highlight) = expect_context();
     let ShowResourceIcons(show_resource_icons) = expect_context();
     let ManualSrScalar(manual_sr_scalar) = expect_context();
@@ -320,6 +331,14 @@ fn SettingsPanel() -> impl IntoView {
     let ShowLeaderboardSrValue(show_leaderboard_sr_value) = expect_context();
     let ShowLeaderboardTerritoryCount(show_leaderboard_territory_count) = expect_context();
     let ShowLeaderboardOnline(show_leaderboard_online) = expect_context();
+    let HeatModeEnabled(heat_mode_enabled) = expect_context();
+    let HeatLiveSourceSetting(heat_live_source) = expect_context();
+    let HeatHistoryBasisSetting(heat_history_basis) = expect_context();
+    let HeatSelectedSeasonId(heat_selected_season_id) = expect_context();
+    let HeatMetaState(heat_meta) = expect_context();
+    let HeatFallbackApplied(heat_fallback_applied) = expect_context();
+    let HeatWindowLabel(heat_window_label) = expect_context();
+    let CurrentMode(mode) = expect_context();
     let WhiteGuildTags(white_guild_tags) = expect_context();
     let NameColorSetting(name_color) = expect_context();
     let ShowMinimap(show_minimap) = expect_context();
@@ -328,6 +347,7 @@ fn SettingsPanel() -> impl IntoView {
     let LabelScaleStaticName(label_scale_static_name) = expect_context();
     let LabelScaleDynamic(label_scale_dynamic) = expect_context();
     let LabelScaleIcons(label_scale_icons) = expect_context();
+    let territory_count = Memo::new(move |_| territories.get().len());
 
     view! {
         <div style="border-bottom: 1px solid #282c3e;">
@@ -393,14 +413,68 @@ fn SettingsPanel() -> impl IntoView {
                 <SettingsSectionHeader title="Timing" />
                 <SettingsToggleRow label="Countdown Timer" shortcut="T" active=show_countdown />
                 <SettingsToggleRow label="Granular Map Time" shortcut="" active=show_granular_map_time />
+                <SettingsToggleRow label="Compound Map Time" shortcut="" active=show_compound_map_time />
                 <SettingsToggleRow label="Thick Cooldown Borders" shortcut="" active=thick_cooldown_borders />
 
                 <SettingsSectionHeader title="Map" />
                 <SettingsToggleRow label="Connection Lines" shortcut="C" active=show_connections />
                 <SettingsToggleRow label="Bold Connections" shortcut="B" active=bold_connections />
+                <SettingsScaleRow
+                    label="Line Opacity"
+                    value=connection_opacity_scale
+                    min=CONNECTION_OPACITY_SCALE_MIN
+                    max=CONNECTION_OPACITY_SCALE_MAX
+                    step=0.05
+                    clamp=clamp_connection_opacity_scale
+                />
+                <SettingsScaleRow
+                    label="Line Thickness"
+                    value=connection_thickness_scale
+                    min=CONNECTION_THICKNESS_SCALE_MIN
+                    max=CONNECTION_THICKNESS_SCALE_MAX
+                    step=0.05
+                    clamp=clamp_connection_thickness_scale
+                />
+                <SettingsConnectionScaleResetRow
+                    opacity=connection_opacity_scale
+                    thickness=connection_thickness_scale
+                />
                 <SettingsToggleRow label="Resource Highlight" shortcut="P" active=resource_highlight />
                 <SettingsToggleRow label="Resource Icons" shortcut="" active=show_resource_icons />
                 <SettingsToggleRow label="Minimap" shortcut="M" active=show_minimap />
+                <SettingsToggleRow label="Heat Map" shortcut="" active=heat_mode_enabled />
+                <div style="display: flex; align-items: center; justify-content: space-between; padding: 9px 10px;">
+                    <span style="font-size: 0.88rem; color: #e2e0d8; font-family: 'Inter', system-ui, sans-serif;">"Territories"</span>
+                    <span style="font-size: 0.74rem; color: #9a9590; font-family: 'JetBrains Mono', monospace;">
+                        {move || territory_count.get()}
+                    </span>
+                </div>
+                <Show when=move || heat_mode_enabled.get()>
+                    <div style="padding: 4px 10px 8px; border-top: 1px solid rgba(40,44,62,0.5); margin-top: 4px;">
+                        <SettingsHeatSourceRow
+                            mode=mode
+                            live_source=heat_live_source
+                            history_basis=heat_history_basis
+                        />
+                        <Show when=move || {
+                            if mode.get() == MapMode::History {
+                                heat_history_basis.get() == HeatHistoryBasis::SeasonCumulative
+                            } else {
+                                heat_live_source.get() == HeatLiveSource::Season
+                            }
+                        }>
+                            <SettingsHeatSeasonRow season_id=heat_selected_season_id meta=heat_meta />
+                        </Show>
+                        <Show when=move || heat_fallback_applied.get()>
+                            <div style="font-size: 0.66rem; color: #f5c542; font-family: 'JetBrains Mono', monospace; margin-top: 6px;">
+                                "Season data unavailable, using last 60d fallback."
+                            </div>
+                        </Show>
+                        <div style="font-size: 0.62rem; color: #6f748f; font-family: 'JetBrains Mono', monospace; margin-top: 5px;">
+                            {move || heat_window_label.get()}
+                        </div>
+                    </div>
+                </Show>
 
                 <SettingsSectionHeader title="Season Rating" />
                 <SettingsScalarRow scalar=manual_sr_scalar />
@@ -507,15 +581,49 @@ fn SettingsScaleRow(
     step: f64,
     clamp: fn(f64) -> f64,
 ) -> impl IntoView {
-    let on_input = move |e: leptos::ev::Event| {
-        let Some(target) = e.target() else {
-            return;
-        };
-        let Ok(input) = target.dyn_into::<web_sys::HtmlInputElement>() else {
-            return;
-        };
-        if let Ok(parsed) = input.value().trim().parse::<f64>() {
-            value.set(clamp(parsed));
+    let slider_ref = NodeRef::<leptos::html::Input>::new();
+    let slider_ref_sync = slider_ref.clone();
+    let local_value: RwSignal<f64> = RwSignal::new(clamp(value.get_untracked()));
+    let dragging: RwSignal<bool> = RwSignal::new(false);
+
+    Effect::new(move || {
+        let external = clamp(value.get());
+        if !dragging.get() {
+            local_value.set(external);
+            if let Some(input) = slider_ref_sync.get() {
+                input.set_value(&format!("{external:.2}"));
+            }
+        }
+    });
+
+    let on_input = {
+        move |e: leptos::ev::Event| {
+            let Some(target) = e.target() else {
+                return;
+            };
+            let Ok(input) = target.dyn_into::<web_sys::HtmlInputElement>() else {
+                return;
+            };
+            if let Ok(parsed) = input.value().trim().parse::<f64>() {
+                let clamped = clamp(parsed);
+                dragging.set(true);
+                local_value.set(clamped);
+                value.set(clamped);
+            }
+        }
+    };
+
+    let on_change = {
+        move |e: leptos::ev::Event| {
+            if let Some(target) = e.target()
+                && let Ok(input) = target.dyn_into::<web_sys::HtmlInputElement>()
+                && let Ok(parsed) = input.value().trim().parse::<f64>()
+            {
+                let clamped = clamp(parsed);
+                local_value.set(clamped);
+                value.set(clamped);
+            }
+            dragging.set(false);
         }
     };
 
@@ -525,13 +633,16 @@ fn SettingsScaleRow(
                 {label}
             </span>
             <input
+                node_ref=slider_ref
                 type="range"
+                class="timeline-slider"
                 min=min
                 max=max
                 step=step
-                prop:value=move || format!("{:.2}", value.get())
+                value=format!("{:.2}", local_value.get_untracked())
                 on:input=on_input
-                style="flex: 1; accent-color: #f5c542;"
+                on:change=on_change
+                style="flex: 1; margin: 0; accent-color: #f5c542;"
             />
             <span
                 style="width: 42px; text-align: right; font-family: 'JetBrains Mono', monospace; font-size: 0.66rem; color: #9a9590;"
@@ -552,10 +663,32 @@ fn SettingsScaleResetRow(
 ) -> impl IntoView {
     let on_reset = move |_| {
         master.set(DEFAULT_LABEL_SCALE_MASTER);
-        static_tag.set(DEFAULT_LABEL_SCALE_GROUP);
+        static_tag.set(DEFAULT_LABEL_SCALE_STATIC_TAG);
         static_name.set(DEFAULT_LABEL_SCALE_STATIC_NAME);
         dynamic.set(DEFAULT_LABEL_SCALE_GROUP);
         icons.set(DEFAULT_LABEL_SCALE_GROUP);
+    };
+
+    view! {
+        <div style="display: flex; justify-content: flex-end; padding: 2px 10px 6px;">
+            <button
+                on:click=on_reset
+                style="background: #1a1d2a; border: 1px solid #282c3e; border-radius: 4px; color: #9a9590; font-family: 'JetBrains Mono', monospace; font-size: 0.62rem; padding: 3px 8px; cursor: pointer;"
+            >
+                "Reset"
+            </button>
+        </div>
+    }
+}
+
+#[component]
+fn SettingsConnectionScaleResetRow(
+    opacity: RwSignal<f64>,
+    thickness: RwSignal<f64>,
+) -> impl IntoView {
+    let on_reset = move |_| {
+        opacity.set(DEFAULT_CONNECTION_OPACITY_SCALE);
+        thickness.set(DEFAULT_CONNECTION_THICKNESS_SCALE);
     };
 
     view! {
@@ -608,6 +741,134 @@ fn SettingsToggleRow(
                     "display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #3a3f5c; flex-shrink: 0;"
                 }
             } />
+        </div>
+    }
+}
+
+#[component]
+fn SettingsHeatSourceRow(
+    mode: RwSignal<MapMode>,
+    live_source: RwSignal<HeatLiveSource>,
+    history_basis: RwSignal<HeatHistoryBasis>,
+) -> impl IntoView {
+    let is_history = move || mode.get() == MapMode::History;
+    view! {
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-top: 6px;">
+            <span style="font-size: 0.8rem; color: #9a9590; font-family: 'Inter', system-ui, sans-serif;">
+                {move || if is_history() { "History Basis" } else { "Live Source" }}
+            </span>
+            <div style="display: inline-flex; background: #1a1d2a; border: 1px solid #282c3e; border-radius: 4px; overflow: hidden;">
+                <button
+                    style=move || {
+                        let active = if is_history() {
+                            history_basis.get() == HeatHistoryBasis::SeasonCumulative
+                        } else {
+                            live_source.get() == HeatLiveSource::Season
+                        };
+                        format!(
+                            "padding: 4px 8px; border: none; background: {}; color: {}; font-family: 'JetBrains Mono', monospace; font-size: 0.66rem; cursor: pointer;",
+                            if active { "rgba(245,197,66,0.12)" } else { "transparent" },
+                            if active { "#f5c542" } else { "#7c829e" },
+                        )
+                    }
+                    on:click=move |_| {
+                        if is_history() {
+                            history_basis.set(HeatHistoryBasis::SeasonCumulative);
+                        } else {
+                            live_source.set(HeatLiveSource::Season);
+                        }
+                    }
+                >
+                    "Season"
+                </button>
+                <button
+                    style=move || {
+                        let active = if is_history() {
+                            history_basis.get() == HeatHistoryBasis::AllTimeCumulative
+                        } else {
+                            live_source.get() == HeatLiveSource::AllTime
+                        };
+                        format!(
+                            "padding: 4px 8px; border: none; border-left: 1px solid #282c3e; background: {}; color: {}; font-family: 'JetBrains Mono', monospace; font-size: 0.66rem; cursor: pointer;",
+                            if active { "rgba(245,197,66,0.12)" } else { "transparent" },
+                            if active { "#f5c542" } else { "#7c829e" },
+                        )
+                    }
+                    on:click=move |_| {
+                        if is_history() {
+                            history_basis.set(HeatHistoryBasis::AllTimeCumulative);
+                        } else {
+                            live_source.set(HeatLiveSource::AllTime);
+                        }
+                    }
+                >
+                    "All-time"
+                </button>
+            </div>
+        </div>
+    }
+}
+
+fn resolve_heat_selected_season_id(value: &str) -> Option<i32> {
+    if value == "latest" {
+        return None;
+    }
+    value.parse::<i32>().ok()
+}
+
+#[component]
+fn SettingsHeatSeasonRow(
+    season_id: RwSignal<Option<i32>>,
+    meta: RwSignal<Option<HistoryHeatMeta>>,
+) -> impl IntoView {
+    let on_change = move |e: leptos::ev::Event| {
+        let Some(target) = e.target() else {
+            return;
+        };
+        let Ok(select) = target.dyn_into::<web_sys::HtmlSelectElement>() else {
+            return;
+        };
+        let value = select.value();
+        season_id.set(resolve_heat_selected_season_id(&value));
+    };
+
+    view! {
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px;">
+            <span style="font-size: 0.8rem; color: #9a9590; font-family: 'Inter', system-ui, sans-serif;">"Season"</span>
+            <select
+                on:change=on_change
+                style="min-width: 120px; background: #1a1d2a; border: 1px solid #282c3e; border-radius: 4px; color: #e2e0d8; font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; padding: 4px 6px; outline: none;"
+            >
+                <option
+                    value="latest"
+                    selected=move || {
+                        season_id.get().is_none()
+                    }
+                >
+                    "Latest"
+                </option>
+                {move || {
+                    meta.get()
+                        .map(|m| {
+                            m.seasons
+                                .iter()
+                                .map(|season| {
+                                    let season_id_value = season.season_id;
+                                    let value = season_id_value.to_string();
+                                    view! {
+                                        <option
+                                            value=value.clone()
+                                            selected=move || season_id.get() == Some(season_id_value)
+                                        >
+                                            {format!("Season {season_id_value}")}
+                                        </option>
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                }}
+            </select>
         </div>
     }
 }
@@ -1053,7 +1314,27 @@ fn LeaderboardPanel() -> impl IntoView {
     }
 }
 
-fn extract_online_members(json: &serde_json::Value) -> Vec<(String, String)> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OnlineMemberRow {
+    username: String,
+    rank_label: String,
+    rank_priority: u8,
+    server: String,
+}
+
+fn rank_label_and_priority(rank_key: &str) -> Option<(&'static str, u8)> {
+    match rank_key {
+        "owner" => Some(("Owner", 0)),
+        "chief" => Some(("Chief", 1)),
+        "strategist" => Some(("Strategist", 2)),
+        "captain" => Some(("Captain", 3)),
+        "recruiter" => Some(("Recruiter", 4)),
+        "recruit" => Some(("Recruit", 5)),
+        _ => None,
+    }
+}
+
+fn extract_online_members(json: &serde_json::Value) -> Vec<OnlineMemberRow> {
     let Some(members) = json.get("members").and_then(|m| m.as_object()) else {
         return Vec::new();
     };
@@ -1066,6 +1347,9 @@ fn extract_online_members(json: &serde_json::Value) -> Vec<(String, String)> {
         "recruiter",
         "recruit",
     ] {
+        let Some((rank_label, rank_priority)) = rank_label_and_priority(rank) else {
+            continue;
+        };
         let Some(rank_obj) = members.get(*rank).and_then(|v| v.as_object()) else {
             continue;
         };
@@ -1076,10 +1360,25 @@ fn extract_online_members(json: &serde_json::Value) -> Vec<(String, String)> {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                result.push((username.clone(), server));
+                result.push(OnlineMemberRow {
+                    username: username.clone(),
+                    rank_label: rank_label.to_string(),
+                    rank_priority,
+                    server,
+                });
             }
         }
     }
+    result.sort_by(|a, b| {
+        a.rank_priority
+            .cmp(&b.rank_priority)
+            .then_with(|| {
+                a.username
+                    .to_ascii_lowercase()
+                    .cmp(&b.username.to_ascii_lowercase())
+            })
+            .then_with(|| a.username.cmp(&b.username))
+    });
     result
 }
 
@@ -1324,11 +1623,15 @@ fn GuildPanel() -> impl IntoView {
                                     <span style="color: #50c878; margin-right: 6px; font-size: 0.6rem;">{"\u{25C6}"}</span>"Online Members"
                                 </div>
                                 <div style="display: flex; flex-direction: column; gap: 3px;">
-                                    {online_members.into_iter().map(|(username, server)| {
+                                    {online_members.into_iter().map(|member| {
+                                        let username = member.username;
+                                        let rank_label = member.rank_label;
+                                        let server = member.server;
                                         let profile_url = format!("https://wynncraft.com/stats/player/{}", username);
                                         view! {
                                             <div style="display: flex; align-items: center; gap: 8px; padding: 3px 0; font-family: 'JetBrains Mono', monospace; font-size: 0.75rem;">
                                                 <span style="font-size: 0.4rem; color: #50c878; line-height: 1;">{"\u{25CF}"}</span>
+                                                <span style="color: #9a9590; font-size: 0.7rem; min-width: 72px;">"[" {rank_label} "]"</span>
                                                 <a href=profile_url
                                                    target="_blank"
                                                    rel="noopener noreferrer"
@@ -1437,6 +1740,8 @@ fn DetailPanel() -> impl IntoView {
     let AutoSrScalarEnabled(auto_sr_scalar_enabled) = expect_context();
     let LiveSeasonScalarSample(live_scalar_sample) = expect_context();
     let HistorySeasonScalarSample(history_scalar_sample) = expect_context();
+    let HeatModeEnabled(heat_mode_enabled) = expect_context();
+    let HeatEntriesByTerritory(heat_entries_by_territory) = expect_context();
 
     let tower_state: crate::tower::TowerState = expect_context();
 
@@ -1478,7 +1783,7 @@ fn DetailPanel() -> impl IntoView {
         }
     });
 
-    let detail = Memo::new(move |_| {
+    let detail = move || {
         let reference_secs = if mode.get() == MapMode::History {
             history_timestamp.get().unwrap_or_else(|| tick.get())
         } else {
@@ -1487,6 +1792,17 @@ fn DetailPanel() -> impl IntoView {
         let name = selected.get()?;
         let map = territories.get();
         let ct = map.get(&name)?;
+        let takes_in_window = if heat_mode_enabled.get() {
+            Some(
+                heat_entries_by_territory
+                    .get()
+                    .get(&name)
+                    .copied()
+                    .unwrap_or(0),
+            )
+        } else {
+            None
+        };
         let acquired_rfc = ct.territory.acquired.to_rfc3339();
         let guild_uuid = ct.territory.guild.uuid.clone();
         let guild_name = ct.territory.guild.name.clone();
@@ -1520,8 +1836,9 @@ fn DetailPanel() -> impl IntoView {
             ct.territory.connections.len(),
             guild_territory_count,
             reference_secs,
+            takes_in_window,
         ))
-    });
+    };
 
     let on_close = move |_| {
         selected.set(None);
@@ -1551,9 +1868,8 @@ fn DetailPanel() -> impl IntoView {
                 </svg>
             </button>
             {move || {
-                detail
-                    .get()
-                    .map(|(name, guild_name, guild_prefix, _uuid, acquired, location, (r, g, b), treasury, resources, conn_count, guild_territory_count, reference_secs)| {
+                detail()
+                    .map(|(name, guild_name, guild_prefix, _uuid, acquired, location, (r, g, b), treasury, resources, conn_count, guild_territory_count, reference_secs, takes_in_window)| {
                         let relative_time = format_relative_time(&acquired, reference_secs);
                         let (tr, tg, tb) = treasury.color_rgb();
                         let treasury_label = treasury.label();
@@ -1650,6 +1966,12 @@ fn DetailPanel() -> impl IntoView {
                                         {passive_sr_label}
                                     </span>
                                 </div>
+                                {takes_in_window.map(|count| view! {
+                                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; font-size: 0.85rem; border-bottom: 1px solid rgba(40,44,62,0.6);">
+                                        <span style="color: #9a9590; font-family: 'Inter', system-ui, sans-serif;">"Takes in window"</span>
+                                        <span style="color: #e2e0d8; font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; font-variant-numeric: tabular-nums;">{count}</span>
+                                    </div>
+                                })}
                                 <div style="padding: 6px 0 8px; border-bottom: 1px solid rgba(40,44,62,0.6);">
                                     <span style="font-size: 0.68rem; color: #7c829e; font-family: 'JetBrains Mono', monospace;">
                                         {scalar_note}
@@ -1749,8 +2071,7 @@ fn StatsBar() -> impl IntoView {
     let TerritoryGeometryStore(geo_store) = expect_context();
     let GuildColorStore(guild_color_store) = expect_context();
     let IsMobile(is_mobile) = expect_context();
-
-    let territory_count = Memo::new(move |_| territories.get().len());
+    let HeatModeEnabled(heat_mode_enabled) = expect_context();
 
     let guild_count = Memo::new(move |_| {
         let map = territories.get();
@@ -1782,7 +2103,8 @@ fn StatsBar() -> impl IntoView {
     let is_history = move || mode.get() == MapMode::History;
 
     view! {
-        <div style="padding: 10px 12px; border-top: 1px solid #282c3e; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; color: #6a6870;">
+        <div style="padding: 10px 12px; border-top: 1px solid #282c3e; display: flex; align-items: center; justify-content: space-between; gap: 8px; font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; color: #6a6870;">
+            <div style="display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; overflow-x: auto; scrollbar-width: none;">
             <button
                 style:display=move || if history_available.get() && !is_mobile.get() { "flex" } else { "none" }
                 style="background: none; border: 1px solid #282c3e; border-radius: 999px; padding: 5px 10px; cursor: pointer; align-items: center; justify-content: center; transition: border-color 0.15s, background 0.15s, color 0.15s; font-size: 0.66rem; min-width: 64px;"
@@ -1842,13 +2164,34 @@ fn StatsBar() -> impl IntoView {
             >
                 "History"
             </button>
-            <div
-                style="background: #1a1d2a; border-radius: 999px; padding: 5px 10px; border: 1px solid #282c3e; display: flex; align-items: center; gap: 4px;"
-                style:min-height=move || if is_mobile.get() { "44px" } else { "auto" }
+            <button
+                style:display=move || if !is_mobile.get() { "flex" } else { "none" }
+                style="background: none; border: 1px solid #282c3e; border-radius: 999px; padding: 5px 10px; cursor: pointer; align-items: center; justify-content: center; transition: border-color 0.15s, background 0.15s, color 0.15s; font-size: 0.66rem; min-width: 58px;"
+                title=move || if heat_mode_enabled.get() { "Disable heat map" } else { "Enable heat map" }
+                style:color=move || if heat_mode_enabled.get() { "#13161f" } else { "#5a5860" }
+                style:background=move || if heat_mode_enabled.get() { "#f58c32" } else { "#1a1d2a" }
+                style:border-color=move || if heat_mode_enabled.get() { "#f58c32" } else { "#282c3e" }
+                style:box-shadow=move || if heat_mode_enabled.get() { "0 0 8px rgba(245,140,50,0.35)" } else { "none" }
+                on:click=move |_| heat_mode_enabled.update(|v| *v = !*v)
+                on:mouseenter=move |e| {
+                    if !heat_mode_enabled.get()
+                        && let Some(el) = e.target().and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok())
+                    {
+                        el.style().set_property("color", "#9a9590").ok();
+                        el.style().set_property("border-color", "#3a3f5c").ok();
+                    }
+                }
+                on:mouseleave=move |e| {
+                    if !heat_mode_enabled.get()
+                        && let Some(el) = e.target().and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok())
+                    {
+                        el.style().set_property("color", "#5a5860").ok();
+                        el.style().set_property("border-color", "#282c3e").ok();
+                    }
+                }
             >
-                <span style="color: #9a9590;">{move || territory_count.get()}</span>
-                <span>" terr."</span>
-            </div>
+                "Heat"
+            </button>
             <div
                 style="background: #1a1d2a; border-radius: 999px; padding: 5px 10px; border: 1px solid #282c3e; display: flex; align-items: center; gap: 4px;"
                 style:min-height=move || if is_mobile.get() { "44px" } else { "auto" }
@@ -1856,9 +2199,11 @@ fn StatsBar() -> impl IntoView {
                 <span style="color: #9a9590;">{move || guild_count.get()}</span>
                 <span>" guilds"</span>
             </div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 6px; flex-shrink: 0;">
             <div
                 title=move || status_text.get()
-                style="margin-left: auto; width: 26px; height: 26px; border: 1px solid #282c3e; border-radius: 999px; background: #1a1d2a; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"
+                style="width: 26px; height: 26px; border: 1px solid #282c3e; border-radius: 999px; background: #1a1d2a; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"
             >
                 <span style=move || status_dot_style.get()></span>
             </div>
@@ -1891,6 +2236,113 @@ fn StatsBar() -> impl IntoView {
                     <path fill-rule="evenodd" d="M7.84 1.804A1 1 0 018.82 1h2.36a1 1 0 01.98.804l.331 1.652a6.993 6.993 0 011.929 1.115l1.598-.54a1 1 0 011.186.447l1.18 2.044a1 1 0 01-.205 1.251l-1.267 1.113a7.047 7.047 0 010 2.228l1.267 1.113a1 1 0 01.206 1.25l-1.18 2.045a1 1 0 01-1.187.447l-1.598-.54a6.993 6.993 0 01-1.929 1.115l-.33 1.652a1 1 0 01-.98.804H8.82a1 1 0 01-.98-.804l-.331-1.652a6.993 6.993 0 01-1.929-1.115l-1.598.54a1 1 0 01-1.186-.447l-1.18-2.044a1 1 0 01.205-1.251l1.267-1.114a7.05 7.05 0 010-2.227L1.821 7.773a1 1 0 01-.206-1.25l1.18-2.045a1 1 0 011.187-.447l1.598.54A6.993 6.993 0 017.51 3.456l.33-1.652zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd" />
                 </svg>
             </button>
+            </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_online_members, resolve_heat_selected_season_id};
+    use serde_json::json;
+
+    #[test]
+    fn extract_online_members_includes_only_online_members() {
+        let payload = json!({
+            "members": {
+                "owner": {
+                    "OwnerOne": { "online": true, "server": "NA1" },
+                    "OwnerOffline": { "online": false, "server": "NA2" }
+                },
+                "chief": {
+                    "ChiefOne": { "online": true, "server": "EU1" }
+                },
+                "recruit": {
+                    "RecruitOne": { "online": true, "server": null }
+                }
+            }
+        });
+
+        let rows = extract_online_members(&payload);
+        let usernames: Vec<&str> = rows.iter().map(|row| row.username.as_str()).collect();
+
+        assert_eq!(usernames, vec!["OwnerOne", "ChiefOne", "RecruitOne"]);
+        assert_eq!(rows[2].server, "");
+    }
+
+    #[test]
+    fn extract_online_members_orders_by_rank_priority() {
+        let payload = json!({
+            "members": {
+                "recruit": { "RecruitOne": { "online": true, "server": "AS1" } },
+                "captain": { "CaptainOne": { "online": true, "server": "EU2" } },
+                "owner": { "OwnerOne": { "online": true, "server": "NA1" } },
+                "chief": { "ChiefOne": { "online": true, "server": "NA2" } },
+                "recruiter": { "RecruiterOne": { "online": true, "server": "AS2" } },
+                "strategist": { "StrategistOne": { "online": true, "server": "EU1" } }
+            }
+        });
+
+        let rows = extract_online_members(&payload);
+        let rank_labels: Vec<&str> = rows.iter().map(|row| row.rank_label.as_str()).collect();
+
+        assert_eq!(
+            rank_labels,
+            vec![
+                "Owner",
+                "Chief",
+                "Strategist",
+                "Captain",
+                "Recruiter",
+                "Recruit"
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_online_members_orders_usernames_case_insensitively_within_rank() {
+        let payload = json!({
+            "members": {
+                "chief": {
+                    "beta": { "online": true, "server": "NA1" },
+                    "Alpha": { "online": true, "server": "NA2" },
+                    "alpha2": { "online": true, "server": "NA3" }
+                }
+            }
+        });
+
+        let rows = extract_online_members(&payload);
+        let usernames: Vec<&str> = rows.iter().map(|row| row.username.as_str()).collect();
+
+        assert_eq!(usernames, vec!["Alpha", "alpha2", "beta"]);
+    }
+
+    #[test]
+    fn extract_online_members_preserves_rank_username_and_server_fields() {
+        let payload = json!({
+            "members": {
+                "chief": {
+                    "Obstacles_": { "online": true, "server": "NA5" }
+                }
+            }
+        });
+
+        let rows = extract_online_members(&payload);
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+
+        assert_eq!(row.rank_label, "Chief");
+        assert_eq!(row.username, "Obstacles_");
+        assert_eq!(row.server, "NA5");
+    }
+
+    #[test]
+    fn resolve_heat_selected_season_id_keeps_latest_sentinel() {
+        assert_eq!(resolve_heat_selected_season_id("latest"), None);
+    }
+
+    #[test]
+    fn resolve_heat_selected_season_id_parses_numeric_ids() {
+        assert_eq!(resolve_heat_selected_season_id("31"), Some(31));
     }
 }

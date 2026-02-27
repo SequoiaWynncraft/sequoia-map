@@ -89,3 +89,51 @@ pub struct HistoryBounds {
     pub event_count: i64,
     pub latest_seq: Option<u64>,
 }
+
+/// Heat map data source used for territory takeover aggregation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryHeatSource {
+    Season,
+    AllTime,
+}
+
+/// Time window metadata for a specific season id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryHeatSeasonWindow {
+    pub season_id: i32,
+    pub start: String,
+    pub end: String,
+    pub is_current: bool,
+}
+
+/// Metadata required by client-side heat-map controls.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryHeatMeta {
+    pub latest_season_id: Option<i32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seasons: Vec<HistoryHeatSeasonWindow>,
+    pub all_time_earliest: Option<String>,
+    pub retention_days: i64,
+    pub season_fallback_days: i64,
+}
+
+/// Per-territory takeover count entry for the selected heat window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryHeatEntry {
+    pub territory: String,
+    pub take_count: u64,
+}
+
+/// Aggregated territory heat-map response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryHeat {
+    pub source: HistoryHeatSource,
+    pub season_id: Option<i32>,
+    pub from: String,
+    pub to: String,
+    pub fallback_applied: bool,
+    pub max_take_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<HistoryHeatEntry>,
+}

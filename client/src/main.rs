@@ -4,6 +4,7 @@ mod canvas;
 mod colors;
 #[cfg(target_arch = "wasm32")]
 mod gpu;
+mod heat;
 mod history;
 mod icons;
 mod label_layout;
@@ -39,9 +40,12 @@ mod gpu {
         pub static_name_color: NameColor,
         pub show_connections: bool,
         pub bold_connections: bool,
+        pub connection_opacity_scale: f32,
+        pub connection_thickness_scale: f32,
         pub white_guild_tags: bool,
         pub dynamic_show_countdown: bool,
         pub dynamic_show_granular_map_time: bool,
+        pub dynamic_show_compound_map_time: bool,
         pub dynamic_show_resource_icons: bool,
         pub label_scale_master: f32,
         pub label_scale_static_tag: f32,
@@ -88,6 +92,9 @@ mod gpu {
                 frame.icons,
                 frame.show_minimap,
                 frame.history_mode,
+                frame.heat_mode_enabled,
+                frame.heat_entries,
+                frame.heat_max_take_count,
             );
             false
         }

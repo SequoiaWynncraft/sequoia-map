@@ -7,11 +7,13 @@ use wasm_bindgen::JsCast;
 use web_sys::{HtmlCanvasElement, MouseEvent, PointerEvent, WheelEvent};
 
 use crate::app::{
-    AbbreviateNames, BoldConnections, CurrentMode, HistoryTimestamp, Hovered, IsMobile,
-    LabelScaleDynamic, LabelScaleIcons, LabelScaleMaster, LabelScaleStatic, LabelScaleStaticName,
-    MapMode, NameColorSetting, PeekTerritory, ResourceHighlight, Selected, ShowCountdown,
-    ShowGranularMapTime, ShowMinimap, ShowNames, ShowResourceIcons, SidebarOpen, SidebarTransient,
-    ThickCooldownBorders, WhiteGuildTags,
+    AbbreviateNames, BoldConnections, ConnectionOpacityScale, ConnectionThicknessScale,
+    CurrentMode, HeatEntriesByTerritory, HeatMaxTakeCount, HeatModeEnabled, HeatWindowLabel,
+    HistoryTimestamp, Hovered, IsMobile, LabelScaleDynamic, LabelScaleIcons, LabelScaleMaster,
+    LabelScaleStatic, LabelScaleStaticName, MapMode, NameColorSetting, PeekTerritory,
+    ResourceHighlight, Selected, ShowCompoundMapTime, ShowCountdown, ShowGranularMapTime,
+    ShowMinimap, ShowNames, ShowResourceIcons, SidebarOpen, SidebarTransient, ThickCooldownBorders,
+    WhiteGuildTags,
 };
 use crate::gpu::{GpuRenderer, RenderFrameInput};
 use crate::icons::ResourceAtlas;
@@ -133,14 +135,21 @@ pub fn MapCanvas() -> impl IntoView {
     let AbbreviateNames(abbreviate_names) = expect_context();
     let ShowCountdown(show_countdown) = expect_context();
     let ShowGranularMapTime(show_granular_map_time) = expect_context();
+    let ShowCompoundMapTime(show_compound_map_time) = expect_context();
     let ShowNames(show_names) = expect_context();
     let ThickCooldownBorders(thick_cooldown_borders) = expect_context();
     let BoldConnections(bold_connections) = expect_context();
+    let ConnectionOpacityScale(connection_opacity_scale) = expect_context();
+    let ConnectionThicknessScale(connection_thickness_scale) = expect_context();
     let ResourceHighlight(resource_highlight) = expect_context();
     let ShowResourceIcons(show_resource_icons) = expect_context();
     let WhiteGuildTags(white_guild_tags) = expect_context();
     let NameColorSetting(name_color) = expect_context();
     let ShowMinimap(show_minimap_setting) = expect_context();
+    let HeatModeEnabled(heat_mode_enabled) = expect_context();
+    let HeatEntriesByTerritory(heat_entries_by_territory) = expect_context();
+    let HeatMaxTakeCount(heat_max_take_count) = expect_context();
+    let HeatWindowLabel(heat_window_label) = expect_context();
     let LabelScaleMaster(label_scale_master) = expect_context();
     let LabelScaleStatic(label_scale_static_tag) = expect_context();
     let LabelScaleStaticName(label_scale_static_name) = expect_context();
@@ -241,9 +250,12 @@ pub fn MapCanvas() -> impl IntoView {
             renderer.static_name_color = name_color.get_untracked();
             renderer.show_connections = show_connections.get_untracked();
             renderer.bold_connections = bold_connections.get_untracked();
+            renderer.connection_opacity_scale = connection_opacity_scale.get_untracked() as f32;
+            renderer.connection_thickness_scale = connection_thickness_scale.get_untracked() as f32;
             renderer.white_guild_tags = white_guild_tags.get_untracked();
             renderer.dynamic_show_countdown = show_countdown.get_untracked();
             renderer.dynamic_show_granular_map_time = show_granular_map_time.get_untracked();
+            renderer.dynamic_show_compound_map_time = show_compound_map_time.get_untracked();
             renderer.dynamic_show_resource_icons = show_resource_icons.get_untracked();
             renderer.label_scale_master = label_scale_master.get_untracked() as f32;
             renderer.label_scale_static_tag = label_scale_static_tag.get_untracked() as f32;
@@ -265,6 +277,8 @@ pub fn MapCanvas() -> impl IntoView {
 
             let show_mini = !is_mobile.get_untracked() && show_minimap_setting.get_untracked();
             let history_mode = mode_now == MapMode::History;
+            let heat_mode = heat_mode_enabled.get_untracked();
+            let heat_max = heat_max_take_count.get_untracked();
             let bounds = world_bounds.get();
             let vp_now = viewport.get_untracked();
 
@@ -285,29 +299,34 @@ pub fn MapCanvas() -> impl IntoView {
 
             territories.with_untracked(|territory_map| {
                 loaded_tiles.with_untracked(|tiles| {
-                    let frame_input = {
-                        let mut builder = scene_builder.borrow_mut();
-                        builder.build(RenderFrameInput {
-                            vp: &vp_now,
-                            territories: territory_map,
-                            hovered: &hovered_name,
-                            selected: &selected_name,
-                            tiles,
-                            world_bounds: bounds,
-                            now,
-                            reference_time_secs,
-                            interaction_active,
-                            icons: &icon_set,
-                            show_minimap: show_mini,
-                            history_mode,
-                        })
-                    };
-                    let keep_animating = renderer.render(frame_input);
-                    if show_render_stats {
-                        frame_metrics.set(renderer.frame_metrics());
-                        scene_summary.set(scene_builder.borrow().latest_summary());
-                    }
-                    keep_animating
+                    heat_entries_by_territory.with_untracked(|heat_entries| {
+                        let frame_input = {
+                            let mut builder = scene_builder.borrow_mut();
+                            builder.build(RenderFrameInput {
+                                vp: &vp_now,
+                                territories: territory_map,
+                                hovered: &hovered_name,
+                                selected: &selected_name,
+                                tiles,
+                                world_bounds: bounds,
+                                now,
+                                reference_time_secs,
+                                interaction_active,
+                                icons: &icon_set,
+                                show_minimap: show_mini,
+                                history_mode,
+                                heat_mode_enabled: heat_mode,
+                                heat_entries,
+                                heat_max_take_count: heat_max,
+                            })
+                        };
+                        let keep_animating = renderer.render(frame_input);
+                        if show_render_stats {
+                            frame_metrics.set(renderer.frame_metrics());
+                            scene_summary.set(scene_builder.borrow().latest_summary());
+                        }
+                        keep_animating
+                    })
                 })
             })
         }
@@ -395,13 +414,19 @@ pub fn MapCanvas() -> impl IntoView {
             abbreviate_names.track();
             show_countdown.track();
             show_granular_map_time.track();
+            show_compound_map_time.track();
             show_connections.track();
             bold_connections.track();
+            connection_opacity_scale.track();
+            connection_thickness_scale.track();
             white_guild_tags.track();
             name_color.track();
             resource_highlight.track();
             show_resource_icons.track();
             thick_cooldown_borders.track();
+            heat_mode_enabled.track();
+            heat_entries_by_territory.track();
+            heat_max_take_count.track();
             if let Some(renderer) = gpu.borrow_mut().as_mut() {
                 renderer.mark_dirty(InvalidationReason::Geometry);
                 renderer.mark_dirty(InvalidationReason::StaticLabel);
@@ -835,7 +860,7 @@ pub fn MapCanvas() -> impl IntoView {
                     metrics.text_instances
                 );
                 let scene_line = format!(
-                    "scene: terr={} tiles={} hovered={} selected={} interact={} mini={} history={} t={}",
+                    "scene: terr={} tiles={} hovered={} selected={} interact={} mini={} history={} heat={} hmax={} t={}",
                     scene.territory_count,
                     scene.tile_count,
                     scene.has_hovered,
@@ -843,6 +868,8 @@ pub fn MapCanvas() -> impl IntoView {
                     scene.interaction_active,
                     scene.show_minimap,
                     scene.history_mode,
+                    scene.heat_mode_enabled,
+                    scene.heat_max_take_count,
                     scene.reference_time_secs
                 );
                 view! {
@@ -853,6 +880,26 @@ pub fn MapCanvas() -> impl IntoView {
                     </div>
                 }
                 .into_any()
+            }}
+            {move || {
+                if !heat_mode_enabled.get() {
+                    return ().into_any();
+                }
+                let max_count = heat_max_take_count.get();
+                let label = heat_window_label.get();
+                view! {
+                    <div style="position: absolute; top: 16px; left: 16px; z-index: 22; pointer-events: none; background: rgba(10,12,20,0.82); border: 1px solid rgba(245,197,66,0.25); border-radius: 6px; padding: 8px 10px; min-width: 172px;">
+                        <div style="font-family: 'Silkscreen', monospace; font-size: 0.62rem; letter-spacing: 0.08em; text-transform: uppercase; color: #f5c542; margin-bottom: 5px;">"Heat"</div>
+                        <div style="height: 8px; border-radius: 0; background: linear-gradient(90deg, #1e50dc 0%, #28c8f0 25%, #f5dc46 50%, #f58c32 75%, #dc2823 100%);" />
+                        <div style="margin-top: 6px; display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 0.62rem; color: #9a9590;">
+                            <span>"Low"</span>
+                            <span>{format!("Max {max_count}")}</span>
+                        </div>
+                        <div style="margin-top: 4px; font-family: 'JetBrains Mono', monospace; font-size: 0.6rem; color: #6f748f; line-height: 1.25;">
+                            {label}
+                        </div>
+                    </div>
+                }.into_any()
             }}
         </div>
     }

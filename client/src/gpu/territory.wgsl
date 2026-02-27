@@ -239,7 +239,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if cooldown_frac > 0.0 {
         border_mult = in.state.w;
     }
-    let border_width = max(3.5 * border_mult * vp.scale, 0.8);
+    let border_width = max(3.2 * border_mult * vp.scale, 0.8);
     let feather = max(0.4 * vp.scale, 0.15);
 
     // Outer edge AA: fade alpha at territory boundary

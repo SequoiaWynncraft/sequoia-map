@@ -47,6 +47,13 @@ pub fn format_age(age_secs: i64) -> String {
     out
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn format_age_compound(age_secs: i64) -> String {
+    let mut out = String::with_capacity(8);
+    write_age_compound(&mut out, age_secs);
+    out
+}
+
 pub fn write_age(buf: &mut String, age_secs: i64) {
     buf.clear();
     if age_secs < 60 {
@@ -61,6 +68,24 @@ pub fn write_age(buf: &mut String, age_secs: i64) {
         let _ = write!(buf, "{}d", age_secs / 86400);
     } else {
         let _ = write!(buf, "{}w", age_secs / 604800);
+    }
+}
+
+pub fn write_age_compound(buf: &mut String, age_secs: i64) {
+    buf.clear();
+    let secs = age_secs.max(0);
+    if secs >= 86400 {
+        let days = secs / 86400;
+        let hours = (secs % 86400) / 3600;
+        let _ = write!(buf, "{days}d{hours}h");
+    } else if secs >= 3600 {
+        let hours = secs / 3600;
+        let minutes = (secs % 3600) / 60;
+        let _ = write!(buf, "{hours}h{minutes:02}m");
+    } else {
+        let minutes = secs / 60;
+        let seconds = secs % 60;
+        let _ = write!(buf, "{minutes}m{seconds:02}s");
     }
 }
 
@@ -170,9 +195,19 @@ pub fn dynamic_label_next_update_age(
     age_secs: i64,
     show_countdown: bool,
     granular_time: bool,
+    compound_time: bool,
 ) -> i64 {
     if show_countdown || granular_time || age_secs < 600 {
         return age_secs + 1;
+    }
+    if compound_time {
+        if age_secs < 3600 {
+            return age_secs + 1;
+        }
+        if age_secs < 86400 {
+            return ((age_secs / 60) + 1) * 60;
+        }
+        return ((age_secs / 3600) + 1) * 3600;
     }
     if age_secs < 3600 {
         return ((age_secs / 60) + 1) * 60;
@@ -217,6 +252,34 @@ mod tests {
         assert_eq!(format_age(86_400), "1d");
         assert_eq!(format_age(604_799), "6d");
         assert_eq!(format_age(604_800), "1w");
+    }
+
+    #[test]
+    fn test_format_age_compound_examples() {
+        assert_eq!(format_age_compound(5 * 86_400 + 23 * 3_600), "5d23h");
+        assert_eq!(format_age_compound(18 * 3_600 + 50 * 60), "18h50m");
+        assert_eq!(format_age_compound(46 * 60 + 20), "46m20s");
+        assert_eq!(format_age_compound(-8), "0m00s");
+    }
+
+    #[test]
+    fn test_dynamic_label_next_update_age_compound_mode() {
+        assert_eq!(
+            dynamic_label_next_update_age(3_599, false, false, true),
+            3_600
+        );
+        assert_eq!(
+            dynamic_label_next_update_age(3_600, false, false, true),
+            3_660
+        );
+        assert_eq!(
+            dynamic_label_next_update_age(86_399, false, false, true),
+            86_400
+        );
+        assert_eq!(
+            dynamic_label_next_update_age(86_400, false, false, true),
+            90_000
+        );
     }
 
     #[test]
@@ -277,9 +340,12 @@ mod tests {
 
     #[test]
     fn test_dynamic_label_next_update_age() {
-        assert_eq!(dynamic_label_next_update_age(5, true, false), 6);
-        assert_eq!(dynamic_label_next_update_age(610, false, false), 660);
-        assert_eq!(dynamic_label_next_update_age(3690, false, false), 7200);
+        assert_eq!(dynamic_label_next_update_age(5, true, false, false), 6);
+        assert_eq!(dynamic_label_next_update_age(610, false, false, false), 660);
+        assert_eq!(
+            dynamic_label_next_update_age(3690, false, false, false),
+            7200
+        );
     }
 
     #[test]

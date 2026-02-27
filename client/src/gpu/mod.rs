@@ -10,10 +10,12 @@ use sequoia_shared::colors::hsl_to_rgb;
 
 use crate::app::NameColor;
 use crate::colors::brighten;
+use crate::heat::heat_color_for_count;
 use crate::icons::{ResourceAtlas, icon_uv};
 use crate::label_layout::{
     IconKind, abbreviate_name, compute_label_layout_metrics, cooldown_color,
     dynamic_label_next_update_age, dynamic_text_state, resource_icon_sequence, write_age,
+    write_age_compound,
 };
 use crate::renderer::{FrameMetrics, InvalidationReason, RenderCapabilities, SceneSnapshot};
 use crate::territory::ClientTerritoryMap;
@@ -165,12 +167,26 @@ struct GpuIconRenderer {
 
 const GLYPH_ATLAS_FONT_PX: f64 = 96.0;
 const GLYPH_ATLAS_PADDING_PX: f64 = 6.0;
-const GLYPH_ATLAS_STROKE_FACTOR: f64 = 0.155;
+const GLYPH_ATLAS_STROKE_FACTOR: f64 = 0.142;
 const GLYPH_ATLAS_STROKE_MIN_PX: f64 = 2.8;
 const GLYPH_ATLAS_BLEED_FACTOR: f32 = 0.62;
 const GLYPH_ATLAS_BLEED_EXTRA_PX: f32 = 1.1;
 const GLYPH_ATLAS_CHARS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 [](){}<>+-=_,.:;!?'/\\\\|@#$%^&*~`\\\"…";
 const GLYPH_ATLAS_COLS: usize = 16;
+const CONNECTION_LINE_STEPS_NORMAL: &[(f32, f32)] = &[
+    (-1.2, 0.28),
+    (-0.6, 0.6),
+    (0.0, 1.0),
+    (0.6, 0.6),
+    (1.2, 0.28),
+];
+const CONNECTION_LINE_STEPS_BOLD: &[(f32, f32)] = &[
+    (-1.6, 0.45),
+    (-0.8, 0.75),
+    (0.0, 1.0),
+    (0.8, 0.75),
+    (1.6, 0.45),
+];
 const MINIMAP_W: f32 = 200.0;
 const MINIMAP_H: f32 = 280.0;
 const MINIMAP_MARGIN: f32 = 16.0;
@@ -606,9 +622,12 @@ pub struct GpuRenderer {
     pub static_name_color: NameColor,
     pub show_connections: bool,
     pub bold_connections: bool,
+    pub connection_opacity_scale: f32,
+    pub connection_thickness_scale: f32,
     pub white_guild_tags: bool,
     pub dynamic_show_countdown: bool,
     pub dynamic_show_granular_map_time: bool,
+    pub dynamic_show_compound_map_time: bool,
     pub dynamic_show_resource_icons: bool,
     pub label_scale_master: f32,
     pub label_scale_static_tag: f32,
@@ -1309,9 +1328,12 @@ impl GpuRenderer {
             static_name_color: NameColor::Guild,
             show_connections: true,
             bold_connections: false,
+            connection_opacity_scale: 1.0,
+            connection_thickness_scale: 1.0,
             white_guild_tags: false,
             dynamic_show_countdown: false,
             dynamic_show_granular_map_time: false,
+            dynamic_show_compound_map_time: false,
             dynamic_show_resource_icons: true,
             label_scale_master: 1.0,
             label_scale_static_tag: 1.0,
@@ -2234,6 +2256,9 @@ impl GpuRenderer {
         selected: &Option<String>,
         now: f64,
         thick_cooldown_borders: bool,
+        heat_mode_enabled: bool,
+        heat_entries: &HashMap<String, u64>,
+        heat_max_take_count: u64,
     ) {
         let start_ms = self.start_time_ms;
         let start_secs = start_ms / 1000.0;
@@ -2242,7 +2267,12 @@ impl GpuRenderer {
         self.instances_buf
             .extend(territories.iter().map(|(name, ct)| {
                 let loc = &ct.territory.location;
-                let (r, g, b) = ct.guild_color;
+                let (r, g, b) = if heat_mode_enabled {
+                    let take_count = heat_entries.get(name).copied().unwrap_or(0);
+                    heat_color_for_count(take_count, heat_max_take_count)
+                } else {
+                    ct.guild_color
+                };
 
                 let is_hovered = hovered.as_deref() == Some(name.as_str());
                 let is_selected = selected.as_deref() == Some(name.as_str());
@@ -2277,18 +2307,22 @@ impl GpuRenderer {
                     (ct.territory.acquired.timestamp() as f64 - start_secs) as f32;
 
                 // Encode animation params for GPU-side interpolation
-                let (anim_color, anim_time) = match ct.animation.as_ref() {
-                    Some(anim) if anim.current_color(now).is_some() => {
-                        let (fr, fg, fb) =
-                            hsl_to_rgb(anim.from_hsl.0, anim.from_hsl.1, anim.from_hsl.2);
-                        let rel_start = ((anim.start_time - start_ms) / 1000.0) as f32;
-                        let dur_secs = (anim.duration / 1000.0) as f32;
-                        (
-                            [fr as f32 / 255.0, fg as f32 / 255.0, fb as f32 / 255.0, 0.0],
-                            [rel_start, dur_secs, 0.0, 0.0],
-                        )
+                let (anim_color, anim_time) = if heat_mode_enabled {
+                    ([0.0; 4], [0.0; 4])
+                } else {
+                    match ct.animation.as_ref() {
+                        Some(anim) if anim.current_color(now).is_some() => {
+                            let (fr, fg, fb) =
+                                hsl_to_rgb(anim.from_hsl.0, anim.from_hsl.1, anim.from_hsl.2);
+                            let rel_start = ((anim.start_time - start_ms) / 1000.0) as f32;
+                            let dur_secs = (anim.duration / 1000.0) as f32;
+                            (
+                                [fr as f32 / 255.0, fg as f32 / 255.0, fb as f32 / 255.0, 0.0],
+                                [rel_start, dur_secs, 0.0, 0.0],
+                            )
+                        }
+                        _ => ([0.0; 4], [0.0; 4]),
                     }
-                    _ => ([0.0; 4], [0.0; 4]),
                 };
 
                 TerritoryInstance {
@@ -2637,6 +2671,7 @@ impl GpuRenderer {
                     state.age_secs,
                     self.dynamic_show_countdown,
                     self.dynamic_show_granular_map_time,
+                    self.dynamic_show_compound_map_time,
                 );
                 next_update_secs =
                     next_update_secs.min(ct.territory.acquired.timestamp() + next_age);
@@ -2708,6 +2743,8 @@ impl GpuRenderer {
                 if show_dynamic_time {
                     if self.dynamic_show_granular_map_time {
                         write_hms(&mut text_buf, state.age_secs);
+                    } else if self.dynamic_show_compound_map_time {
+                        write_age_compound(&mut text_buf, state.age_secs);
                     } else {
                         write_age(&mut text_buf, state.age_secs);
                     }
@@ -2992,13 +3029,25 @@ impl GpuRenderer {
                 let conn_loc = &conn_ct.territory.location;
                 let bx = conn_loc.midpoint_x() as f32;
                 let by = conn_loc.midpoint_y() as f32;
+                let dx = bx - ax;
+                let dy = by - ay;
+                let len_sq = dx * dx + dy * dy;
+                if len_sq <= f32::EPSILON {
+                    continue;
+                }
+                let inv_len = len_sq.sqrt().recip();
+                let nx = -dy * inv_len;
+                let ny = dx * inv_len;
+                let world_per_px = (1.0 / (scale as f32).max(0.05)).min(24.0);
+                let opacity_scale = self.connection_opacity_scale.max(0.0);
+                let thickness_scale = self.connection_thickness_scale.max(0.2);
 
                 let color = if self.bold_connections {
                     let (cr, cg, cb) = ct.guild_color;
                     let lum = 0.299 * cr as f64 + 0.587 * cg as f64 + 0.114 * cb as f64;
                     let dark_boost = (1.0 - lum / 255.0).clamp(0.0, 1.0);
                     let brighten_factor = 1.4 + dark_boost * 0.8;
-                    let alpha = (0.35 + dark_boost * 0.20) as f32 * zoom_fade;
+                    let alpha = (0.35 + dark_boost * 0.20) as f32 * zoom_fade * opacity_scale;
                     let (r, g, b) = brighten(cr, cg, cb, brighten_factor);
                     [
                         r as f32 / 255.0,
@@ -3007,17 +3056,29 @@ impl GpuRenderer {
                         alpha.clamp(0.0, 1.0),
                     ]
                 } else {
-                    [1.0, 1.0, 1.0, 0.12 * zoom_fade]
+                    [1.0, 1.0, 1.0, 0.16 * zoom_fade * opacity_scale]
                 };
 
-                self.connection_vertices.push(ConnectionVertex {
-                    world_pos: [ax, ay],
-                    color,
-                });
-                self.connection_vertices.push(ConnectionVertex {
-                    world_pos: [bx, by],
-                    color,
-                });
+                let thickness_steps = if self.bold_connections {
+                    CONNECTION_LINE_STEPS_BOLD
+                } else {
+                    CONNECTION_LINE_STEPS_NORMAL
+                };
+                for &(offset_px, alpha_scale) in thickness_steps {
+                    let offset_world = offset_px * thickness_scale * world_per_px;
+                    let ox = nx * offset_world;
+                    let oy = ny * offset_world;
+                    let mut line_color = color;
+                    line_color[3] = (color[3] * alpha_scale).clamp(0.0, 1.0);
+                    self.connection_vertices.push(ConnectionVertex {
+                        world_pos: [ax + ox, ay + oy],
+                        color: line_color,
+                    });
+                    self.connection_vertices.push(ConnectionVertex {
+                        world_pos: [bx + ox, by + oy],
+                        color: line_color,
+                    });
+                }
             }
         }
 
@@ -3057,6 +3118,9 @@ impl GpuRenderer {
             icons,
             show_minimap,
             history_mode,
+            heat_mode_enabled,
+            heat_entries,
+            heat_max_take_count,
         } = frame;
         let frame_start_ms = now;
         let mut draw_calls: u32 = 0;
@@ -3098,6 +3162,9 @@ impl GpuRenderer {
                 selected,
                 now,
                 self.thick_cooldown_borders,
+                heat_mode_enabled,
+                heat_entries,
+                heat_max_take_count,
             );
             bytes_uploaded +=
                 (self.instance_count as u64) * std::mem::size_of::<TerritoryInstance>() as u64;

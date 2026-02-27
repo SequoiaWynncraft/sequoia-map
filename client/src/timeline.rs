@@ -1,5 +1,5 @@
 use leptos::prelude::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use wasm_bindgen::JsCast;
 
@@ -7,7 +7,7 @@ use crate::app::{
     CurrentMode, GuildColorStore, HistoryBoundsSignal, HistoryBufferModeActive,
     HistoryBufferedUpdates, HistoryFetchNonce, HistorySeasonLeaderboard, HistorySeasonScalarSample,
     HistoryTimestamp, IsMobile, LastLiveSeq, LiveHandoffResyncCount, MapMode, NeedsLiveResync,
-    PlaybackActive, PlaybackSpeed, SidebarOpen, TerritoryGeometryStore,
+    PlaybackActive, PlaybackSpeed, SidebarOpen, SidebarWidth, TerritoryGeometryStore,
 };
 use crate::history;
 use crate::territory::ClientTerritoryMap;
@@ -28,6 +28,7 @@ pub fn Timeline() -> impl IntoView {
     let TerritoryGeometryStore(geo_store) = expect_context();
     let GuildColorStore(guild_color_store) = expect_context();
     let SidebarOpen(sidebar_open) = expect_context();
+    let SidebarWidth(sidebar_width) = expect_context();
     let IsMobile(is_mobile) = expect_context();
     let LastLiveSeq(last_live_seq) = expect_context();
     let HistoryBufferedUpdates(history_buffered_updates) = expect_context();
@@ -35,13 +36,37 @@ pub fn Timeline() -> impl IntoView {
     let NeedsLiveResync(needs_live_resync) = expect_context();
     let LiveHandoffResyncCount(live_handoff_resync_count) = expect_context();
     let is_visible = move || mode.get() == MapMode::History;
+    let slider_ref = NodeRef::<leptos::html::Input>::new();
+    let slider_ref_sync = slider_ref.clone();
+    let fetch_ctx = history::HistoryFetchContext {
+        mode,
+        history_fetch_nonce,
+        history_scalar_sample,
+        history_sr_leaderboard,
+        geo_store,
+        guild_color_store,
+        territories,
+    };
 
-    // Debounce timer for scrubbing.
-    // Hold the timeout handle so we can cancel without leaking JS callbacks.
-    let debounce_timeout = Rc::new(RefCell::new(None::<Timeout>));
+    // Throttle history fetches while scrubbing so updates remain live without flooding requests.
+    let throttle_timeout = Rc::new(RefCell::new(None::<Timeout>));
+    let pending_fetch_val = Rc::new(Cell::new(None::<i64>));
+    let last_fetch_at_ms = Rc::new(Cell::new(0.0));
+    let scrub_active: RwSignal<bool> = RwSignal::new(false);
+
+    Effect::new(move || {
+        let ts = timestamp.get().unwrap_or(0);
+        if !scrub_active.get()
+            && let Some(input) = slider_ref_sync.get()
+        {
+            input.set_value(&ts.to_string());
+        }
+    });
 
     let on_range_input = {
-        let debounce_timeout = Rc::clone(&debounce_timeout);
+        let throttle_timeout = Rc::clone(&throttle_timeout);
+        let pending_fetch_val = Rc::clone(&pending_fetch_val);
+        let last_fetch_at_ms = Rc::clone(&last_fetch_at_ms);
         move |e: web_sys::Event| {
             let Some(target) = e.target() else {
                 return;
@@ -49,32 +74,71 @@ pub fn Timeline() -> impl IntoView {
             let Ok(input) = target.dyn_into::<web_sys::HtmlInputElement>() else {
                 return;
             };
-            let val: i64 = input.value().parse().unwrap_or(0);
+            let raw = input.value_as_number();
+            if !raw.is_finite() {
+                return;
+            }
+            let val = raw.round() as i64;
 
-            // Update timestamp immediately for visual feedback
             playing.set(false);
+            scrub_active.set(true);
             timestamp.set(Some(val));
 
-            // Debounce the actual fetch.
-            if let Some(timeout) = debounce_timeout.borrow_mut().take() {
-                timeout.cancel();
+            let now_ms = js_sys::Date::now();
+            let elapsed_ms = now_ms - last_fetch_at_ms.get();
+            if elapsed_ms >= 150.0 && throttle_timeout.borrow().is_none() {
+                last_fetch_at_ms.set(now_ms);
+                history::fetch_and_apply_with(val, fetch_ctx);
+                return;
             }
 
-            let timeout = Timeout::new(150, move || {
-                history::fetch_and_apply_with(
-                    val,
-                    history::HistoryFetchContext {
-                        mode,
-                        history_fetch_nonce,
-                        history_scalar_sample,
-                        history_sr_leaderboard,
-                        geo_store,
-                        guild_color_store,
-                        territories,
-                    },
-                );
+            pending_fetch_val.set(Some(val));
+            if throttle_timeout.borrow().is_some() {
+                return;
+            }
+
+            let wait_ms = (150.0 - elapsed_ms).max(0.0).round() as u32;
+            let throttle_timeout_cb = Rc::clone(&throttle_timeout);
+            let pending_fetch_val_cb = Rc::clone(&pending_fetch_val);
+            let last_fetch_at_ms_cb = Rc::clone(&last_fetch_at_ms);
+            let timeout = Timeout::new(wait_ms, move || {
+                let _ = throttle_timeout_cb.borrow_mut().take();
+                if let Some(next_val) = pending_fetch_val_cb.take() {
+                    last_fetch_at_ms_cb.set(js_sys::Date::now());
+                    history::fetch_and_apply_with(next_val, fetch_ctx);
+                }
             });
-            *debounce_timeout.borrow_mut() = Some(timeout);
+            *throttle_timeout.borrow_mut() = Some(timeout);
+        }
+    };
+
+    let on_range_change = {
+        let throttle_timeout = Rc::clone(&throttle_timeout);
+        let pending_fetch_val = Rc::clone(&pending_fetch_val);
+        let last_fetch_at_ms = Rc::clone(&last_fetch_at_ms);
+        move |e: web_sys::Event| {
+            let Some(target) = e.target() else {
+                return;
+            };
+            let Ok(input) = target.dyn_into::<web_sys::HtmlInputElement>() else {
+                return;
+            };
+            let raw = input.value_as_number();
+            if !raw.is_finite() {
+                return;
+            }
+            let val = raw.round() as i64;
+
+            playing.set(false);
+            timestamp.set(Some(val));
+            scrub_active.set(false);
+
+            if let Some(timeout) = throttle_timeout.borrow_mut().take() {
+                timeout.cancel();
+            }
+            pending_fetch_val.set(None);
+            last_fetch_at_ms.set(js_sys::Date::now());
+            history::fetch_and_apply_with(val, fetch_ctx);
         }
     };
 
@@ -115,7 +179,11 @@ pub fn Timeline() -> impl IntoView {
                 }
             }
             style:right=move || {
-                if !is_mobile.get() && sidebar_open.get() { "340px" } else { "0" }
+                if !is_mobile.get() && sidebar_open.get() {
+                    format!("{:.0}px", sidebar_width.get())
+                } else {
+                    "0".to_string()
+                }
             }
             style:flex-direction=move || if is_mobile.get() { "column" } else { "row" }
             style:height=move || if is_mobile.get() { "auto" } else { "52px" }
@@ -349,13 +417,16 @@ pub fn Timeline() -> impl IntoView {
 
                 // Timeline range slider
                 <input
+                    node_ref=slider_ref
                     type="range"
                     class="timeline-slider"
                     style="flex: 1; margin: 0 8px;"
                     min=move || bounds.get().map(|(e, _)| e.to_string()).unwrap_or_else(|| "0".to_string())
                     max=move || bounds.get().map(|(_, l)| l.to_string()).unwrap_or_else(|| "0".to_string())
-                    value=move || timestamp.get().unwrap_or(0).to_string()
+                    step="1"
+                    value=timestamp.get_untracked().unwrap_or(0).to_string()
                     on:input=on_range_input
+                    on:change=on_range_change
                 />
 
                 // Right timestamp label

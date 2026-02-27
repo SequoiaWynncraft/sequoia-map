@@ -8,11 +8,13 @@ use axum::response::IntoResponse;
 use chrono::{DateTime, Utc};
 use sequoia_shared::SeasonScalarSample;
 use sequoia_shared::history::{
-    HistoryBounds, HistoryEvent, HistoryEvents, HistoryGuildSrEntry, HistorySnapshot,
-    HistorySrSamples, HistorySrSnapshot, OwnershipRecord,
+    HistoryBounds, HistoryEvent, HistoryEvents, HistoryGuildSrEntry, HistoryHeat, HistoryHeatEntry,
+    HistoryHeatMeta, HistoryHeatSeasonWindow, HistoryHeatSource, HistorySnapshot, HistorySrSamples,
+    HistorySrSnapshot, OwnershipRecord,
 };
 use serde::Deserialize;
 
+use crate::config::RETENTION_DAYS;
 use crate::state::AppState;
 
 type HistoryEventRow = (
@@ -50,6 +52,10 @@ type SeasonObservationRow = (
     Option<i32>,
     Option<i32>,
 );
+type SeasonWindowRow = (i32, DateTime<Utc>, DateTime<Utc>);
+type HeatCountRow = (String, i64);
+
+const HEAT_SEASON_FALLBACK_DAYS: i64 = 60;
 
 #[derive(Debug, Clone)]
 struct SeasonObservation {
@@ -283,6 +289,29 @@ pub struct SrSamplesQuery {
     to: String,
 }
 
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum HeatQuerySource {
+    Season,
+    AllTime,
+}
+
+#[derive(Deserialize)]
+pub struct HeatQuery {
+    source: HeatQuerySource,
+    #[serde(default)]
+    season_id: Option<i32>,
+    #[serde(default)]
+    at: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SeasonWindow {
+    season_id: i32,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+}
+
 fn default_limit() -> i64 {
     500
 }
@@ -295,6 +324,49 @@ fn parse_time_window(from: &str, to: &str) -> Result<(DateTime<Utc>, DateTime<Ut
         .parse::<DateTime<Utc>>()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     Ok((from, to))
+}
+
+fn parse_optional_timestamp(raw: Option<&str>) -> Result<Option<DateTime<Utc>>, StatusCode> {
+    raw.map(|value| {
+        value
+            .parse::<DateTime<Utc>>()
+            .map_err(|_| StatusCode::BAD_REQUEST)
+    })
+    .transpose()
+}
+
+async fn load_season_windows(pool: &sqlx::PgPool) -> Result<Vec<SeasonWindow>, StatusCode> {
+    let rows: Vec<SeasonWindowRow> = sqlx::query_as(
+        "SELECT season_id, MIN(observed_at), MAX(observed_at) \
+         FROM season_guild_observations \
+         GROUP BY season_id \
+         ORDER BY season_id DESC",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(season_id, start, end)| SeasonWindow {
+            season_id,
+            start,
+            end,
+        })
+        .collect())
+}
+
+async fn load_owner_change_earliest(
+    pool: &sqlx::PgPool,
+) -> Result<Option<DateTime<Utc>>, StatusCode> {
+    sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+        "SELECT MIN(recorded_at) \
+         FROM territory_events \
+         WHERE prev_guild_uuid IS NOT NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// `GET /api/history/at?t={rfc3339}` — Reconstruct ownership at a point in time.
@@ -624,15 +696,175 @@ pub async fn history_bounds(
     Ok((headers, Json(bounds)))
 }
 
+/// `GET /api/history/heat/meta` — Heat-map metadata for season selection and window hints.
+pub async fn history_heat_meta(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let pool = state.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let season_windows = load_season_windows(pool).await?;
+    let latest_season_id = season_windows.first().map(|window| window.season_id);
+    let seasons = season_windows
+        .into_iter()
+        .map(|window| HistoryHeatSeasonWindow {
+            season_id: window.season_id,
+            start: window.start.to_rfc3339(),
+            end: window.end.to_rfc3339(),
+            is_current: Some(window.season_id) == latest_season_id,
+        })
+        .collect();
+    let all_time_earliest = load_owner_change_earliest(pool)
+        .await?
+        .map(|dt| dt.to_rfc3339());
+    let meta = HistoryHeatMeta {
+        latest_season_id,
+        seasons,
+        all_time_earliest,
+        retention_days: RETENTION_DAYS,
+        season_fallback_days: HEAT_SEASON_FALLBACK_DAYS,
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=60"),
+    );
+
+    Ok((headers, Json(meta)))
+}
+
+/// `GET /api/history/heat` — Territory takeover counts for the selected heat-map window.
+pub async fn history_heat(
+    State(state): State<AppState>,
+    Query(query): Query<HeatQuery>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let pool = state.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let now = Utc::now();
+    let at = parse_optional_timestamp(query.at.as_deref())?;
+    let season_windows = load_season_windows(pool).await?;
+    let latest_season_id = season_windows.first().map(|window| window.season_id);
+
+    let (source, season_id, from, to, fallback_applied) = match query.source {
+        HeatQuerySource::AllTime => {
+            let upper = at.map(|value| value.min(now)).unwrap_or(now);
+            let earliest = load_owner_change_earliest(pool).await?;
+            let from = earliest.map(|value| value.min(upper)).unwrap_or(upper);
+            (
+                HistoryHeatSource::AllTime,
+                None,
+                from,
+                upper,
+                false, // fallback is season-source only
+            )
+        }
+        HeatQuerySource::Season => {
+            if let Some(latest_id) = latest_season_id {
+                let selected_id = query.season_id.unwrap_or(latest_id);
+                let selected = season_windows
+                    .iter()
+                    .find(|window| window.season_id == selected_id)
+                    .ok_or(StatusCode::BAD_REQUEST)?;
+                let upper = if selected.season_id == latest_id {
+                    now
+                } else {
+                    selected.end
+                };
+                let to = at.map(|value| value.min(upper)).unwrap_or(upper);
+                (
+                    HistoryHeatSource::Season,
+                    Some(selected.season_id),
+                    selected.start.min(to),
+                    to,
+                    false,
+                )
+            } else {
+                let upper = at.map(|value| value.min(now)).unwrap_or(now);
+                let fallback_start = now - chrono::Duration::days(HEAT_SEASON_FALLBACK_DAYS);
+                (
+                    HistoryHeatSource::Season,
+                    None,
+                    fallback_start.min(upper),
+                    upper,
+                    true,
+                )
+            }
+        }
+    };
+
+    let mut entries = if to >= from {
+        let rows: Vec<HeatCountRow> = sqlx::query_as(
+            "SELECT territory, COUNT(*)::BIGINT AS take_count \
+             FROM territory_events \
+             WHERE prev_guild_uuid IS NOT NULL \
+               AND recorded_at >= $1 \
+               AND recorded_at <= $2 \
+             GROUP BY territory",
+        )
+        .bind(from)
+        .bind(to)
+        .fetch_all(pool)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        rows.into_iter()
+            .filter_map(|(territory, take_count)| {
+                let take_count = u64::try_from(take_count).ok()?;
+                Some(HistoryHeatEntry {
+                    territory,
+                    take_count,
+                })
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    entries.sort_by(|a, b| {
+        b.take_count
+            .cmp(&a.take_count)
+            .then_with(|| a.territory.cmp(&b.territory))
+    });
+    let max_take_count = entries
+        .iter()
+        .map(|entry| entry.take_count)
+        .max()
+        .unwrap_or(0);
+
+    let response = HistoryHeat {
+        source,
+        season_id,
+        from: from.to_rfc3339(),
+        to: to.to_rfc3339(),
+        fallback_applied,
+        max_take_count,
+        entries,
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CACHE_CONTROL,
+        if at.is_some() {
+            HeaderValue::from_static("public, max-age=10")
+        } else {
+            HeaderValue::from_static("public, max-age=30")
+        },
+    );
+
+    Ok((headers, Json(response)))
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
 
-    use chrono::Utc;
+    use chrono::{DateTime, Utc};
     use reqwest::StatusCode;
-    use sequoia_shared::history::{HistoryEvents, HistorySnapshot, HistorySrSamples};
+    use sequoia_shared::history::{
+        HistoryEvents, HistoryHeat, HistoryHeatMeta, HistoryHeatSource, HistorySnapshot,
+        HistorySrSamples,
+    };
     use sqlx::postgres::PgPoolOptions;
 
+    use super::HEAT_SEASON_FALLBACK_DAYS;
+    use crate::config::RETENTION_DAYS;
     use crate::state::AppState;
 
     const REAL_DB_TEST_LOCK: i64 = 73_019_001;
@@ -690,6 +922,24 @@ mod tests {
             .expect("history sr samples request")
             .status();
         assert_eq!(sr_samples_status, StatusCode::BAD_REQUEST);
+
+        let heat_invalid_source_status = client
+            .get(format!("{base_url}/api/history/heat?source=wat"))
+            .send()
+            .await
+            .expect("history heat invalid source request")
+            .status();
+        assert_eq!(heat_invalid_source_status, StatusCode::BAD_REQUEST);
+
+        let heat_invalid_at_status = client
+            .get(format!(
+                "{base_url}/api/history/heat?source=all_time&at=definitely-not-a-time"
+            ))
+            .send()
+            .await
+            .expect("history heat invalid at request")
+            .status();
+        assert_eq!(heat_invalid_at_status, StatusCode::BAD_REQUEST);
 
         server_handle.abort();
         let _ = server_handle.await;
@@ -873,6 +1123,116 @@ mod tests {
         assert_eq!(sr_sample.entries[0].season_rank, 1);
         assert_eq!(sr_sample.entries[0].sr_gain_5m, Some(150_i64));
 
+        let heat_meta = client
+            .get(format!("{base_url}/api/history/heat/meta"))
+            .send()
+            .await
+            .expect("heat meta request")
+            .error_for_status()
+            .expect("heat meta status")
+            .json::<HistoryHeatMeta>()
+            .await
+            .expect("parse heat meta");
+        assert_eq!(heat_meta.latest_season_id, Some(29));
+        assert!(!heat_meta.seasons.is_empty());
+        assert_eq!(heat_meta.seasons[0].season_id, 29);
+        assert!(heat_meta.seasons[0].is_current);
+        assert_eq!(heat_meta.retention_days, RETENTION_DAYS);
+        assert_eq!(heat_meta.season_fallback_days, HEAT_SEASON_FALLBACK_DAYS);
+
+        let heat_season_url = {
+            let mut url =
+                reqwest::Url::parse(&format!("{base_url}/api/history/heat")).expect("heat url");
+            url.query_pairs_mut()
+                .append_pair("source", "season")
+                .append_pair("season_id", "29");
+            url
+        };
+        let heat_season = client
+            .get(heat_season_url)
+            .send()
+            .await
+            .expect("heat season request")
+            .error_for_status()
+            .expect("heat season status")
+            .json::<HistoryHeat>()
+            .await
+            .expect("parse heat season");
+        assert_eq!(heat_season.source, HistoryHeatSource::Season);
+        assert_eq!(heat_season.season_id, Some(29));
+        assert!(!heat_season.fallback_applied);
+        assert_eq!(heat_season.max_take_count, 1);
+        assert_eq!(heat_season.entries.len(), 1);
+        assert_eq!(heat_season.entries[0].territory, "Alpha");
+        assert_eq!(heat_season.entries[0].take_count, 1);
+
+        let heat_all_time = client
+            .get(format!("{base_url}/api/history/heat?source=all_time"))
+            .send()
+            .await
+            .expect("heat all-time request")
+            .error_for_status()
+            .expect("heat all-time status")
+            .json::<HistoryHeat>()
+            .await
+            .expect("parse heat all-time");
+        assert_eq!(heat_all_time.source, HistoryHeatSource::AllTime);
+        assert_eq!(heat_all_time.max_take_count, 1);
+        assert_eq!(heat_all_time.entries.len(), 1);
+        assert_eq!(heat_all_time.entries[0].territory, "Alpha");
+        assert_eq!(heat_all_time.entries[0].take_count, 1);
+
+        let heat_all_time_at_change_url = {
+            let mut url =
+                reqwest::Url::parse(&format!("{base_url}/api/history/heat")).expect("heat url");
+            url.query_pairs_mut()
+                .append_pair("source", "all_time")
+                .append_pair("at", &recorded_2.to_rfc3339());
+            url
+        };
+        let heat_all_time_at_change = client
+            .get(heat_all_time_at_change_url)
+            .send()
+            .await
+            .expect("heat all-time at request")
+            .error_for_status()
+            .expect("heat all-time at status")
+            .json::<HistoryHeat>()
+            .await
+            .expect("parse heat all-time at");
+        assert_eq!(heat_all_time_at_change.source, HistoryHeatSource::AllTime);
+        assert_eq!(heat_all_time_at_change.max_take_count, 1);
+        assert_eq!(heat_all_time_at_change.entries.len(), 1);
+        assert_eq!(heat_all_time_at_change.entries[0].territory, "Alpha");
+        assert_eq!(heat_all_time_at_change.entries[0].take_count, 1);
+
+        let heat_cumulative_before_change_url = {
+            let mut url =
+                reqwest::Url::parse(&format!("{base_url}/api/history/heat")).expect("heat url");
+            url.query_pairs_mut()
+                .append_pair("source", "season")
+                .append_pair("season_id", "29")
+                .append_pair("at", &recorded_1.to_rfc3339());
+            url
+        };
+        let heat_cumulative_before_change = client
+            .get(heat_cumulative_before_change_url)
+            .send()
+            .await
+            .expect("heat cumulative request")
+            .error_for_status()
+            .expect("heat cumulative status")
+            .json::<HistoryHeat>()
+            .await
+            .expect("parse heat cumulative");
+        assert_eq!(
+            heat_cumulative_before_change.source,
+            HistoryHeatSource::Season
+        );
+        assert_eq!(heat_cumulative_before_change.season_id, Some(29));
+        assert_eq!(heat_cumulative_before_change.max_take_count, 0);
+        assert!(heat_cumulative_before_change.entries.is_empty());
+
         let paged_url = {
             let mut url = reqwest::Url::parse(&format!("{base_url}/api/history/events"))
                 .expect("paged history events url");
@@ -1039,6 +1399,119 @@ mod tests {
             .execute(&mut *lock_conn)
             .await
             .expect("release history scalar test db lock");
+
+        server_handle.abort();
+        let _ = server_handle.await;
+    }
+
+    #[tokio::test]
+    async fn history_heat_season_falls_back_to_last_sixty_days_without_season_metadata() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            eprintln!("Skipping history heat fallback test: DATABASE_URL is not set");
+            return;
+        };
+
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&database_url)
+            .await
+            .expect("connect real postgres");
+        let mut lock_conn = pool.acquire().await.expect("acquire lock connection");
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(REAL_DB_TEST_LOCK)
+            .execute(&mut *lock_conn)
+            .await
+            .expect("acquire history heat fallback db lock");
+        crate::db_migrations::run(&pool)
+            .await
+            .expect("run migrations");
+        sqlx::query(
+            "TRUNCATE TABLE territory_events, territory_snapshots, season_scalar_samples, season_guild_observations, guild_color_cache RESTART IDENTITY",
+        )
+        .execute(&pool)
+        .await
+        .expect("truncate tables");
+
+        let now = Utc::now();
+        let event_time = now - chrono::TimeDelta::days(5);
+        sqlx::query(
+            "INSERT INTO territory_events \
+             (stream_seq, recorded_at, acquired_at, territory, guild_uuid, guild_name, guild_prefix, \
+              prev_guild_uuid, prev_guild_name, prev_guild_prefix) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        )
+        .bind(1_i64)
+        .bind(event_time)
+        .bind(event_time)
+        .bind("Beta")
+        .bind("g3")
+        .bind("GuildThree")
+        .bind("G3")
+        .bind(Some("g2"))
+        .bind(Some("GuildTwo"))
+        .bind(Some("G2"))
+        .execute(&pool)
+        .await
+        .expect("insert owner-change event");
+
+        // Should not be counted (no previous owner).
+        sqlx::query(
+            "INSERT INTO territory_events \
+             (stream_seq, recorded_at, acquired_at, territory, guild_uuid, guild_name, guild_prefix, \
+              prev_guild_uuid, prev_guild_name, prev_guild_prefix) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        )
+        .bind(2_i64)
+        .bind(now - chrono::TimeDelta::days(2))
+        .bind(now - chrono::TimeDelta::days(2))
+        .bind("Gamma")
+        .bind("g4")
+        .bind("GuildFour")
+        .bind("G4")
+        .bind(None::<&str>)
+        .bind(None::<&str>)
+        .bind(None::<&str>)
+        .execute(&pool)
+        .await
+        .expect("insert non-owner-change event");
+
+        let state = AppState::new(Some(pool));
+        let (addr, server_handle) = spawn_test_server(state).await;
+        let base_url = format!("http://{addr}");
+        let client = reqwest::Client::new();
+
+        let heat = client
+            .get(format!("{base_url}/api/history/heat?source=season"))
+            .send()
+            .await
+            .expect("heat fallback request")
+            .error_for_status()
+            .expect("heat fallback status")
+            .json::<HistoryHeat>()
+            .await
+            .expect("parse heat fallback");
+        assert_eq!(heat.source, HistoryHeatSource::Season);
+        assert!(heat.fallback_applied);
+        assert_eq!(heat.season_id, None);
+        assert_eq!(heat.max_take_count, 1);
+        assert_eq!(heat.entries.len(), 1);
+        assert_eq!(heat.entries[0].territory, "Beta");
+        assert_eq!(heat.entries[0].take_count, 1);
+
+        let from = heat
+            .from
+            .parse::<DateTime<Utc>>()
+            .expect("parse fallback from");
+        let to = heat.to.parse::<DateTime<Utc>>().expect("parse fallback to");
+        assert!(to >= from);
+        let fallback_window_secs = (to - from).num_seconds();
+        assert!(fallback_window_secs <= HEAT_SEASON_FALLBACK_DAYS * 24 * 3600);
+
+        sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(REAL_DB_TEST_LOCK)
+            .execute(&mut *lock_conn)
+            .await
+            .expect("release history heat fallback db lock");
 
         server_handle.abort();
         let _ = server_handle.await;
