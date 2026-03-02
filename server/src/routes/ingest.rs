@@ -159,9 +159,9 @@ pub async fn ingest_territory(
                 override_updates.push((
                     update.territory.clone(),
                     IngestTerritoryOverride {
-                        guild: update.guild.take(),
+                        guild: update.guild.clone(),
                         acquired: parsed_acquired,
-                        runtime: update.runtime.take(),
+                        runtime: update.runtime.clone(),
                         observed_at,
                         confidence,
                     },
@@ -175,7 +175,7 @@ pub async fn ingest_territory(
                 location: Some(territory.location.clone()),
                 resources: Some(territory.resources.clone()),
                 connections: Some(territory.connections.clone()),
-                runtime: territory.runtime.clone(),
+                runtime: update.runtime.clone(),
                 idempotency_key: update.idempotency_key,
             });
 
@@ -666,8 +666,8 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use chrono::{DateTime, Duration, Utc};
     use sequoia_shared::{
-        CanonicalTerritoryBatch, CanonicalTerritoryUpdate, GuildRef, Region, SeasonScalarSample,
-        Territory,
+        CanonicalTerritoryBatch, CanonicalTerritoryUpdate, DataProvenance, GuildRef, Region,
+        SeasonScalarSample, Territory, TerritoryRuntimeData, VisibilityClass,
     };
 
     use crate::routes::ingest::{
@@ -886,6 +886,86 @@ mod tests {
 
         let result = ingest_territory(State(state), headers, Json(batch)).await;
         assert!(matches!(result, Err(StatusCode::PAYLOAD_TOO_LARGE)));
+    }
+
+    #[tokio::test]
+    async fn ownership_only_updates_do_not_reuse_stale_runtime_provenance_for_scalar_sampling() {
+        let mut state = AppState::new(None);
+        state.internal_ingest_token = Some("expected-token-that-is-long-enough".to_string());
+
+        let initial_acquired = Utc::now();
+        let observed_at = Utc::now().to_rfc3339();
+        {
+            let mut snapshot = state.live_snapshot.write().await;
+            snapshot.territories.insert(
+                "Alpha".to_string(),
+                Territory {
+                    guild: GuildRef {
+                        uuid: "old-uuid".to_string(),
+                        name: "Old Guild".to_string(),
+                        prefix: "OLD".to_string(),
+                        color: None,
+                    },
+                    acquired: initial_acquired,
+                    location: Region {
+                        start: [0, 0],
+                        end: [1, 1],
+                    },
+                    resources: Default::default(),
+                    connections: Vec::new(),
+                    runtime: Some(TerritoryRuntimeData {
+                        provenance: Some(DataProvenance {
+                            source: "fabric_reporter".to_string(),
+                            visibility: VisibilityClass::Public,
+                            confidence: 0.99,
+                            reporter_count: 2,
+                            observed_at: observed_at.clone(),
+                            menu_season_id: Some(29),
+                            menu_captured_territories: Some(64),
+                            menu_sr_per_hour: Some(30301),
+                            menu_observed_at: Some(observed_at),
+                        }),
+                        ..TerritoryRuntimeData::default()
+                    }),
+                },
+            );
+        }
+
+        let batch = CanonicalTerritoryBatch {
+            generated_at: Utc::now().to_rfc3339(),
+            updates: vec![CanonicalTerritoryUpdate {
+                territory: "Alpha".to_string(),
+                guild: Some(GuildRef {
+                    uuid: "new-uuid".to_string(),
+                    name: "New Guild".to_string(),
+                    prefix: "NEW".to_string(),
+                    color: None,
+                }),
+                acquired: Some((initial_acquired + Duration::seconds(1)).to_rfc3339()),
+                location: None,
+                resources: None,
+                connections: None,
+                runtime: None,
+                idempotency_key: None,
+            }],
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-internal-ingest-token",
+            HeaderValue::from_static("expected-token-that-is-long-enough"),
+        );
+
+        let response = ingest_territory(State(state.clone()), headers, Json(batch))
+            .await
+            .expect("ingest should accept valid internal token");
+        let body = response.0;
+        assert_eq!(body["applied"], 1);
+        assert_eq!(body["rejected"], 0);
+        assert!(
+            state.latest_scalar_sample.read().await.is_none(),
+            "ownership-only update should not sample scalar from stale runtime provenance"
+        );
     }
 
     #[test]

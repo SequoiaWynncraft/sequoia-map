@@ -21,7 +21,7 @@ pub const DEFAULT_UPSTREAM_HTTP_TIMEOUT_SECS: u64 = 10;
 pub const DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECS: u64 = 3;
 pub const SERVER_PORT: u16 = 3000;
 pub const DEFAULT_CANONICAL_OVERRIDE_TTL_SECS: u64 = 180;
-pub const DEFAULT_API_BODY_LIMIT_BYTES: usize = 1024 * 1024;
+pub const DEFAULT_API_BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
 pub const DEFAULT_MAX_INGEST_UPDATES_PER_REQUEST: usize = 1024;
 pub const DEFAULT_MAX_HISTORY_REPLAY_EVENTS: i64 = 20_000;
 pub const DEFAULT_MAX_HISTORY_SR_SAMPLE_ROWS: i64 = 20_000;
@@ -163,7 +163,7 @@ fn sanitize_internal_ingest_token(raw: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_internal_ingest_token;
+    use super::{DEFAULT_API_BODY_LIMIT_BYTES, sanitize_internal_ingest_token};
 
     #[test]
     fn sanitize_internal_ingest_token_rejects_short_or_placeholder_values() {
@@ -182,5 +182,10 @@ mod tests {
             sanitize_internal_ingest_token("  this-is-a-long-random-token-value-12345 "),
             Some("this-is-a-long-random-token-value-12345".to_string())
         );
+    }
+
+    #[test]
+    fn default_api_body_limit_matches_ingest_forwarder_default_size() {
+        assert_eq!(DEFAULT_API_BODY_LIMIT_BYTES, 2 * 1024 * 1024);
     }
 }

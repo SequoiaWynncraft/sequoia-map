@@ -654,6 +654,8 @@ fn compute_diff(old: &TerritoryMap, new: &TerritoryMap) -> Vec<TerritoryChange> 
                 old_territory.guild.uuid != new_territory.guild.uuid
                     || old_territory.guild.name != new_territory.guild.name
                     || old_territory.guild.prefix != new_territory.guild.prefix
+                    || old_territory.acquired != new_territory.acquired
+                    || old_territory.runtime != new_territory.runtime
             }
             None => true, // new territory
         };
@@ -705,15 +707,18 @@ mod tests {
         process_polled_map_with,
     };
     use axum::Router;
-    use chrono::Utc;
+    use chrono::{DateTime, Utc};
     use sequoia_shared::history::{HistoryBounds, HistoryEvents, HistorySnapshot};
-    use sequoia_shared::{GuildRef, Region, Territory, TerritoryMap};
+    use sequoia_shared::{GuildRef, Region, Territory, TerritoryMap, TerritoryRuntimeData};
     use sqlx::postgres::PgPoolOptions;
     use tokio::sync::oneshot;
 
     use crate::state::{AppState, PreSerializedEvent};
 
     fn territory(guild_uuid: &str, guild_name: &str, guild_prefix: &str) -> Territory {
+        let acquired = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .expect("fixed test timestamp should parse")
+            .with_timezone(&Utc);
         Territory {
             guild: GuildRef {
                 uuid: guild_uuid.to_string(),
@@ -721,7 +726,7 @@ mod tests {
                 prefix: guild_prefix.to_string(),
                 color: None,
             },
-            acquired: Utc::now(),
+            acquired,
             location: Region {
                 start: [0, 0],
                 end: [10, 10],
@@ -826,6 +831,41 @@ mod tests {
                 .map(|guild| guild.name.as_str()),
             Some("GuildOne")
         );
+    }
+
+    #[test]
+    fn compute_diff_detects_acquired_changes_without_owner_changes() {
+        let mut old = TerritoryMap::new();
+        old.insert("Alpha".to_string(), territory("g1", "GuildOne", "G1"));
+
+        let mut new = old.clone();
+        new.get_mut("Alpha")
+            .expect("alpha should exist")
+            .acquired = DateTime::parse_from_rfc3339("2026-01-01T00:00:10Z")
+            .expect("valid timestamp")
+            .with_timezone(&Utc);
+
+        let diff = compute_diff(&old, &new);
+        assert_eq!(diff.len(), 1);
+        assert_eq!(diff[0].territory, "Alpha");
+        assert_eq!(diff[0].guild.uuid, "g1");
+    }
+
+    #[test]
+    fn compute_diff_detects_runtime_changes_without_owner_changes() {
+        let mut old = TerritoryMap::new();
+        old.insert("Alpha".to_string(), territory("g1", "GuildOne", "G1"));
+
+        let mut new = old.clone();
+        new.get_mut("Alpha").expect("alpha should exist").runtime = Some(TerritoryRuntimeData {
+            contested: Some(true),
+            ..TerritoryRuntimeData::default()
+        });
+
+        let diff = compute_diff(&old, &new);
+        assert_eq!(diff.len(), 1);
+        assert_eq!(diff[0].territory, "Alpha");
+        assert_eq!(diff[0].guild.uuid, "g1");
     }
 
     #[test]

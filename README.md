@@ -187,7 +187,7 @@ Notes:
 | `DB_MAX_CONNECTIONS` | SQLx PostgreSQL pool max connections | `10` |
 | `SSE_BROADCAST_BUFFER` | In-memory SSE broadcast channel capacity | `256` |
 | `INTERNAL_INGEST_TOKEN` | Shared secret for ingest -> server internal routes (>=24 chars; placeholders rejected) | *(required for ingest)* |
-| `API_BODY_LIMIT_BYTES` | Max request body size accepted by server routes | `1048576` |
+| `API_BODY_LIMIT_BYTES` | Max request body size accepted by server routes | `2097152` |
 | `MAX_INGEST_UPDATES_PER_REQUEST` | Max canonical territory updates accepted per internal ingest request | `1024` |
 | `MAX_HISTORY_REPLAY_EVENTS` | Max historical events replayed in `/api/history/at` reconstruction | `20000` |
 | `MAX_HISTORY_SR_SAMPLE_ROWS` | Max raw rows loaded for `/api/history/sr-samples` | `20000` |
