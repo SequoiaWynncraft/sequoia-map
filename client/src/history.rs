@@ -186,6 +186,7 @@ pub fn merge_with_static(
                 location: location.clone(),
                 resources: resources.clone(),
                 connections: connections.clone(),
+                runtime: None,
             },
         );
     }

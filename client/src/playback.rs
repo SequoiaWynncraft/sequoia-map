@@ -277,6 +277,7 @@ pub fn start_playback_engine() {
                         location: location.clone(),
                         resources: resources.clone(),
                         connections: connections.clone(),
+                        runtime: None,
                     })
                 })
                 .collect();

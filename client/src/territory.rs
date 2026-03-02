@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use sequoia_shared::{Territory, TerritoryChange, TerritoryMap};
+use sequoia_shared::{Territory, TerritoryChange, TerritoryMap, TerritoryRuntimeChange};
 
 use crate::animation::ColorTransition;
 use crate::colors::rgba_css;
@@ -119,6 +119,7 @@ pub fn apply_changes(
             location: change.location.clone(),
             resources: change.resources.clone(),
             connections: change.connections.clone(),
+            runtime: change.runtime.clone(),
         };
 
         let animation = if duration_ms > 0.0 {
@@ -138,5 +139,18 @@ pub fn apply_changes(
                 cached_colors,
             },
         );
+    }
+}
+
+/// Apply runtime-only metadata updates without triggering ownership color animation.
+pub fn apply_runtime_updates(
+    territories: &mut ClientTerritoryMap,
+    updates: &[TerritoryRuntimeChange],
+) {
+    for update in updates {
+        let Some(territory) = territories.get_mut(&update.territory) else {
+            continue;
+        };
+        territory.territory.runtime = update.runtime.clone();
     }
 }

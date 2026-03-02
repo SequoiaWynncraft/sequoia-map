@@ -38,11 +38,12 @@ mod gpu {
         pub static_show_names: bool,
         pub static_abbreviate_names: bool,
         pub static_name_color: NameColor,
+        pub static_tag_color: NameColor,
         pub show_connections: bool,
         pub bold_connections: bool,
         pub connection_opacity_scale: f32,
         pub connection_thickness_scale: f32,
-        pub white_guild_tags: bool,
+        pub use_readable_font: bool,
         pub dynamic_show_countdown: bool,
         pub dynamic_show_granular_map_time: bool,
         pub dynamic_show_compound_map_time: bool,
@@ -76,6 +77,7 @@ mod gpu {
         pub fn supports_static_gpu_labels(&self) -> bool {
             false
         }
+        pub fn rebuild_text_renderer(&mut self) {}
         pub fn resize(&mut self, _w: u32, _h: u32, _dpr: f32) {}
         pub fn upload_tiles(&mut self, _tiles: &[LoadedTile]) {}
         pub fn render(&mut self, frame: RenderFrameInput<'_>) -> bool {

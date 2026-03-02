@@ -295,7 +295,12 @@ pub fn TowerCalculator() -> impl IntoView {
                 >"11x4"</button>
                 <div style="flex: 1; display: flex; align-items: center; gap: 4px;">
                     <span style="font-family: 'Inter', system-ui, sans-serif; font-size: 0.62rem; color: #5f5d65; white-space: nowrap;">"Conn"</span>
-                    <CounterInput value=connections max=20 />
+                    <CounterInput
+                        value=connections
+                        max=20
+                        synced_value=externals
+                        synced_max=50
+                    />
                 </div>
                 <div style="flex: 1; display: flex; align-items: center; gap: 4px;">
                     <span style="font-family: 'Inter', system-ui, sans-serif; font-size: 0.62rem; color: #5f5d65; white-space: nowrap;">"Ext"</span>
@@ -440,21 +445,48 @@ fn StatRow(
 
 /// Small counter input with +/- buttons, editable value, and scroll support.
 #[component]
-fn CounterInput(value: RwSignal<u32>, max: u32) -> impl IntoView {
-    let on_dec = move |_| value.update(|v| *v = v.saturating_sub(1));
-    let on_inc = move |_| value.update(|v| *v = (*v + 1).min(max));
+fn CounterInput(
+    value: RwSignal<u32>,
+    max: u32,
+    #[prop(optional)] synced_value: Option<RwSignal<u32>>,
+    #[prop(optional)] synced_max: Option<u32>,
+) -> impl IntoView {
+    let apply_value = move |next: u32| {
+        let prev = value.get_untracked();
+        let next = next.min(max);
+        if prev == next {
+            return;
+        }
+        value.set(next);
+
+        let Some(synced_value) = synced_value else {
+            return;
+        };
+        let synced_cap = synced_max.unwrap_or(u32::MAX);
+
+        if next > prev {
+            let delta = next - prev;
+            synced_value.update(|v| *v = v.saturating_add(delta).min(synced_cap));
+        } else {
+            let delta = prev - next;
+            synced_value.update(|v| *v = v.saturating_sub(delta));
+        }
+    };
+
+    let on_dec = move |_| apply_value(value.get_untracked().saturating_sub(1));
+    let on_inc = move |_| apply_value(value.get_untracked() + 1);
     let on_wheel = move |ev: web_sys::WheelEvent| {
         ev.prevent_default();
         if ev.delta_y() < 0.0 {
-            value.update(|v| *v = (*v + 1).min(max));
+            apply_value(value.get_untracked() + 1);
         } else if ev.delta_y() > 0.0 {
-            value.update(|v| *v = v.saturating_sub(1));
+            apply_value(value.get_untracked().saturating_sub(1));
         }
     };
     let on_input = move |ev: leptos::ev::Event| {
         let val = event_target_value(&ev);
         if let Ok(n) = val.parse::<u32>() {
-            value.set(n.min(max));
+            apply_value(n);
         }
     };
     let on_focus = move |ev: web_sys::FocusEvent| {

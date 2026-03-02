@@ -29,6 +29,10 @@
 
 @layer base {
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --accent-live: #c7a3f0;
+    --accent-live-rgb: 199, 163, 240;
+  }
   html, body {
     width: 100%;
     height: 100%;

@@ -127,19 +127,42 @@ impl SpatialGrid {
             return None;
         }
 
-        let ix = wx as i32;
-        let iy = wy as i32;
-
         let cell = &self.cells[row as usize * GRID_COLS + col as usize];
         for &idx in cell {
-            if ix >= self.lefts[idx]
-                && ix <= self.rights[idx]
-                && iy >= self.tops[idx]
-                && iy <= self.bottoms[idx]
+            if wx >= self.lefts[idx] as f64
+                && wx <= self.rights[idx] as f64
+                && wy >= self.tops[idx] as f64
+                && wy <= self.bottoms[idx] as f64
             {
                 return Some(self.names[idx].clone());
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GRID_COLS, GRID_ROWS, SpatialGrid};
+
+    #[test]
+    fn find_at_does_not_truncate_negative_coordinates() {
+        let mut cells = vec![Vec::new(); GRID_COLS * GRID_ROWS];
+        cells[0].push(0);
+        let grid = SpatialGrid {
+            cells,
+            names: vec!["Alpha".to_string()],
+            lefts: vec![0],
+            rights: vec![10],
+            tops: vec![0],
+            bottoms: vec![10],
+            min_x: -1.0,
+            min_y: 0.0,
+            cell_w: 100.0,
+            cell_h: 1.0,
+        };
+
+        assert_eq!(grid.find_at(-0.2, 0.2), None);
+        assert_eq!(grid.find_at(0.2, 0.2), Some("Alpha".to_string()));
     }
 }
