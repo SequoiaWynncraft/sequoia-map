@@ -1889,6 +1889,23 @@ mod tests {
     }
 
     #[test]
+    fn resolve_client_ip_uses_xff_for_docker_proxy_defaults() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.10"));
+
+        let trusted = parse_trusted_proxy_cidrs(
+            "127.0.0.1/32,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16",
+        );
+        let resolved = resolve_client_ip(
+            &headers,
+            SocketAddr::from(([172, 19, 0, 3], 3010)),
+            &trusted,
+        );
+
+        assert_eq!(resolved, IpAddr::from([203, 0, 113, 10]));
+    }
+
+    #[test]
     fn parse_trusted_proxy_cidrs_skips_invalid_entries() {
         let parsed = parse_trusted_proxy_cidrs("10.0.0.0/8, not-a-cidr, 192.168.0.0/16");
         assert_eq!(parsed.len(), 2);

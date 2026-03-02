@@ -21,6 +21,7 @@ use crate::state::{
 };
 
 const INTERNAL_INGEST_HEADER: &str = "x-internal-ingest-token";
+const MAX_OVERRIDE_OBSERVED_AT_FUTURE_SKEW_SECS: i64 = 30;
 
 pub async fn ingest_territory(
     State(state): State<AppState>,
@@ -62,7 +63,8 @@ pub async fn ingest_territory(
             let mut changed = false;
             let mut ownership_changed = false;
             let previous_guild = territory.guild.clone();
-            let mut observed_at = Utc::now();
+            let now = Utc::now();
+            let mut observed_at = now;
             let mut confidence = 1.0_f32;
 
             if let Some(mut guild) = update.guild.clone() {
@@ -119,6 +121,7 @@ pub async fn ingest_territory(
                     if let Ok(dt) = DateTime::parse_from_rfc3339(&provenance.observed_at) {
                         observed_at = dt.with_timezone(&Utc);
                     }
+                    observed_at = sanitize_override_observed_at(observed_at, now);
                     confidence = provenance.confidence.clamp(0.0, 1.0);
                     if confidence < 0.66 {
                         degraded += 1;
@@ -233,19 +236,7 @@ pub async fn ingest_territory(
     if !override_updates.is_empty() {
         let mut overrides = state.ingest_overrides.write().await;
         for (territory, override_info) in override_updates {
-            let should_replace = match overrides.get(&territory) {
-                Some(existing) => {
-                    if override_info.confidence > existing.confidence + f32::EPSILON {
-                        true
-                    } else if (override_info.confidence - existing.confidence).abs() <= 0.05 {
-                        override_info.observed_at >= existing.observed_at
-                    } else {
-                        false
-                    }
-                }
-                None => true,
-            };
-            if should_replace {
+            if should_replace_ingest_override(overrides.get(&territory), &override_info) {
                 overrides.insert(territory, override_info);
             }
         }
@@ -342,6 +333,33 @@ fn parse_optional_rfc3339(value: Option<&str>) -> Option<DateTime<Utc>> {
     value
         .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
         .map(|dt| dt.with_timezone(&Utc))
+}
+
+fn sanitize_override_observed_at(observed_at: DateTime<Utc>, now: DateTime<Utc>) -> DateTime<Utc> {
+    let max_allowed = now + chrono::Duration::seconds(MAX_OVERRIDE_OBSERVED_AT_FUTURE_SKEW_SECS);
+    if observed_at > max_allowed {
+        now
+    } else {
+        observed_at
+    }
+}
+
+fn should_replace_ingest_override(
+    existing: Option<&IngestTerritoryOverride>,
+    incoming: &IngestTerritoryOverride,
+) -> bool {
+    let Some(existing) = existing else {
+        return true;
+    };
+
+    if incoming.observed_at > existing.observed_at {
+        return true;
+    }
+    if incoming.observed_at < existing.observed_at {
+        return false;
+    }
+
+    incoming.confidence >= existing.confidence
 }
 
 fn next_seq(current: u64) -> Result<u64, StatusCode> {
@@ -646,14 +664,17 @@ mod tests {
     use axum::Json;
     use axum::extract::State;
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
-    use chrono::{Duration, Utc};
+    use chrono::{DateTime, Duration, Utc};
     use sequoia_shared::{
         CanonicalTerritoryBatch, CanonicalTerritoryUpdate, GuildRef, Region, SeasonScalarSample,
         Territory,
     };
 
-    use crate::routes::ingest::{constant_time_eq, ingest_territory, is_duplicate_scalar_sample};
-    use crate::state::AppState;
+    use crate::routes::ingest::{
+        constant_time_eq, ingest_territory, is_duplicate_scalar_sample,
+        sanitize_override_observed_at, should_replace_ingest_override,
+    };
+    use crate::state::{AppState, IngestTerritoryOverride};
 
     #[tokio::test]
     async fn ingest_ownership_change_rehydrates_cached_guild_color() {
@@ -894,5 +915,61 @@ mod tests {
         assert!(!is_duplicate_scalar_sample(
             &sample, 29, 2.151, 3.11218, 0.0005
         ));
+    }
+
+    #[test]
+    fn should_replace_override_prefers_newer_observed_at_even_with_lower_confidence() {
+        let existing = IngestTerritoryOverride {
+            observed_at: DateTime::parse_from_rfc3339("2026-03-02T21:00:00Z")
+                .expect("valid timestamp")
+                .with_timezone(&Utc),
+            confidence: 0.95,
+            ..IngestTerritoryOverride::default()
+        };
+        let incoming = IngestTerritoryOverride {
+            observed_at: DateTime::parse_from_rfc3339("2026-03-02T21:00:15Z")
+                .expect("valid timestamp")
+                .with_timezone(&Utc),
+            confidence: 0.70,
+            ..IngestTerritoryOverride::default()
+        };
+
+        assert!(should_replace_ingest_override(Some(&existing), &incoming));
+    }
+
+    #[test]
+    fn should_replace_override_rejects_older_observed_at_even_with_higher_confidence() {
+        let existing = IngestTerritoryOverride {
+            observed_at: DateTime::parse_from_rfc3339("2026-03-02T21:00:15Z")
+                .expect("valid timestamp")
+                .with_timezone(&Utc),
+            confidence: 0.70,
+            ..IngestTerritoryOverride::default()
+        };
+        let incoming = IngestTerritoryOverride {
+            observed_at: DateTime::parse_from_rfc3339("2026-03-02T21:00:00Z")
+                .expect("valid timestamp")
+                .with_timezone(&Utc),
+            confidence: 0.99,
+            ..IngestTerritoryOverride::default()
+        };
+
+        assert!(!should_replace_ingest_override(Some(&existing), &incoming));
+    }
+
+    #[test]
+    fn sanitize_override_observed_at_caps_far_future_timestamps() {
+        let now = DateTime::parse_from_rfc3339("2026-03-02T21:00:00Z")
+            .expect("valid timestamp")
+            .with_timezone(&Utc);
+        let far_future = DateTime::parse_from_rfc3339("2026-03-02T21:05:00Z")
+            .expect("valid timestamp")
+            .with_timezone(&Utc);
+        let near_future = DateTime::parse_from_rfc3339("2026-03-02T21:00:10Z")
+            .expect("valid timestamp")
+            .with_timezone(&Utc);
+
+        assert_eq!(sanitize_override_observed_at(far_future, now), now);
+        assert_eq!(sanitize_override_observed_at(near_future, now), near_future);
     }
 }

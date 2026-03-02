@@ -197,7 +197,7 @@ Notes:
 | `MAP_DOMAIN` | Public HTTPS domain routed to Sequoia server by Caddy | `map.example.com` |
 | `IRIS_DOMAIN` | Public HTTPS domain routed to ingest by Caddy | `iris.example.com` |
 | `ACME_EMAIL` | Email used for ACME certificate registration in Caddy | *(empty)* |
-| `INGEST_TRUSTED_PROXY_CIDRS` | Comma-separated trusted reverse proxy CIDRs for `X-Forwarded-For` | *(empty)* |
+| `INGEST_TRUSTED_PROXY_CIDRS` | Comma-separated trusted reverse proxy CIDRs for `X-Forwarded-For` | *(empty in service; compose defaults to loopback + RFC1918 ranges)* |
 | `INGEST_DEGRADED_SINGLE_REPORTER_ENABLED` | Allow single active reporter to emit degraded canonical updates without quorum | `false` *(compose defaults to `true`)* |
 | `INGEST_API_BODY_LIMIT_BYTES` | Max request body size accepted by ingest routes | `2097152` |
 | `INGEST_MAX_REPORTS_PER_BATCH` | Max territory updates accepted per reporter upload batch | `1024` |

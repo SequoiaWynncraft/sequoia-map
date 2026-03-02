@@ -38,7 +38,7 @@ Default bind: `0.0.0.0:3010`.
 - `INGEST_MAX_RATE_LIMIT_KEYS` (default: `20000`)
 - `INGEST_QUORUM_MIN_REPORTERS` (default: `2`)
 - `INGEST_DEGRADED_SINGLE_REPORTER_ENABLED` (default: `false`; compose stacks set `true` unless overridden)
-- `INGEST_TRUSTED_PROXY_CIDRS` (default: empty; comma-separated CIDRs allowed to supply `X-Forwarded-For`)
+- `INGEST_TRUSTED_PROXY_CIDRS` (default: empty in service; compose defaults to loopback + RFC1918 private ranges)
 - `INGEST_RAW_RETENTION_DAYS` (default: `7`)
 - `INGEST_REPORTER_RETENTION_DAYS` (default: `30`)
 - `INGEST_DUP_SUPPRESS_SECS` (default: `300`)
