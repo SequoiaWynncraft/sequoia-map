@@ -240,7 +240,7 @@ public final class IrisReporterClient implements ClientModInitializer {
         if (error != null) {
             sendClientMessage(Text.literal("invalid ingest base URL: ").formatted(Formatting.RED)
                 .append(Text.literal(error).formatted(Formatting.GOLD)));
-            sendClientMessage(Text.literal("example: https://seqwawa.com or https://seqwawa.com/*").formatted(Formatting.GRAY));
+            sendClientMessage(Text.literal("example: https://map.seqwawa.com or https://map.seqwawa.com/*").formatted(Formatting.GRAY));
             return 0;
         }
 

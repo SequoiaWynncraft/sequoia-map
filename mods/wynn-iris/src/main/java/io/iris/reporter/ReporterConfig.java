@@ -1,7 +1,7 @@
 package io.iris.reporter;
 
 public final class ReporterConfig {
-    public String ingestBaseUrl = "https://seqwawa.com";
+    public String ingestBaseUrl = "https://map.seqwawa.com";
     public boolean allowInsecureIngestHttp = false;
     public String reporterId;
     public String token;

@@ -8,13 +8,19 @@ public class ReporterConfigDefaultsTest {
     @Test
     void defaultIngestBaseUrlTargetsSeqwawa() {
         ReporterConfig config = new ReporterConfig();
-        assertEquals("https://seqwawa.com", config.ingestBaseUrl);
+        assertEquals("https://map.seqwawa.com", config.ingestBaseUrl);
     }
 
     @Test
     void normalizeIngestBaseUrlInputStripsWildcardsAndTrailingSlashes() {
-        assertEquals("https://seqwawa.com", ReporterRuntime.normalizeIngestBaseUrlInput("https://seqwawa.com/*"));
-        assertEquals("https://seqwawa.com", ReporterRuntime.normalizeIngestBaseUrlInput(" https://seqwawa.com/ "));
-        assertEquals("https://seqwawa.com/api", ReporterRuntime.normalizeIngestBaseUrlInput("https://seqwawa.com/api/***///"));
+        assertEquals(
+                "https://map.seqwawa.com",
+                ReporterRuntime.normalizeIngestBaseUrlInput("https://map.seqwawa.com/*"));
+        assertEquals(
+                "https://map.seqwawa.com",
+                ReporterRuntime.normalizeIngestBaseUrlInput(" https://map.seqwawa.com/ "));
+        assertEquals(
+                "https://map.seqwawa.com/api",
+                ReporterRuntime.normalizeIngestBaseUrlInput("https://map.seqwawa.com/api/***///"));
     }
 }

@@ -1,0 +1,17 @@
+{
+    email {$ACME_EMAIL}
+}
+
+{$MAP_DOMAIN:map.example.com} {
+    encode zstd gzip
+
+    @internalIngest path /api/internal/ingest/*
+    respond @internalIngest 403
+
+    reverse_proxy server:3000
+}
+
+{$IRIS_DOMAIN:iris.example.com} {
+    encode zstd gzip
+    reverse_proxy ingest:3010
+}

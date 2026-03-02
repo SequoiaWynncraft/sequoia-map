@@ -31,7 +31,7 @@ Older config files (`config/iris-reporter.json`, `config/sequoia-fabric-reporter
 Important fields:
 
 - `ingestBaseUrl`
-- default `ingestBaseUrl` is `https://seqwawa.com`
+- default `ingestBaseUrl` is `https://map.seqwawa.com`
 - `allowInsecureIngestHttp` (default `false`; when false, non-localhost `http://` ingest URLs are blocked)
 - `shareOwner`
 - `shareHeadquarters`

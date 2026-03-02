@@ -13,7 +13,7 @@ services:
     environment:
       POSTGRES_DB: sequoia
       POSTGRES_USER: sequoia
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     mem_limit: 768m
     mem_reservation: 256m
     volumes:
@@ -32,15 +32,17 @@ services:
     init: true
     stop_grace_period: 30s
     environment:
-      DATABASE_URL: postgres://sequoia:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/sequoia
+      DATABASE_URL: postgres://sequoia:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/sequoia
       RUST_LOG: info
       DB_MAX_CONNECTIONS: ${DB_MAX_CONNECTIONS:-10}
       SSE_BROADCAST_BUFFER: ${SSE_BROADCAST_BUFFER:-256}
-      INTERNAL_INGEST_TOKEN: ${INTERNAL_INGEST_TOKEN:?set INTERNAL_INGEST_TOKEN}
+      INTERNAL_INGEST_TOKEN: ${INTERNAL_INGEST_TOKEN:?INTERNAL_INGEST_TOKEN is required}
       API_BODY_LIMIT_BYTES: ${API_BODY_LIMIT_BYTES:-1048576}
       MAX_INGEST_UPDATES_PER_REQUEST: ${MAX_INGEST_UPDATES_PER_REQUEST:-1024}
     mem_limit: 768m
     mem_reservation: 256m
+    expose:
+      - "3000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -63,7 +65,7 @@ services:
       SEQUOIA_INGEST_BIND: 0.0.0.0:3010
       SEQUOIA_INGEST_DB_URL: sqlite:///data/sequoia-ingest.db?mode=rwc
       SEQUOIA_SERVER_URL: http://server:3000
-      SEQUOIA_INTERNAL_INGEST_TOKEN: ${INTERNAL_INGEST_TOKEN:?set INTERNAL_INGEST_TOKEN}
+      SEQUOIA_INTERNAL_INGEST_TOKEN: ${INTERNAL_INGEST_TOKEN:?INTERNAL_INGEST_TOKEN is required}
       INGEST_DEGRADED_SINGLE_REPORTER_ENABLED: ${INGEST_DEGRADED_SINGLE_REPORTER_ENABLED:-true}
       INGEST_API_BODY_LIMIT_BYTES: ${INGEST_API_BODY_LIMIT_BYTES:-2097152}
       INGEST_MAX_REPORTS_PER_BATCH: ${INGEST_MAX_REPORTS_PER_BATCH:-1024}
@@ -71,6 +73,8 @@ services:
       RUST_LOG: info
     mem_limit: 768m
     mem_reservation: 256m
+    expose:
+      - "3010"
     volumes:
       - ingest-data:/data
     depends_on:
@@ -84,27 +88,26 @@ services:
       start_period: 20s
     logging: *default-logging
 
-  caddy:
+  edge:
     image: caddy:2.10-alpine
     restart: unless-stopped
     init: true
     stop_grace_period: 30s
-    environment:
-      MAP_DOMAIN: ${MAP_DOMAIN:-map.example.com}
-      IRIS_DOMAIN: ${IRIS_DOMAIN:-iris.example.com}
-      ACME_EMAIL: ${ACME_EMAIL:-}
-    ports:
-      - "80:80"
-      - "443:443"
+    expose:
+      - "8080"
     volumes:
-      - ./ops/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy-data:/data
-      - caddy-config:/config
+      - ./ops/caddy/Caddyfile.coolify:/etc/caddy/Caddyfile:ro
     depends_on:
       server:
         condition: service_healthy
       ingest:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/api/health >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
     logging: *default-logging
 
   postgres-backup:
@@ -113,7 +116,7 @@ services:
     init: true
     stop_grace_period: 30s
     environment:
-      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_DB: sequoia
@@ -155,5 +158,3 @@ volumes:
   pgdata:
   pgbackups:
   ingest-data:
-  caddy-data:
-  caddy-config:

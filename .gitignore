@@ -1,4 +1,4 @@
-/target
+target/
 client/dist
 .env
 .env.*
@@ -6,3 +6,9 @@ client/dist
 *.wasm
 *.d
 .DS_Store
+.trunk/
+services/sequoia-ingest/*.db
+services/sequoia-ingest/*.db-journal
+services/sequoia-ingest/*.db-wal
+services/sequoia-ingest/*.db-shm
+mods/wynn-iris/run/mods/ares-probe*.jar
