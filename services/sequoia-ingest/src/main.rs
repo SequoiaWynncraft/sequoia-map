@@ -1122,6 +1122,7 @@ async fn evaluate_territory_claim(
         && distinct_origins == 1;
 
     if quorum_ok || degraded_ok {
+        let mut accepted = update.clone();
         if let Some(runtime) = bucket
             .iter()
             .rev()
@@ -1129,21 +1130,17 @@ async fn evaluate_territory_claim(
             .map(|claim| claim.update.runtime.clone())
             .flatten()
         {
-            let mut accepted = update.clone();
-            let mut runtime = runtime;
-            let mut provenance = runtime
-                .provenance
-                .clone()
-                .unwrap_or_else(default_provenance);
-            provenance.reporter_count = corroborating as u16;
-            runtime.provenance = Some(provenance);
             accepted.runtime = Some(runtime);
-            bucket.retain(|claim| claim.claim_hash != claim_hash);
-            return Some((accepted, degraded_ok, quorum_ok));
         }
 
+        let mut runtime = accepted.runtime.take().unwrap_or_default();
+        let mut provenance = runtime.provenance.take().unwrap_or_else(default_provenance);
+        provenance.reporter_count = corroborating as u16;
+        runtime.provenance = Some(provenance);
+        accepted.runtime = Some(runtime);
+
         bucket.retain(|claim| claim.claim_hash != claim_hash);
-        return Some((update, degraded_ok, quorum_ok));
+        return Some((accepted, degraded_ok, quorum_ok));
     }
 
     None
@@ -1765,7 +1762,9 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue};
     use chrono::Utc;
     use reqwest::Client;
-    use sequoia_shared::{CanonicalTerritoryUpdate, DataProvenance, TerritoryRuntimeData};
+    use sequoia_shared::{
+        CanonicalTerritoryUpdate, DataProvenance, GuildRef, TerritoryRuntimeData,
+    };
     use sqlx_sqlite::SqlitePoolOptions;
     use std::collections::{HashMap, VecDeque};
     use std::net::{IpAddr, SocketAddr};
@@ -2110,18 +2109,35 @@ mod tests {
     #[tokio::test]
     async fn degraded_mode_accepts_single_reporter_when_only_one_active() {
         let state = test_state_with_active_reporters(true, 1).await;
+        let mut owner_only = basic_claim_update();
+        owner_only.runtime = None;
+        owner_only.guild = Some(GuildRef {
+            uuid: "guild-uuid".to_string(),
+            name: "Guild".to_string(),
+            prefix: "GLD".to_string(),
+            color: None,
+        });
+        owner_only.acquired = Some("2026-02-28T20:00:00Z".to_string());
         let decision = evaluate_territory_claim(
             &state,
             "reporter-a",
             IpAddr::from([203, 0, 113, 10]),
-            basic_claim_update(),
+            owner_only,
         )
         .await;
 
-        let (_accepted, was_degraded, was_quorum) =
+        let (accepted, was_degraded, was_quorum) =
             decision.expect("single active reporter should be accepted in degraded mode");
+        let provenance = accepted
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.provenance.as_ref())
+            .expect("degraded acceptance should include provenance metadata");
         assert!(was_degraded);
         assert!(!was_quorum);
+        assert_eq!(provenance.reporter_count, 1);
+        assert_eq!(provenance.source, "fabric_reporter");
+        assert!(!provenance.observed_at.is_empty());
     }
 
     #[tokio::test]

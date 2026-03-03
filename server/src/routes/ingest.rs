@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use sequoia_shared::{
     BASE_HOURLY_SR, CanonicalTerritoryBatch, CanonicalTerritoryUpdate, DataProvenance,
     SeasonScalarCurrent, SeasonScalarSample, TerritoryChange, TerritoryEvent, TerritoryMap,
-    TerritoryRuntimeChange, weighted_units,
+    TerritoryRuntimeChange, TerritoryRuntimeData, weighted_units,
 };
 use tracing::{info, warn};
 
@@ -65,6 +65,7 @@ pub async fn ingest_territory(
             let mut changed = false;
             let mut ownership_changed = false;
             let mut non_event_field_changed = false;
+            let mut runtime_override: Option<TerritoryRuntimeData> = None;
             let previous_guild = territory.guild.clone();
             let now = Utc::now();
             let mut observed_at = now;
@@ -133,12 +134,19 @@ pub async fn ingest_territory(
                         degraded += 1;
                     }
                 }
-                if territory.runtime.as_ref() != Some(&runtime) {
-                    territory.runtime = Some(runtime.clone());
-                    runtime_updates.push(TerritoryRuntimeChange {
-                        territory: update.territory.clone(),
-                        runtime: Some(runtime),
-                    });
+                if runtime_has_claim_fields(&runtime) {
+                    runtime_override = Some(runtime.clone());
+                    if territory.runtime.as_ref() != Some(&runtime) {
+                        territory.runtime = Some(runtime.clone());
+                        runtime_updates.push(TerritoryRuntimeChange {
+                            territory: update.territory.clone(),
+                            runtime: Some(runtime),
+                        });
+                        changed = true;
+                    }
+                } else if runtime.provenance.is_some() {
+                    // Keep metadata-only runtime payloads for confidence/scalar ingestion
+                    // without mutating cached runtime state.
                     changed = true;
                 }
             }
@@ -167,13 +175,13 @@ pub async fn ingest_territory(
                 });
             }
 
-            if update.guild.is_some() || update.acquired.is_some() || update.runtime.is_some() {
+            if update.guild.is_some() || update.acquired.is_some() || runtime_override.is_some() {
                 override_updates.push((
                     update.territory.clone(),
                     IngestTerritoryOverride {
                         guild: update.guild.clone(),
                         acquired: parsed_acquired,
-                        runtime: update.runtime.clone(),
+                        runtime: runtime_override,
                         observed_at,
                         confidence,
                     },
@@ -371,6 +379,20 @@ fn sanitize_override_observed_at(observed_at: DateTime<Utc>, now: DateTime<Utc>)
     } else {
         observed_at
     }
+}
+
+fn runtime_has_claim_fields(runtime: &TerritoryRuntimeData) -> bool {
+    runtime.headquarters.is_some()
+        || runtime.held_resources.is_some()
+        || runtime.production_rates.is_some()
+        || runtime.storage_capacity.is_some()
+        || runtime.defense_tier.is_some()
+        || runtime.contested.is_some()
+        || runtime.active_war.is_some()
+        || runtime
+            .extra_scrapes
+            .as_ref()
+            .is_some_and(|entries| !entries.is_empty())
 }
 
 fn should_replace_ingest_override(
@@ -715,7 +737,7 @@ mod tests {
     };
 
     use crate::routes::ingest::{
-        constant_time_eq, ingest_territory, is_duplicate_scalar_sample,
+        constant_time_eq, ingest_territory, is_duplicate_scalar_sample, runtime_has_claim_fields,
         sanitize_override_observed_at, scalar_sample_quality, should_replace_ingest_override,
     };
     use crate::state::{AppState, IngestTerritoryOverride, PreSerializedEvent};
@@ -1013,6 +1035,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ownership_only_degraded_provenance_does_not_overwrite_runtime_state() {
+        let mut state = AppState::new(None);
+        state.internal_ingest_token = Some("expected-token-that-is-long-enough".to_string());
+
+        let initial_acquired = Utc::now();
+        {
+            let mut snapshot = state.live_snapshot.write().await;
+            snapshot.territories.insert(
+                "Alpha".to_string(),
+                Territory {
+                    guild: GuildRef {
+                        uuid: "old-uuid".to_string(),
+                        name: "Old Guild".to_string(),
+                        prefix: "OLD".to_string(),
+                        color: None,
+                    },
+                    acquired: initial_acquired,
+                    location: Region {
+                        start: [0, 0],
+                        end: [1, 1],
+                    },
+                    resources: Default::default(),
+                    connections: Vec::new(),
+                    runtime: Some(TerritoryRuntimeData {
+                        defense_tier: Some("Very High".to_string()),
+                        ..TerritoryRuntimeData::default()
+                    }),
+                },
+            );
+        }
+
+        let observed_at = Utc::now().to_rfc3339();
+        let batch = CanonicalTerritoryBatch {
+            generated_at: Utc::now().to_rfc3339(),
+            updates: vec![CanonicalTerritoryUpdate {
+                territory: "Alpha".to_string(),
+                guild: Some(GuildRef {
+                    uuid: "new-uuid".to_string(),
+                    name: "New Guild".to_string(),
+                    prefix: "NEW".to_string(),
+                    color: None,
+                }),
+                acquired: Some((initial_acquired + Duration::seconds(1)).to_rfc3339()),
+                location: None,
+                resources: None,
+                connections: None,
+                runtime: Some(TerritoryRuntimeData {
+                    provenance: Some(DataProvenance {
+                        source: "fabric_reporter".to_string(),
+                        visibility: VisibilityClass::Public,
+                        confidence: 0.42,
+                        reporter_count: 1,
+                        observed_at,
+                        ..DataProvenance::default()
+                    }),
+                    ..TerritoryRuntimeData::default()
+                }),
+                idempotency_key: None,
+            }],
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-internal-ingest-token",
+            HeaderValue::from_static("expected-token-that-is-long-enough"),
+        );
+
+        let response = ingest_territory(State(state.clone()), headers, Json(batch))
+            .await
+            .expect("ingest should accept valid internal token");
+        let body = response.0;
+        assert_eq!(body["applied"], 1);
+        assert_eq!(body["rejected"], 0);
+        assert_eq!(body["degraded"], 1);
+
+        let snapshot = state.live_snapshot.read().await;
+        let runtime = snapshot
+            .territories
+            .get("Alpha")
+            .and_then(|territory| territory.runtime.as_ref())
+            .expect("runtime should remain present");
+        assert_eq!(runtime.defense_tier.as_deref(), Some("Very High"));
+        assert!(runtime.provenance.is_none());
+        drop(snapshot);
+
+        let overrides = state.ingest_overrides.read().await;
+        let override_entry = overrides
+            .get("Alpha")
+            .expect("ownership update should refresh ingest override");
+        assert!((override_entry.confidence - 0.42).abs() < 1e-6);
+        assert!(
+            override_entry.runtime.is_none(),
+            "metadata-only runtime should not override polled runtime state"
+        );
+    }
+
+    #[tokio::test]
     async fn location_only_updates_bump_seq_refresh_live_state_and_emit_snapshot_event() {
         let mut state = AppState::new(None);
         state.internal_ingest_token = Some("expected-token-that-is-long-enough".to_string());
@@ -1216,5 +1335,23 @@ mod tests {
 
         assert_eq!(sanitize_override_observed_at(far_future, now), now);
         assert_eq!(sanitize_override_observed_at(near_future, now), near_future);
+    }
+
+    #[test]
+    fn runtime_has_claim_fields_excludes_provenance_only_payloads() {
+        let provenance_only = TerritoryRuntimeData {
+            provenance: Some(DataProvenance {
+                confidence: 0.4,
+                ..DataProvenance::default()
+            }),
+            ..TerritoryRuntimeData::default()
+        };
+        assert!(!runtime_has_claim_fields(&provenance_only));
+
+        let runtime_with_claim = TerritoryRuntimeData {
+            defense_tier: Some("Very High".to_string()),
+            ..TerritoryRuntimeData::default()
+        };
+        assert!(runtime_has_claim_fields(&runtime_with_claim));
     }
 }
