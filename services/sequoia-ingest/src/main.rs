@@ -1757,12 +1757,16 @@ async fn persist_raw_report(
 #[cfg(test)]
 mod tests {
     use super::{
-        ReporterFieldToggles, apply_toggle_policy, check_rate_limit, normalize_idempotency_key,
+        AppState, Config, Metrics, ReporterFieldToggles, ReporterRecord, apply_toggle_policy,
+        check_rate_limit, evaluate_territory_claim, normalize_idempotency_key,
         normalize_persisted_token, normalize_territory_name, parse_trusted_proxy_cidrs,
         quorum_satisfied, resolve_client_ip, territory_claim_hash, territory_idempotency_hash,
     };
     use axum::http::{HeaderMap, HeaderValue};
+    use chrono::Utc;
+    use reqwest::Client;
     use sequoia_shared::{CanonicalTerritoryUpdate, DataProvenance, TerritoryRuntimeData};
+    use sqlx_sqlite::SqlitePoolOptions;
     use std::collections::{HashMap, VecDeque};
     use std::net::{IpAddr, SocketAddr};
     use std::sync::Arc;
@@ -1806,6 +1810,96 @@ mod tests {
             share_storage_capacity: false,
             share_defense_tier: false,
             share_trading_routes: false,
+        }
+    }
+
+    async fn test_state_with_active_reporters(
+        degraded_single_reporter_enabled: bool,
+        active_reporters: usize,
+    ) -> Arc<AppState> {
+        let now = Utc::now();
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("sqlite::memory:")
+            .expect("create in-memory sqlite pool");
+
+        let state = Arc::new(AppState {
+            cfg: Config {
+                bind_addr: "127.0.0.1:3010".to_string(),
+                db_url: "sqlite::memory:".to_string(),
+                sequoia_server_base_url: "http://127.0.0.1:3000".to_string(),
+                internal_ingest_token: "abcdefghijklmnopqrstuvwxyz".to_string(),
+                api_body_limit_bytes: 2 * 1024 * 1024,
+                max_reporters: 10_000,
+                rate_limit_ip_per_min: 300,
+                rate_limit_reporter_per_min: 120,
+                max_rate_limit_keys: 20_000,
+                quorum_min_reporters: 2,
+                degraded_single_reporter_enabled,
+                raw_retention_days: 7,
+                reporter_retention_days: 30,
+                duplicate_ttl_secs: 300,
+                max_seen_idempotency_keys: 50_000,
+                max_reports_per_batch: 1024,
+                max_territory_name_len: 96,
+                max_idempotency_key_len: 128,
+                malformed_threshold: 3,
+                max_malformed_penalty_keys: 10_000,
+                quarantine_secs: 600,
+                max_pending_territories: 2048,
+                max_claims_per_territory: 128,
+                max_forward_queue: 4096,
+                forward_max_attempts: 6,
+                trusted_proxy_cidrs: Vec::new(),
+            },
+            db,
+            http: Client::new(),
+            reporters: Arc::new(RwLock::new(HashMap::new())),
+            token_index: Arc::new(RwLock::new(HashMap::new())),
+            ip_windows: Arc::new(RwLock::new(HashMap::new())),
+            reporter_windows: Arc::new(RwLock::new(HashMap::new())),
+            malformed_penalties: Arc::new(RwLock::new(HashMap::new())),
+            quarantined_until: Arc::new(RwLock::new(HashMap::new())),
+            seen_idempotency: Arc::new(RwLock::new(HashMap::new())),
+            pending_territory: Arc::new(RwLock::new(HashMap::new())),
+            forward_queue: Arc::new(RwLock::new(VecDeque::new())),
+            metrics: Arc::new(Metrics::default()),
+        });
+
+        if active_reporters > 0 {
+            let mut reporters = state.reporters.write().await;
+            for idx in 0..active_reporters {
+                reporters.insert(
+                    format!("active-reporter-{idx}"),
+                    ReporterRecord {
+                        token_hash: format!("token-hash-{idx}"),
+                        token_expires_at: now + chrono::Duration::hours(1),
+                        revoked: false,
+                        guild_opt_in: false,
+                        field_toggles: ReporterFieldToggles::default(),
+                        last_seen: now,
+                    },
+                );
+            }
+        }
+
+        state
+    }
+
+    fn basic_claim_update() -> CanonicalTerritoryUpdate {
+        CanonicalTerritoryUpdate {
+            territory: "Ragni Plains".to_string(),
+            guild: None,
+            acquired: None,
+            location: None,
+            resources: None,
+            connections: None,
+            runtime: Some(runtime_with_scalar_provenance(
+                "2026-02-28T20:00:00Z",
+                "2026-02-28T19:59:58Z",
+                1,
+            )),
+            idempotency_key: None,
         }
     }
 
@@ -2011,6 +2105,40 @@ mod tests {
         assert!(!quorum_satisfied(2, 1, 2));
         assert!(!quorum_satisfied(1, 2, 2));
         assert!(quorum_satisfied(2, 2, 2));
+    }
+
+    #[tokio::test]
+    async fn degraded_mode_accepts_single_reporter_when_only_one_active() {
+        let state = test_state_with_active_reporters(true, 1).await;
+        let decision = evaluate_territory_claim(
+            &state,
+            "reporter-a",
+            IpAddr::from([203, 0, 113, 10]),
+            basic_claim_update(),
+        )
+        .await;
+
+        let (_accepted, was_degraded, was_quorum) =
+            decision.expect("single active reporter should be accepted in degraded mode");
+        assert!(was_degraded);
+        assert!(!was_quorum);
+    }
+
+    #[tokio::test]
+    async fn single_reporter_requires_quorum_when_degraded_mode_disabled() {
+        let state = test_state_with_active_reporters(false, 1).await;
+        let decision = evaluate_territory_claim(
+            &state,
+            "reporter-a",
+            IpAddr::from([203, 0, 113, 10]),
+            basic_claim_update(),
+        )
+        .await;
+
+        assert!(
+            decision.is_none(),
+            "single reporter should be held pending when degraded mode is disabled"
+        );
     }
 
     #[test]

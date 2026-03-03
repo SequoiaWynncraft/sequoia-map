@@ -684,11 +684,9 @@ public final class ReporterRuntime {
             fingerprintByTerritory.put(update.territory, fingerprint);
             lastSentAtByTerritory.put(update.territory, nowMs);
             update.idempotency_key = UUID.randomUUID().toString();
-            boolean shouldAttachMenuObservation = !menuObservationAttached && menuObservation != null;
-            if (update.runtime != null || shouldAttachMenuObservation) {
-                if (update.runtime == null) {
-                    update.runtime = new GatewayModels.RuntimeData();
-                }
+            boolean shouldAttachMenuObservation =
+                !menuObservationAttached && menuObservation != null && update.runtime != null;
+            if (update.runtime != null) {
                 update.runtime.provenance = GatewayModels.baseProvenance();
                 update.runtime.provenance.put("observed_at", nowIso);
                 if (shouldAttachMenuObservation) {

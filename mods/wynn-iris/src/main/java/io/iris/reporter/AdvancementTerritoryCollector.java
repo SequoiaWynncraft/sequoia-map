@@ -10,6 +10,7 @@ import net.minecraft.client.network.ClientAdvancementManager;
 import net.minecraft.client.network.ClientPlayNetworkHandler;
 import net.minecraft.text.Text;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -19,6 +20,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -360,7 +362,7 @@ public final class AdvancementTerritoryCollector {
 
         if (config.shareOwner && !parsed.guildName.isEmpty() && !parsed.guildPrefix.isEmpty()) {
             Map<String, Object> guild = new HashMap<>();
-            guild.put("uuid", "");
+            guild.put("uuid", deriveStableGuildUuid(parsed.guildName, parsed.guildPrefix));
             guild.put("name", parsed.guildName);
             guild.put("prefix", parsed.guildPrefix);
             update.guild = guild;
@@ -396,6 +398,13 @@ public final class AdvancementTerritoryCollector {
         }
 
         return update;
+    }
+
+    static String deriveStableGuildUuid(String guildName, String guildPrefix) {
+        String normalizedName = normalize(guildName).toLowerCase(Locale.ROOT);
+        String normalizedPrefix = normalize(guildPrefix).toLowerCase(Locale.ROOT);
+        String key = "iris-guild:" + normalizedName + "|" + normalizedPrefix;
+        return UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8)).toString();
     }
 
     private static boolean hasRuntimeData(GatewayModels.RuntimeData runtime) {

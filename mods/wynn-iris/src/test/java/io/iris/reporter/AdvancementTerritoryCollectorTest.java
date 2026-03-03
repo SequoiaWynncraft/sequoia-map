@@ -5,6 +5,8 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class AdvancementTerritoryCollectorTest {
@@ -18,6 +20,17 @@ public class AdvancementTerritoryCollectorTest {
 
         assertTrue(debug.guildName().isEmpty());
         assertTrue(debug.guildPrefix().isEmpty());
+    }
+
+    @Test
+    void stableGuildUuidIsDeterministicAndNonEmpty() {
+        String first = AdvancementTerritoryCollector.deriveStableGuildUuid("Sequoia", "SEQ");
+        String second = AdvancementTerritoryCollector.deriveStableGuildUuid("  sequoia  ", " seq ");
+        String third = AdvancementTerritoryCollector.deriveStableGuildUuid("Aequitas", "AEQ");
+
+        assertFalse(first.isBlank());
+        assertEquals(first, second);
+        assertNotEquals(first, third);
     }
 
     @Test
