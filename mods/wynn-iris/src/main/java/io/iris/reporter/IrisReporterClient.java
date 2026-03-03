@@ -19,6 +19,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.net.URI;
+import java.lang.reflect.Constructor;
 import java.util.Locale;
 
 public final class IrisReporterClient implements ClientModInitializer {
@@ -554,12 +555,19 @@ public final class IrisReporterClient implements ClientModInitializer {
     }
 
     private static Text commandButtonText(String label, String command, String hover) {
+        ClickEvent click = buildRunCommandClickEvent(command);
+        HoverEvent hoverEvent = buildHoverTextEvent(hover);
         return Text.literal(label)
-            .styled(style -> style
-                .withColor(Formatting.GREEN)
-                .withUnderline(true)
-                .withClickEvent(new ClickEvent.RunCommand(command))
-                .withHoverEvent(new HoverEvent.ShowText(Text.literal(hover))));
+            .styled(style -> {
+                style = style.withColor(Formatting.GREEN).withUnderline(true);
+                if (click != null) {
+                    style = style.withClickEvent(click);
+                }
+                if (hoverEvent != null) {
+                    style = style.withHoverEvent(hoverEvent);
+                }
+                return style;
+            });
     }
 
     private static Text linkText(String label, String url, String hover) {
@@ -569,12 +577,109 @@ public final class IrisReporterClient implements ClientModInitializer {
         } catch (IllegalArgumentException e) {
             return Text.literal(label).formatted(Formatting.AQUA);
         }
+        ClickEvent click = buildOpenUrlClickEvent(uri);
+        HoverEvent hoverEvent = buildHoverTextEvent(hover);
         return Text.literal(label)
-            .styled(style -> style
-                .withColor(Formatting.AQUA)
-                .withUnderline(true)
-                .withClickEvent(new ClickEvent.OpenUrl(uri))
-                .withHoverEvent(new HoverEvent.ShowText(Text.literal(hover))));
+            .styled(style -> {
+                style = style.withColor(Formatting.AQUA).withUnderline(true);
+                if (click != null) {
+                    style = style.withClickEvent(click);
+                }
+                if (hoverEvent != null) {
+                    style = style.withHoverEvent(hoverEvent);
+                }
+                return style;
+            });
+    }
+
+    private static ClickEvent buildRunCommandClickEvent(String command) {
+        ClickEvent modern = instantiate(
+            ClickEvent.class,
+            "net.minecraft.text.ClickEvent$RunCommand",
+            new Class<?>[] { String.class },
+            command
+        );
+        if (modern != null) {
+            return modern;
+        }
+        return instantiate(
+            ClickEvent.class,
+            "net.minecraft.text.ClickEvent",
+            new Class<?>[] { ClickEvent.Action.class, String.class },
+            ClickEvent.Action.RUN_COMMAND,
+            command
+        );
+    }
+
+    private static ClickEvent buildOpenUrlClickEvent(URI uri) {
+        ClickEvent modern = instantiate(
+            ClickEvent.class,
+            "net.minecraft.text.ClickEvent$OpenUrl",
+            new Class<?>[] { URI.class },
+            uri
+        );
+        if (modern != null) {
+            return modern;
+        }
+
+        ClickEvent legacyWithString = instantiate(
+            ClickEvent.class,
+            "net.minecraft.text.ClickEvent",
+            new Class<?>[] { ClickEvent.Action.class, String.class },
+            ClickEvent.Action.OPEN_URL,
+            uri.toString()
+        );
+        if (legacyWithString != null) {
+            return legacyWithString;
+        }
+
+        return instantiate(
+            ClickEvent.class,
+            "net.minecraft.text.ClickEvent",
+            new Class<?>[] { ClickEvent.Action.class, URI.class },
+            ClickEvent.Action.OPEN_URL,
+            uri
+        );
+    }
+
+    private static HoverEvent buildHoverTextEvent(String hover) {
+        Text hoverText = Text.literal(hover == null ? "" : hover);
+        HoverEvent modern = instantiate(
+            HoverEvent.class,
+            "net.minecraft.text.HoverEvent$ShowText",
+            new Class<?>[] { Text.class },
+            hoverText
+        );
+        if (modern != null) {
+            return modern;
+        }
+        return instantiate(
+            HoverEvent.class,
+            "net.minecraft.text.HoverEvent",
+            new Class<?>[] { HoverEvent.Action.class, Text.class },
+            HoverEvent.Action.SHOW_TEXT,
+            hoverText
+        );
+    }
+
+    private static <T> T instantiate(
+        Class<T> expectedType,
+        String className,
+        Class<?>[] parameterTypes,
+        Object... args
+    ) {
+        try {
+            Class<?> raw = Class.forName(className);
+            Constructor<?> constructor = raw.getDeclaredConstructor(parameterTypes);
+            constructor.setAccessible(true);
+            Object value = constructor.newInstance(args);
+            if (expectedType.isInstance(value)) {
+                return expectedType.cast(value);
+            }
+            return null;
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
     private static void sendClientMessage(String text) {
