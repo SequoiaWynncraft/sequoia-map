@@ -11,12 +11,12 @@ use crate::app::{
     CurrentMode, DetailReturnGuild, HeatEntriesByTerritory, HeatMaxTakeCount, HeatModeEnabled,
     HeatWindowLabel, HistoryTimestamp, Hovered, IsMobile, LabelScaleDynamic, LabelScaleIcons,
     LabelScaleMaster, LabelScaleStatic, LabelScaleStaticName, MapMode, NameColorSetting,
-    PeekTerritory, ResourceHighlight, Selected, ShowCompoundMapTime, ShowCountdown,
+    PeekTerritory, ReadableFont, ResourceHighlight, Selected, ShowCompoundMapTime, ShowCountdown,
     ShowGranularMapTime, ShowMinimap, ShowNames, ShowResourceIcons, SidebarOpen, SidebarTransient,
-    ThickCooldownBorders, WhiteGuildTags,
+    TagColorSetting, ThickCooldownBorders,
 };
 use crate::gpu::{GpuRenderer, RenderFrameInput};
-use crate::icons::ResourceAtlas;
+use crate::icons::{self, ResourceAtlas};
 use crate::render_loop::RenderScheduler;
 use crate::renderer::{
     FrameMetrics, InvalidationReason, RenderCapabilities, SceneBuilder, SceneSummary,
@@ -144,8 +144,9 @@ pub fn MapCanvas() -> impl IntoView {
     let ConnectionThicknessScale(connection_thickness_scale) = expect_context();
     let ResourceHighlight(resource_highlight) = expect_context();
     let ShowResourceIcons(show_resource_icons) = expect_context();
-    let WhiteGuildTags(white_guild_tags) = expect_context();
+    let ReadableFont(readable_font) = expect_context();
     let NameColorSetting(name_color) = expect_context();
+    let TagColorSetting(tag_color) = expect_context();
     let ShowMinimap(show_minimap_setting) = expect_context();
     let HeatModeEnabled(heat_mode_enabled) = expect_context();
     let HeatEntriesByTerritory(heat_entries_by_territory) = expect_context();
@@ -160,6 +161,7 @@ pub fn MapCanvas() -> impl IntoView {
     let SidebarTransient(sidebar_transient) = expect_context();
 
     let canvas_ref = NodeRef::<leptos::html::Canvas>::new();
+    let icon_atlas_requested = Rc::new(Cell::new(false));
 
     // Input state
     let is_dragging = Rc::new(Cell::new(false));
@@ -249,11 +251,16 @@ pub fn MapCanvas() -> impl IntoView {
             renderer.static_show_names = show_names.get_untracked();
             renderer.static_abbreviate_names = abbreviate_names.get_untracked();
             renderer.static_name_color = name_color.get_untracked();
+            renderer.static_tag_color = tag_color.get_untracked();
             renderer.show_connections = show_connections.get_untracked();
             renderer.bold_connections = bold_connections.get_untracked();
             renderer.connection_opacity_scale = connection_opacity_scale.get_untracked() as f32;
             renderer.connection_thickness_scale = connection_thickness_scale.get_untracked() as f32;
-            renderer.white_guild_tags = white_guild_tags.get_untracked();
+            let new_readable = readable_font.get_untracked();
+            if renderer.use_readable_font != new_readable {
+                renderer.use_readable_font = new_readable;
+                renderer.rebuild_text_renderer();
+            }
             renderer.dynamic_show_countdown = show_countdown.get_untracked();
             renderer.dynamic_show_granular_map_time = show_granular_map_time.get_untracked();
             renderer.dynamic_show_compound_map_time = show_compound_map_time.get_untracked();
@@ -333,6 +340,20 @@ pub fn MapCanvas() -> impl IntoView {
         }
     });
     let scheduler = Rc::new(scheduler);
+
+    // Ensure icon atlas is loaded so HQ crown rendering works even when
+    // resource icons are disabled in settings.
+    Effect::new({
+        let icon_atlas_requested = icon_atlas_requested.clone();
+        move || {
+            let already_loaded = loaded_icons.with(|icons| icons.is_some());
+            if already_loaded || icon_atlas_requested.get() {
+                return;
+            }
+            icon_atlas_requested.set(true);
+            icons::load_resource_atlas(loaded_icons);
+        }
+    });
 
     // Keep hit-test grid and world bounds updated.
     Effect::new({
@@ -420,8 +441,9 @@ pub fn MapCanvas() -> impl IntoView {
             bold_connections.track();
             connection_opacity_scale.track();
             connection_thickness_scale.track();
-            white_guild_tags.track();
+            readable_font.track();
             name_color.track();
+            tag_color.track();
             resource_highlight.track();
             show_resource_icons.track();
             thick_cooldown_borders.track();

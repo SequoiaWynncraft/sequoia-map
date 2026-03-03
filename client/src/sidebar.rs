@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use wasm_bindgen::JsCast;
 
 use sequoia_shared::history::HistoryHeatMeta;
-use sequoia_shared::{Resources, TreasuryLevel, passive_sr_per_5s, passive_sr_per_hour};
+use sequoia_shared::{
+    DataProvenance, Resources, TreasuryLevel, passive_sr_per_5s, passive_sr_per_hour,
+};
 
 use crate::app::{
     AbbreviateNames, AutoSrScalarEnabled, BoldConnections, CONNECTION_OPACITY_SCALE_MAX,
@@ -20,11 +22,11 @@ use crate::app::{
     LABEL_SCALE_MASTER_MAX, LABEL_SCALE_MASTER_MIN, LabelScaleDynamic, LabelScaleIcons,
     LabelScaleMaster, LabelScaleStatic, LabelScaleStaticName, LastLiveSeq, LeaderboardSortBySr,
     LiveHandoffResyncCount, LiveSeasonScalarSample, ManualSrScalar, MapMode, NameColor,
-    NameColorSetting, NeedsLiveResync, PlaybackActive, ResourceHighlight, Selected, SelectedGuild,
-    ShowCompoundMapTime, ShowCountdown, ShowGranularMapTime, ShowLeaderboardOnline,
+    NameColorSetting, NeedsLiveResync, PlaybackActive, ReadableFont, ResourceHighlight, Selected,
+    SelectedGuild, ShowCompoundMapTime, ShowCountdown, ShowGranularMapTime, ShowLeaderboardOnline,
     ShowLeaderboardSrGain, ShowLeaderboardSrValue, ShowLeaderboardTerritoryCount, ShowMinimap,
     ShowNames, ShowResourceIcons, SidebarIndex, SidebarItems, SidebarOpen, SidebarTransient,
-    TerritoryGeometryStore, ThickCooldownBorders, WhiteGuildTags, canvas_dimensions,
+    TagColorSetting, TerritoryGeometryStore, ThickCooldownBorders, canvas_dimensions,
     clamp_connection_opacity_scale, clamp_connection_thickness_scale, clamp_label_scale_group,
     clamp_label_scale_master,
 };
@@ -118,6 +120,39 @@ fn format_relative_time(rfc3339: &str, reference_secs: i64) -> String {
     }
     // Fallback to short date
     dt.format("%b %d, %Y").to_string()
+}
+
+fn format_confidence(confidence: f32) -> String {
+    format!("{:.0}%", (confidence.clamp(0.0, 1.0) * 100.0))
+}
+
+fn format_age_seconds(age_secs: i64) -> String {
+    let secs = age_secs.max(0);
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    if secs < 3600 {
+        let mins = secs / 60;
+        return format!("{mins}m {}s", secs % 60);
+    }
+    let hours = secs / 3600;
+    let mins = (secs % 3600) / 60;
+    format!("{hours}h {mins}m")
+}
+
+fn visibility_label(provenance: &DataProvenance) -> &'static str {
+    match provenance.visibility {
+        sequoia_shared::VisibilityClass::Public => "Public",
+        sequoia_shared::VisibilityClass::GuildOptIn => "Guild Opt-In",
+    }
+}
+
+fn iris_source_display_label(source: &str) -> Option<&'static str> {
+    if source.eq_ignore_ascii_case("iris") || source.eq_ignore_ascii_case("fabric_reporter") {
+        Some("iris")
+    } else {
+        None
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -216,6 +251,113 @@ pub fn Sidebar() -> impl IntoView {
 #[component]
 fn SidebarHeader() -> impl IntoView {
     let IsMobile(is_mobile) = expect_context();
+    let territories: RwSignal<ClientTerritoryMap> = expect_context();
+    let tick: RwSignal<i64> = expect_context();
+
+    #[derive(Clone, PartialEq)]
+    struct IrisBadgeStatus {
+        is_working: bool,
+        status_label: String,
+        status_reason: String,
+        source: String,
+        observed_label: String,
+        age_label: String,
+        reporter_count: u16,
+        visibility: String,
+        confidence: String,
+        tooltip: String,
+    }
+
+    let iris_status = Memo::new(move |_| {
+        let now = tick.get();
+        let map = territories.get();
+        let mut latest_status: Option<(i64, String, String, u16, String, String)> = None;
+
+        for ct in map.values() {
+            let Some(runtime) = ct.territory.runtime.as_ref() else {
+                continue;
+            };
+            let Some(provenance) = runtime.provenance.as_ref() else {
+                continue;
+            };
+            let source = provenance.source.trim();
+            let Some(source_label) = iris_source_display_label(source) else {
+                continue;
+            };
+
+            let observed_ts = chrono::DateTime::parse_from_rfc3339(&provenance.observed_at)
+                .map(|dt| dt.timestamp())
+                .unwrap_or(now);
+            if latest_status
+                .as_ref()
+                .is_none_or(|(prev_ts, _, _, _, _, _)| observed_ts > *prev_ts)
+            {
+                latest_status = Some((
+                    observed_ts,
+                    source_label.to_string(),
+                    provenance.observed_at.clone(),
+                    provenance.reporter_count,
+                    visibility_label(provenance).to_string(),
+                    format_confidence(provenance.confidence),
+                ));
+            }
+        }
+
+        match latest_status {
+            Some((observed_ts, source, observed_at, reporter_count, visibility, confidence)) => {
+                let age_secs = (now - observed_ts).max(0);
+                let is_active = age_secs <= 120;
+                let is_working = is_active && reporter_count > 0;
+                let status_label = if is_working {
+                    "Working".to_string()
+                } else {
+                    "Not Working".to_string()
+                };
+                let observed_label = format_relative_time(&observed_at, now);
+                let age_label = format_age_seconds(age_secs);
+                let status_reason = if is_working {
+                    "recent Iris telemetry is arriving".to_string()
+                } else if !is_active {
+                    format!("latest Iris telemetry is stale ({age_label} old)")
+                } else {
+                    "no active Iris reporters".to_string()
+                };
+                IrisBadgeStatus {
+                    is_working,
+                    status_label: status_label.clone(),
+                    status_reason: status_reason.clone(),
+                    source: source.clone(),
+                    observed_label: observed_label.clone(),
+                    age_label: age_label.clone(),
+                    reporter_count,
+                    visibility: visibility.clone(),
+                    confidence: confidence.clone(),
+                    tooltip: format!(
+                        "Iris: {status_label}\nReason: {status_reason}\nSource: {source}\nObserved: {observed_label}\nAge: {age_label}\nReporters: {reporter_count}\nVisibility: {visibility}\nConfidence: {confidence}\nFreshness window: 120s"
+                    ),
+                }
+            }
+            None => {
+                let status_label = "Not Working".to_string();
+                let status_reason = "no Iris telemetry received yet".to_string();
+                IrisBadgeStatus {
+                    is_working: false,
+                    status_label: status_label.clone(),
+                    status_reason: status_reason.clone(),
+                    source: "none".to_string(),
+                    observed_label: "no observations yet".to_string(),
+                    age_label: "n/a".to_string(),
+                    reporter_count: 0,
+                    visibility: "n/a".to_string(),
+                    confidence: "n/a".to_string(),
+                    tooltip: format!(
+                        "Iris: {status_label}\nReason: {status_reason}\nSource: none\nObserved: no observations yet"
+                    ),
+                }
+            }
+        }
+    });
+    let iris_tooltip_visible = RwSignal::new(false);
 
     let padding = move || {
         if is_mobile.get() {
@@ -234,12 +376,96 @@ fn SidebarHeader() -> impl IntoView {
 
     view! {
         <div style=padding>
-            <div style="display: flex; align-items: baseline; gap: 10px;">
-                <div class="text-gold-gradient" style="font-family: 'Silkscreen', monospace; font-size: 1.25rem; font-weight: 700; letter-spacing: 0.18em; text-transform: uppercase; text-shadow: 0 0 16px rgba(245,197,66,0.08);">"SEQUOIA"</div>
-                <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.58rem; color: #3a3f5c; background: #1a1d2a; padding: 1px 6px; border-radius: 3px; border: 1px solid rgba(245,197,66,0.15); letter-spacing: 0.04em;">"v0.1"</div>
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;">
+                <div style="display: flex; align-items: baseline; gap: 10px; min-width: 0;">
+                    <div class="text-gold-gradient" style="font-family: 'Silkscreen', monospace; font-size: 1.35rem; font-weight: 700; letter-spacing: 0.18em; text-transform: uppercase; text-shadow: 0 0 16px rgba(245,197,66,0.08);">"SEQUOIA"</div>
+                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.673rem; color: #3a3f5c; background: #1a1d2a; padding: 1px 6px; border-radius: 3px; border: 1px solid rgba(245,197,66,0.15); letter-spacing: 0.04em;">"v0.1"</div>
+                </div>
+                <div style="position: relative; flex-shrink: 0;">
+                    <div
+                        style=move || {
+                            let status = iris_status.get();
+                            let (border, bg, fg) = if status.is_working {
+                                (
+                                    "rgba(var(--accent-live-rgb),0.42)",
+                                    "rgba(28, 42, 72, 0.65)",
+                                    "var(--accent-live)",
+                                )
+                            } else {
+                                (
+                                    "rgba(154,149,144,0.36)",
+                                    "rgba(32, 35, 48, 0.62)",
+                                    "#9a9590",
+                                )
+                            };
+                            format!(
+                                "display: inline-flex; align-items: center; gap: 6px; font-family: 'Silkscreen', monospace; font-size: 0.66rem; letter-spacing: 0.08em; padding: 3px 7px; border-radius: 999px; border: 1px solid {border}; background: {bg}; color: {fg}; cursor: help;"
+                            )
+                        }
+                        aria-label=move || iris_status.get().tooltip
+                        on:mouseenter=move |_| iris_tooltip_visible.set(true)
+                        on:mouseleave=move |_| iris_tooltip_visible.set(false)
+                    >
+                        <span style=move || {
+                            let status = iris_status.get();
+                            let (dot_bg, dot_glow) = if status.is_working {
+                                ("var(--accent-live)", "0 0 6px var(--accent-live)")
+                            } else {
+                                ("#9a9590", "none")
+                            };
+                            format!(
+                                "width: 7px; height: 7px; border-radius: 50%; background: {dot_bg}; box-shadow: {dot_glow};"
+                            )
+                        } />
+                        <span>"Iris"</span>
+                    </div>
+                    <div
+                        style=move || {
+                            let status = iris_status.get();
+                            let border = if status.is_working {
+                                "rgba(var(--accent-live-rgb),0.42)"
+                            } else {
+                                "rgba(154,149,144,0.45)"
+                            };
+                            let display = if iris_tooltip_visible.get() {
+                                "block"
+                            } else {
+                                "none"
+                            };
+                            format!(
+                                "position: absolute; top: calc(100% + 8px); right: 0; min-width: 245px; max-width: 310px; border-radius: 8px; border: 1px solid {border}; background: rgba(15, 18, 30, 0.97); box-shadow: 0 10px 28px rgba(0,0,0,0.35); padding: 9px 10px; z-index: 20; pointer-events: none; display: {display};"
+                            )
+                        }
+                    >
+                        <div style=move || {
+                            let color = if iris_status.get().is_working {
+                                "var(--accent-live)"
+                            } else {
+                                "#d5d2ce"
+                            };
+                            format!(
+                                "font-family: 'Silkscreen', monospace; font-size: 0.62rem; letter-spacing: 0.09em; text-transform: uppercase; color: {color};"
+                            )
+                        }>
+                            {move || format!("Iris {}", iris_status.get().status_label)}
+                        </div>
+                        <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.67rem; color: #c5c2bc; margin-top: 4px;">
+                            {move || iris_status.get().status_reason}
+                        </div>
+                        <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.645rem; color: #9a9590; margin-top: 8px; line-height: 1.45;">
+                            <div>{move || format!("Observed: {}", iris_status.get().observed_label)}</div>
+                            <div>{move || format!("Age: {}", iris_status.get().age_label)}</div>
+                            <div>{move || format!("Source: {}", iris_status.get().source)}</div>
+                            <div>{move || format!("Reporters: {}", iris_status.get().reporter_count)}</div>
+                            <div>{move || format!("Visibility: {}", iris_status.get().visibility)}</div>
+                            <div>{move || format!("Confidence: {}", iris_status.get().confidence)}</div>
+                            <div>"Freshness window: 120s"</div>
+                        </div>
+                    </div>
+                </div>
             </div>
             <div
-                style="font-family: 'Inter', system-ui, sans-serif; font-size: 0.72rem; color: #5a5860; margin-top: 3px; letter-spacing: 0.08em;"
+                style="font-family: 'Inter', system-ui, sans-serif; font-size: 0.835rem; color: #5a5860; margin-top: 3px; letter-spacing: 0.08em;"
                 style:display=move || if is_mobile.get() { "none" } else { "block" }
             >"Wynncraft Territories"</div>
             // Gradient line divider
@@ -283,7 +509,7 @@ fn SearchBar() -> impl IntoView {
                 <input
                     data-search-input=""
                     class="focus-ring"
-                    style="width: 100%; padding: 10px 14px 10px 34px; background: #1a1d2a; border: 1px solid #282c3e; border-radius: 6px; color: #e2e0d8; font-family: 'Inter', system-ui, sans-serif; font-size: 0.9rem; outline: none; transition: border-color 0.2s ease, box-shadow 0.3s ease;"
+                    style="width: 100%; padding: 10px 14px 10px 34px; background: #1a1d2a; border: 1px solid #282c3e; border-radius: 6px; color: #e2e0d8; font-family: 'Inter', system-ui, sans-serif; font-size: 1.044rem; outline: none; transition: border-color 0.2s ease, box-shadow 0.3s ease;"
                     type="text"
                     placeholder="Search territories or guilds..."
                     prop:value=move || search_query.get()
@@ -303,7 +529,7 @@ fn SearchBar() -> impl IntoView {
                 />
                 // Keyboard hint — hidden on mobile (irrelevant on touch)
                 <div
-                    style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); font-family: 'JetBrains Mono', monospace; font-size: 0.62rem; color: #3a3f5c; background: #13161f; padding: 1px 5px; border-radius: 3px; border: 1px solid #282c3e; pointer-events: none;"
+                    style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); font-family: 'JetBrains Mono', monospace; font-size: 0.719rem; color: #3a3f5c; background: #13161f; padding: 1px 5px; border-radius: 3px; border: 1px solid #282c3e; pointer-events: none;"
                     style:display=move || if is_mobile.get() { "none" } else { "block" }
                 >"/"</div>
             </div>
@@ -340,8 +566,9 @@ fn SettingsPanel() -> impl IntoView {
     let HeatFallbackApplied(heat_fallback_applied) = expect_context();
     let HeatWindowLabel(heat_window_label) = expect_context();
     let CurrentMode(mode) = expect_context();
-    let WhiteGuildTags(white_guild_tags) = expect_context();
+    let ReadableFont(readable_font) = expect_context();
     let NameColorSetting(name_color) = expect_context();
+    let TagColorSetting(tag_color) = expect_context();
     let ShowMinimap(show_minimap) = expect_context();
     let LabelScaleMaster(label_scale_master) = expect_context();
     let LabelScaleStatic(label_scale_static_tag) = expect_context();
@@ -352,15 +579,16 @@ fn SettingsPanel() -> impl IntoView {
 
     view! {
         <div style="border-bottom: 1px solid #282c3e;">
-            <div style="padding: 14px 24px 8px; font-family: 'Silkscreen', monospace; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.14em; color: #5a5860;">
-                <span style="color: #f5c542; margin-right: 6px; font-size: 0.7rem;">{"\u{2699}"}</span>"Settings"
+            <div style="padding: 14px 24px 8px; font-family: 'Silkscreen', monospace; font-size: 0.986rem; text-transform: uppercase; letter-spacing: 0.14em; color: #5a5860;">
+                <span style="color: #f5c542; margin-right: 6px; font-size: 0.812rem;">{"\u{2699}"}</span>"Settings"
             </div>
             <div style="padding: 0 12px 12px;">
                 <SettingsSectionHeader title="Labels" />
                 <SettingsToggleRow label="Territory Names" shortcut="N" active=show_names />
                 <SettingsToggleRow label="Abbreviate Names" shortcut="A" active=abbreviate_names />
-                <SettingsToggleRow label="White Guild Tags" shortcut="" active=white_guild_tags />
+                <SettingsToggleRow label="Readable Font" shortcut="F" active=readable_font />
                 <SettingsNameColorRow color=name_color />
+                <SettingsNameColorRow color=tag_color label="Tag Color" />
 
                 <SettingsSectionHeader title="Label Scale" />
                 <SettingsScaleRow
@@ -445,8 +673,8 @@ fn SettingsPanel() -> impl IntoView {
                 <SettingsToggleRow label="Minimap" shortcut="M" active=show_minimap />
                 <SettingsToggleRow label="Heat Map" shortcut="" active=heat_mode_enabled />
                 <div style="display: flex; align-items: center; justify-content: space-between; padding: 9px 10px;">
-                    <span style="font-size: 0.88rem; color: #e2e0d8; font-family: 'Inter', system-ui, sans-serif;">"Territories"</span>
-                    <span style="font-size: 0.74rem; color: #9a9590; font-family: 'JetBrains Mono', monospace;">
+                    <span style="font-size: 1.021rem; color: #e2e0d8; font-family: 'Inter', system-ui, sans-serif;">"Territories"</span>
+                    <span style="font-size: 0.858rem; color: #9a9590; font-family: 'JetBrains Mono', monospace;">
                         {move || territory_count.get()}
                     </span>
                 </div>
@@ -467,11 +695,11 @@ fn SettingsPanel() -> impl IntoView {
                             <SettingsHeatSeasonRow season_id=heat_selected_season_id meta=heat_meta />
                         </Show>
                         <Show when=move || heat_fallback_applied.get()>
-                            <div style="font-size: 0.66rem; color: #f5c542; font-family: 'JetBrains Mono', monospace; margin-top: 6px;">
+                            <div style="font-size: 0.766rem; color: #f5c542; font-family: 'JetBrains Mono', monospace; margin-top: 6px;">
                                 "Season data unavailable, using last 60d fallback."
                             </div>
                         </Show>
-                        <div style="font-size: 0.62rem; color: #6f748f; font-family: 'JetBrains Mono', monospace; margin-top: 5px;">
+                        <div style="font-size: 0.719rem; color: #6f748f; font-family: 'JetBrains Mono', monospace; margin-top: 5px;">
                             {move || heat_window_label.get()}
                         </div>
                     </div>
@@ -500,10 +728,13 @@ const NAME_COLOR_OPTIONS: &[(NameColor, &str, &str)] = &[
 ];
 
 #[component]
-fn SettingsNameColorRow(color: RwSignal<NameColor>) -> impl IntoView {
+fn SettingsNameColorRow(
+    color: RwSignal<NameColor>,
+    #[prop(default = "Name Color")] label: &'static str,
+) -> impl IntoView {
     view! {
         <div style="display: flex; align-items: center; justify-content: space-between; padding: 9px 10px;">
-            <span style="font-size: 0.88rem; color: #e2e0d8; font-family: 'Inter', system-ui, sans-serif;">"Name Color"</span>
+            <span style="font-size: 1.021rem; color: #e2e0d8; font-family: 'Inter', system-ui, sans-serif;">{label}</span>
             <div style="display: flex; gap: 6px; align-items: center;">
                 {NAME_COLOR_OPTIONS.iter().map(|&(variant, label, css_color)| {
                     let on_click = move |_| color.set(variant);
@@ -532,7 +763,7 @@ fn SettingsNameColorRow(color: RwSignal<NameColor>) -> impl IntoView {
 fn SettingsSectionHeader(title: &'static str) -> impl IntoView {
     view! {
         <div
-            style="padding: 10px 10px 5px; margin-top: 4px; font-family: 'JetBrains Mono', monospace; font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.12em; color: #5a5860;"
+            style="padding: 10px 10px 5px; margin-top: 4px; font-family: 'JetBrains Mono', monospace; font-size: 0.719rem; text-transform: uppercase; letter-spacing: 0.12em; color: #5a5860;"
         >
             {title}
         </div>
@@ -557,7 +788,7 @@ fn SettingsScalarRow(scalar: RwSignal<f64>) -> impl IntoView {
         <div
             style="display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 10px; border-radius: 4px;"
         >
-            <span style="font-size: 0.88rem; color: #e2e0d8; font-family: 'Inter', system-ui, sans-serif;">
+            <span style="font-size: 1.021rem; color: #e2e0d8; font-family: 'Inter', system-ui, sans-serif;">
                 "Manual Scalar"
             </span>
             <input
@@ -567,7 +798,7 @@ fn SettingsScalarRow(scalar: RwSignal<f64>) -> impl IntoView {
                 step="0.05"
                 prop:value=move || format!("{:.2}", scalar.get())
                 on:input=on_input
-                style="width: 90px; background: #1a1d2a; border: 1px solid #282c3e; border-radius: 4px; color: #e2e0d8; font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; padding: 4px 6px; outline: none;"
+                style="width: 90px; background: #1a1d2a; border: 1px solid #282c3e; border-radius: 4px; color: #e2e0d8; font-family: 'JetBrains Mono', monospace; font-size: 0.835rem; padding: 4px 6px; outline: none;"
             />
         </div>
     }
@@ -630,7 +861,7 @@ fn SettingsScaleRow(
 
     view! {
         <div style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 4px;">
-            <span style="min-width: 124px; font-size: 0.82rem; color: #e2e0d8; font-family: 'Inter', system-ui, sans-serif;">
+            <span style="min-width: 124px; font-size: 0.951rem; color: #e2e0d8; font-family: 'Inter', system-ui, sans-serif;">
                 {label}
             </span>
             <input
@@ -646,7 +877,7 @@ fn SettingsScaleRow(
                 style="flex: 1; margin: 0; accent-color: #f5c542;"
             />
             <span
-                style="width: 42px; text-align: right; font-family: 'JetBrains Mono', monospace; font-size: 0.66rem; color: #9a9590;"
+                style="width: 42px; text-align: right; font-family: 'JetBrains Mono', monospace; font-size: 0.766rem; color: #9a9590;"
             >
                 {move || format!("{:.2}", value.get())}
             </span>
@@ -674,7 +905,7 @@ fn SettingsScaleResetRow(
         <div style="display: flex; justify-content: flex-end; padding: 2px 10px 6px;">
             <button
                 on:click=on_reset
-                style="background: #1a1d2a; border: 1px solid #282c3e; border-radius: 4px; color: #9a9590; font-family: 'JetBrains Mono', monospace; font-size: 0.62rem; padding: 3px 8px; cursor: pointer;"
+                style="background: #1a1d2a; border: 1px solid #282c3e; border-radius: 4px; color: #9a9590; font-family: 'JetBrains Mono', monospace; font-size: 0.719rem; padding: 3px 8px; cursor: pointer;"
             >
                 "Reset"
             </button>
@@ -696,7 +927,7 @@ fn SettingsConnectionScaleResetRow(
         <div style="display: flex; justify-content: flex-end; padding: 2px 10px 6px;">
             <button
                 on:click=on_reset
-                style="background: #1a1d2a; border: 1px solid #282c3e; border-radius: 4px; color: #9a9590; font-family: 'JetBrains Mono', monospace; font-size: 0.62rem; padding: 3px 8px; cursor: pointer;"
+                style="background: #1a1d2a; border: 1px solid #282c3e; border-radius: 4px; color: #9a9590; font-family: 'JetBrains Mono', monospace; font-size: 0.719rem; padding: 3px 8px; cursor: pointer;"
             >
                 "Reset"
             </button>
@@ -730,9 +961,9 @@ fn SettingsToggleRow(
             }
         >
             <div style="display: flex; align-items: center; gap: 8px;">
-                <span style="font-size: 0.88rem; color: #e2e0d8; font-family: 'Inter', system-ui, sans-serif;">{label}</span>
+                <span style="font-size: 1.021rem; color: #e2e0d8; font-family: 'Inter', system-ui, sans-serif;">{label}</span>
                 {(!shortcut.is_empty()).then(|| view! {
-                    <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.58rem; color: #3a3f5c; background: #1a1d2a; padding: 1px 5px; border-radius: 3px; border: 1px solid #282c3e;">{shortcut}</span>
+                    <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.673rem; color: #3a3f5c; background: #1a1d2a; padding: 1px 5px; border-radius: 3px; border: 1px solid #282c3e;">{shortcut}</span>
                 })}
             </div>
             <span style=move || {
@@ -755,7 +986,7 @@ fn SettingsHeatSourceRow(
     let is_history = move || mode.get() == MapMode::History;
     view! {
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-top: 6px;">
-            <span style="font-size: 0.8rem; color: #9a9590; font-family: 'Inter', system-ui, sans-serif;">
+            <span style="font-size: 0.928rem; color: #9a9590; font-family: 'Inter', system-ui, sans-serif;">
                 {move || if is_history() { "History Basis" } else { "Live Source" }}
             </span>
             <div style="display: inline-flex; background: #1a1d2a; border: 1px solid #282c3e; border-radius: 4px; overflow: hidden;">
@@ -767,7 +998,7 @@ fn SettingsHeatSourceRow(
                             live_source.get() == HeatLiveSource::Season
                         };
                         format!(
-                            "padding: 4px 8px; border: none; background: {}; color: {}; font-family: 'JetBrains Mono', monospace; font-size: 0.66rem; cursor: pointer;",
+                            "padding: 4px 8px; border: none; background: {}; color: {}; font-family: 'JetBrains Mono', monospace; font-size: 0.766rem; cursor: pointer;",
                             if active { "rgba(245,197,66,0.12)" } else { "transparent" },
                             if active { "#f5c542" } else { "#7c829e" },
                         )
@@ -790,7 +1021,7 @@ fn SettingsHeatSourceRow(
                             live_source.get() == HeatLiveSource::AllTime
                         };
                         format!(
-                            "padding: 4px 8px; border: none; border-left: 1px solid #282c3e; background: {}; color: {}; font-family: 'JetBrains Mono', monospace; font-size: 0.66rem; cursor: pointer;",
+                            "padding: 4px 8px; border: none; border-left: 1px solid #282c3e; background: {}; color: {}; font-family: 'JetBrains Mono', monospace; font-size: 0.766rem; cursor: pointer;",
                             if active { "rgba(245,197,66,0.12)" } else { "transparent" },
                             if active { "#f5c542" } else { "#7c829e" },
                         )
@@ -832,10 +1063,10 @@ fn SettingsHeatSeasonRow(
 
     view! {
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px;">
-            <span style="font-size: 0.8rem; color: #9a9590; font-family: 'Inter', system-ui, sans-serif;">"Season"</span>
+            <span style="font-size: 0.928rem; color: #9a9590; font-family: 'Inter', system-ui, sans-serif;">"Season"</span>
             <select
                 on:change=on_change
-                style="min-width: 120px; background: #1a1d2a; border: 1px solid #282c3e; border-radius: 4px; color: #e2e0d8; font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; padding: 4px 6px; outline: none;"
+                style="min-width: 120px; background: #1a1d2a; border: 1px solid #282c3e; border-radius: 4px; color: #e2e0d8; font-family: 'JetBrains Mono', monospace; font-size: 0.812rem; padding: 4px 6px; outline: none;"
             >
                 <option
                     value="latest"
@@ -924,8 +1155,8 @@ fn SearchResults() -> impl IntoView {
     view! {
         <div style="border-bottom: 1px solid #282c3e;">
             <div style="padding: 14px 24px 8px; display: flex; align-items: baseline; justify-content: space-between;">
-                <span style="font-family: 'Silkscreen', monospace; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.14em; color: #5a5860;">"Search Results"</span>
-                <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.65rem; color: #3a3f5c;">{move || format!("{} found", result_count.get())}</span>
+                <span style="font-family: 'Silkscreen', monospace; font-size: 0.986rem; text-transform: uppercase; letter-spacing: 0.14em; color: #5a5860;">"Search Results"</span>
+                <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.754rem; color: #3a3f5c;">{move || format!("{} found", result_count.get())}</span>
             </div>
             <div style="padding: 0 12px 12px;">
                 <For
@@ -975,8 +1206,8 @@ fn SearchResults() -> impl IntoView {
                             >
                                 <div style={format!("width: 14px; height: 14px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.1); flex-shrink: 0; box-shadow: inset 1px 1px 0 rgba(255,255,255,0.06), inset -1px -1px 0 rgba(0,0,0,0.3); background: {};", rgba_css(r, g, b, 0.8))} />
                                 <div style="flex: 1; min-width: 0;">
-                                    <div style="font-size: 0.88rem; color: #e2e0d8; font-family: 'Inter', system-ui, sans-serif; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{name}</div>
-                                    <div style="font-size: 0.75rem; color: #9a9590; font-family: 'JetBrains Mono', monospace;">{guild}</div>
+                                    <div style="font-size: 1.021rem; color: #e2e0d8; font-family: 'Inter', system-ui, sans-serif; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{name}</div>
+                                    <div style="font-size: 0.87rem; color: #9a9590; font-family: 'JetBrains Mono', monospace;">{guild}</div>
                                 </div>
                             </div>
                         }
@@ -1136,15 +1367,15 @@ fn LeaderboardPanel() -> impl IntoView {
     view! {
         <div style="border-bottom: 1px solid #282c3e;">
             <div style="display: flex; align-items: center; justify-content: space-between; padding: 14px 24px 8px;">
-                <div style="font-family: 'Silkscreen', monospace; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.14em; color: #5a5860;">
-                    <span style="color: #f5c542; margin-right: 6px; font-size: 0.7rem;">{"\u{25C6}"}</span>"Top Guilds"
+                <div style="font-family: 'Silkscreen', monospace; font-size: 0.986rem; text-transform: uppercase; letter-spacing: 0.14em; color: #5a5860;">
+                    <span style="color: #f5c542; margin-right: 6px; font-size: 0.812rem;">{"\u{25C6}"}</span>"Top Guilds"
                 </div>
                 <div style="display: flex; gap: 4px;">
                     <span
                         style=move || {
                             let active = !sort_by_sr.get();
                             format!(
-                                "font-family: 'JetBrains Mono', monospace; font-size: 0.65rem; padding: 2px 8px; border-radius: 3px; cursor: pointer; transition: color 0.15s, background 0.15s; {}",
+                                "font-family: 'JetBrains Mono', monospace; font-size: 0.754rem; padding: 2px 8px; border-radius: 3px; cursor: pointer; transition: color 0.15s, background 0.15s; {}",
                                 if active {
                                     "color: #f5c542; background: rgba(245,197,66,0.1);"
                                 } else {
@@ -1158,9 +1389,9 @@ fn LeaderboardPanel() -> impl IntoView {
                         style=move || {
                             let active = sort_by_sr.get();
                             format!(
-                                "font-family: 'JetBrains Mono', monospace; font-size: 0.65rem; padding: 2px 8px; border-radius: 3px; cursor: pointer; transition: color 0.15s, background 0.15s; {}",
+                                "font-family: 'JetBrains Mono', monospace; font-size: 0.754rem; padding: 2px 8px; border-radius: 3px; cursor: pointer; transition: color 0.15s, background 0.15s; {}",
                                 if active {
-                                    "color: #6ab6ff; background: rgba(106,182,255,0.1);"
+                                    "color: var(--accent-live); background: rgba(var(--accent-live-rgb),0.1);"
                                 } else {
                                     "color: #3a3f5c; background: transparent;"
                                 }
@@ -1174,7 +1405,7 @@ fn LeaderboardPanel() -> impl IntoView {
                 when=move || !is_empty.get()
                 fallback=|| view! {
                     <div style="padding: 24px; text-align: center;">
-                        <div class="status-pulse" style="font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; color: #3a3f5c; letter-spacing: 0.05em;">"Awaiting territory data..."</div>
+                        <div class="status-pulse" style="font-family: 'JetBrains Mono', monospace; font-size: 0.905rem; color: #3a3f5c; letter-spacing: 0.05em;">"Awaiting territory data..."</div>
                         <div style="margin-top: 12px; display: flex; justify-content: center; gap: 4px;">
                             <div style="width: 4px; height: 4px; border-radius: 50%; background: #f5c542; opacity: 0.3; animation: pulse-dot 1.5s ease-in-out infinite;" />
                             <div style="width: 4px; height: 4px; border-radius: 50%; background: #f5c542; opacity: 0.3; animation: pulse-dot 1.5s ease-in-out 0.3s infinite;" />
@@ -1229,9 +1460,9 @@ fn LeaderboardPanel() -> impl IntoView {
                             _ => "",
                         };
                         let rank_style = if display_rank > 3 {
-                            "font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: #4a4e6a; width: 26px; text-align: right; flex-shrink: 0;"
+                            "font-family: 'JetBrains Mono', monospace; font-size: 0.87rem; color: #4a4e6a; width: 26px; text-align: right; flex-shrink: 0;"
                         } else {
-                            "font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; font-weight: 700; width: 26px; text-align: right; flex-shrink: 0;"
+                            "font-family: 'JetBrains Mono', monospace; font-size: 0.87rem; font-weight: 700; width: 26px; text-align: right; flex-shrink: 0;"
                         };
                         let row_style = if mode.get_untracked() == MapMode::History {
                             "display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 4px; cursor: pointer; transition: background 0.15s, box-shadow 0.15s;".to_string()
@@ -1272,23 +1503,23 @@ fn LeaderboardPanel() -> impl IntoView {
                                 {is_podium.then(|| view! { <div style=color_bar_style.clone() /> })}
                                 <span class=rank_class style=rank_style>{display_rank}</span>
                                 <div style={format!("width: 16px; height: 16px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.1); flex-shrink: 0; box-shadow: 0 0 4px {}, inset 1px 1px 0 rgba(255,255,255,0.06), inset -1px -1px 0 rgba(0,0,0,0.3); background: {};", rgba_css(r, g, b, 0.15), rgba_css(r, g, b, 0.8))} />
-                                <span style="flex: 1; font-size: 0.9rem; color: #e2e0d8; font-family: 'Inter', system-ui, sans-serif; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{name}</span>
-                                <span style="font-size: 0.7rem; color: #9a9590; font-family: 'JetBrains Mono', monospace;">"[" {prefix} "]"</span>
+                                <span style="flex: 1; font-size: 1.044rem; color: #e2e0d8; font-family: 'Inter', system-ui, sans-serif; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{name}</span>
+                                <span style="font-size: 0.812rem; color: #9a9590; font-family: 'JetBrains Mono', monospace;">"[" {prefix} "]"</span>
                                 {move || show_leaderboard_sr_gain.get().then(|| view! {
-                                    <span style="font-size: 0.66rem; color: #6ab6ff; font-family: 'JetBrains Mono', monospace; background: rgba(106,182,255,0.09); border: 1px solid rgba(106,182,255,0.2); padding: 1px 5px; border-radius: 3px; min-width: 58px; text-align: center;">
+                                    <span style="font-size: 0.766rem; color: var(--accent-live); font-family: 'JetBrains Mono', monospace; background: rgba(var(--accent-live-rgb),0.09); border: 1px solid rgba(var(--accent-live-rgb),0.2); padding: 1px 5px; border-radius: 3px; min-width: 58px; text-align: center;">
                                         {sr_badge.clone()}
                                     </span>
                                 })}
                                 {move || {
                                     let show_sr = sort_by_sr.get() || show_leaderboard_sr_value.get();
                                     show_sr.then(|| sr_display.clone().map(|sr| view! {
-                                        <span style="font-size: 0.66rem; color: #6ab6ff; font-family: 'JetBrains Mono', monospace; background: rgba(106,182,255,0.06); padding: 1px 5px; border-radius: 3px; min-width: 40px; text-align: center;">
+                                        <span style="font-size: 0.766rem; color: var(--accent-live); font-family: 'JetBrains Mono', monospace; background: rgba(var(--accent-live-rgb),0.06); padding: 1px 5px; border-radius: 3px; min-width: 40px; text-align: center;">
                                             {sr}
                                         </span>
                                     }))
                                 }}
                                 {move || show_leaderboard_territory_count.get().then(|| view! {
-                                    <span style="font-size: 0.82rem; color: #f5c542; font-family: 'JetBrains Mono', monospace; min-width: 24px; text-align: right; font-weight: 500; background: rgba(245,197,66,0.06); padding: 1px 6px; border-radius: 3px;">{count}</span>
+                                    <span style="font-size: 0.951rem; color: #f5c542; font-family: 'JetBrains Mono', monospace; min-width: 24px; text-align: right; font-weight: 500; background: rgba(245,197,66,0.06); padding: 1px 6px; border-radius: 3px;">{count}</span>
                                 })}
                                 {move || {
                                     if !show_leaderboard_online.get() {
@@ -1296,8 +1527,8 @@ fn LeaderboardPanel() -> impl IntoView {
                                     }
                                     let data = guild_online_data.get();
                                     data.get(&name_for_online).map(|info| view! {
-                                        <span style="font-size: 0.66rem; color: #50c878; font-family: 'JetBrains Mono', monospace; background: rgba(80,200,120,0.06); padding: 1px 5px; border-radius: 3px; min-width: 28px; text-align: center; display: inline-flex; align-items: center; gap: 3px;">
-                                            <span style="font-size: 0.45rem; line-height: 1;">{"\u{25CF}"}</span>
+                                        <span style="font-size: 0.766rem; color: #50c878; font-family: 'JetBrains Mono', monospace; background: rgba(80,200,120,0.06); padding: 1px 5px; border-radius: 3px; min-width: 28px; text-align: center; display: inline-flex; align-items: center; gap: 3px;">
+                                            <span style="font-size: 0.522rem; line-height: 1;">{"\u{25CF}"}</span>
                                             {info.online}
                                         </span>
                                     })
@@ -1504,7 +1735,7 @@ fn GuildPanel() -> impl IntoView {
                             view! { <div style=swatch /> }
                         })
                     }}
-                    <span style="font-family: 'Silkscreen', monospace; font-size: 1.1rem; color: #e2e0d8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                    <span style="font-family: 'Silkscreen', monospace; font-size: 1.188rem; color: #e2e0d8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
                         {move || selected_guild.get().unwrap_or_default()}
                     </span>
                 </div>
@@ -1515,7 +1746,7 @@ fn GuildPanel() -> impl IntoView {
                         let prefix = json.get("prefix").and_then(|v| v.as_str()).unwrap_or("").to_string();
                         let level = json.get("level").and_then(|v| v.as_u64()).unwrap_or(0);
                         view! {
-                            <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; color: #9a9590; margin-bottom: 10px;">
+                            <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.905rem; color: #9a9590; margin-bottom: 10px;">
                                 "[" {prefix} "]" " \u{00b7} Lv. " {level}
                             </div>
                         }
@@ -1528,11 +1759,11 @@ fn GuildPanel() -> impl IntoView {
                         let online = json.get("online").and_then(|v| v.as_u64()).unwrap_or(0);
                         view! {
                             <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 14px;">
-                                <span style="font-size: 0.55rem; color: #50c878; line-height: 1;">{"\u{25CF}"}</span>
-                                <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.95rem; color: #50c878; font-weight: 600;">
+                                <span style="font-size: 0.638rem; color: #50c878; line-height: 1;">{"\u{25CF}"}</span>
+                                <span style="font-family: 'JetBrains Mono', monospace; font-size: 1.102rem; color: #50c878; font-weight: 600;">
                                     {online}
                                 </span>
-                                <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: #50c878; opacity: 0.7;">
+                                <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.87rem; color: #50c878; opacity: 0.7;">
                                     "online"
                                 </span>
                             </div>
@@ -1544,7 +1775,7 @@ fn GuildPanel() -> impl IntoView {
                 {move || {
                     guild_loading.get().then(|| view! {
                         <div style="padding: 8px 0; text-align: center;">
-                            <span class="status-pulse" style="font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; color: #3a3f5c; letter-spacing: 0.05em;">"Loading guild data..."</span>
+                            <span class="status-pulse" style="font-family: 'JetBrains Mono', monospace; font-size: 0.905rem; color: #3a3f5c; letter-spacing: 0.05em;">"Loading guild data..."</span>
                         </div>
                     })
                 }}
@@ -1579,28 +1810,28 @@ fn GuildPanel() -> impl IntoView {
 
                         view! {
                             <div style="display: flex; flex-direction: column; gap: 5px; margin-bottom: 14px; border-top: 1px solid #282c3e; padding-top: 12px;">
-                                <div style="display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;">
+                                <div style="display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 0.905rem;">
                                     <span style="color: #5a5860;">"Territories"</span>
                                     <span style="color: #f5c542;">{territories_count}</span>
                                 </div>
-                                <div style="display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;">
+                                <div style="display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 0.905rem;">
                                     <span style="color: #5a5860;">"Members"</span>
                                     <span style="color: #e2e0d8;">{members}</span>
                                 </div>
-                                <div style="display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;">
+                                <div style="display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 0.905rem;">
                                     <span style="color: #5a5860;">"Wars"</span>
                                     <span style="color: #e2e0d8;">{wars}</span>
                                 </div>
                                 {season_rating.map(|(season_id, rating)| {
                                     let sr_text = format!("S{}: {}", season_id, format_sr_value(rating));
                                     view! {
-                                        <div style="display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;">
+                                        <div style="display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 0.905rem;">
                                             <span style="color: #5a5860;">"Season Rating"</span>
-                                            <span style="color: #6ab6ff;">{sr_text}</span>
+                                            <span style="color: var(--accent-live);">{sr_text}</span>
                                         </div>
                                     }
                                 })}
-                                <div style="display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;">
+                                <div style="display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 0.905rem;">
                                     <span style="color: #5a5860;">"Created"</span>
                                     <span style="color: #9a9590;">{created_ago}</span>
                                 </div>
@@ -1618,8 +1849,8 @@ fn GuildPanel() -> impl IntoView {
                         }
                         view! {
                             <div style="margin-bottom: 14px;">
-                                <div style="font-family: 'Silkscreen', monospace; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.14em; color: #5a5860; margin-bottom: 8px;">
-                                    <span style="color: #50c878; margin-right: 6px; font-size: 0.6rem;">{"\u{25C6}"}</span>"Online Members"
+                                <div style="font-family: 'Silkscreen', monospace; font-size: 0.87rem; text-transform: uppercase; letter-spacing: 0.14em; color: #5a5860; margin-bottom: 8px;">
+                                    <span style="color: #50c878; margin-right: 6px; font-size: 0.696rem;">{"\u{25C6}"}</span>"Online Members"
                                 </div>
                                 <div style="display: flex; flex-direction: column; gap: 3px;">
                                     {online_members.into_iter().map(|member| {
@@ -1628,9 +1859,9 @@ fn GuildPanel() -> impl IntoView {
                                         let server = member.server;
                                         let profile_url = format!("https://wynncraft.com/stats/player/{}", username);
                                         view! {
-                                            <div style="display: flex; align-items: center; gap: 8px; padding: 3px 0; font-family: 'JetBrains Mono', monospace; font-size: 0.75rem;">
-                                                <span style="font-size: 0.4rem; color: #50c878; line-height: 1;">{"\u{25CF}"}</span>
-                                                <span style="color: #9a9590; font-size: 0.7rem; min-width: 72px;">"[" {rank_label} "]"</span>
+                                            <div style="display: flex; align-items: center; gap: 8px; padding: 3px 0; font-family: 'JetBrains Mono', monospace; font-size: 0.87rem;">
+                                                <span style="font-size: 0.464rem; color: #50c878; line-height: 1;">{"\u{25CF}"}</span>
+                                                <span style="color: #9a9590; font-size: 0.812rem; min-width: 72px;">"[" {rank_label} "]"</span>
                                                 <a href=profile_url
                                                    target="_blank"
                                                    rel="noopener noreferrer"
@@ -1648,7 +1879,7 @@ fn GuildPanel() -> impl IntoView {
                                                 >
                                                     {username}
                                                 </a>
-                                                <span style="color: #5a5860; font-size: 0.7rem;">{server}</span>
+                                                <span style="color: #5a5860; font-size: 0.812rem;">{server}</span>
                                             </div>
                                         }
                                     }).collect::<Vec<_>>()}
@@ -1666,8 +1897,8 @@ fn GuildPanel() -> impl IntoView {
                     }
                     view! {
                         <div>
-                            <div style="font-family: 'Silkscreen', monospace; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.14em; color: #5a5860; margin-bottom: 8px; border-top: 1px solid #282c3e; padding-top: 12px;">
-                                <span style="color: #f5c542; margin-right: 6px; font-size: 0.6rem;">{"\u{25C6}"}</span>"Territories"
+                            <div style="font-family: 'Silkscreen', monospace; font-size: 0.87rem; text-transform: uppercase; letter-spacing: 0.14em; color: #5a5860; margin-bottom: 8px; border-top: 1px solid #282c3e; padding-top: 12px;">
+                                <span style="color: #f5c542; margin-right: 6px; font-size: 0.696rem;">{"\u{25C6}"}</span>"Territories"
                             </div>
                             <div style="display: flex; flex-direction: column; gap: 2px;">
                                 {terrs.into_iter().map(|(territory_name, (r, g, b))| {
@@ -1701,7 +1932,7 @@ fn GuildPanel() -> impl IntoView {
                                     );
                                     view! {
                                         <div
-                                            style="display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 3px; cursor: pointer; transition: background 0.15s; font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: #e2e0d8;"
+                                            style="display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 3px; cursor: pointer; transition: background 0.15s; font-family: 'JetBrains Mono', monospace; font-size: 0.87rem; color: #e2e0d8;"
                                             on:click=on_terr_click
                                             on:mouseenter=|e| {
                                                 if let Some(el) = e.target().and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok()) {
@@ -1835,6 +2066,7 @@ fn DetailPanel() -> impl IntoView {
             ct.guild_color,
             treasury,
             ct.territory.resources.clone(),
+            ct.territory.runtime.clone(),
             ct.territory.connections.len(),
             guild_territory_count,
             reference_secs,
@@ -1874,7 +2106,7 @@ fn DetailPanel() -> impl IntoView {
             <button
                 title="Back to guild"
                 aria-label="Back to guild"
-                style="position: absolute; top: 12px; left: 12px; background: #1a1d2a; border: 1px solid #282c3e; color: #9a9590; cursor: pointer; padding: 3px 8px; border-radius: 4px; transition: color 0.15s, background 0.15s, border-color 0.15s; z-index: 1; display: flex; align-items: center; gap: 5px; font-family: 'JetBrains Mono', monospace; font-size: 0.67rem; text-transform: uppercase; letter-spacing: 0.08em;"
+                style="position: absolute; top: 12px; left: 12px; background: #1a1d2a; border: 1px solid #282c3e; color: #9a9590; cursor: pointer; padding: 3px 8px; border-radius: 4px; transition: color 0.15s, background 0.15s, border-color 0.15s; z-index: 1; display: flex; align-items: center; gap: 5px; font-family: 'JetBrains Mono', monospace; font-size: 0.777rem; text-transform: uppercase; letter-spacing: 0.08em;"
                 on:click=on_back
                 on:mouseenter=|e| {
                     if let Some(el) = e.target().and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok()) {
@@ -1891,7 +2123,7 @@ fn DetailPanel() -> impl IntoView {
                     }
                 }
             >
-                <span style="font-size: 0.8rem; line-height: 1;">{"\u{2039}"}</span>
+                <span style="font-size: 0.928rem; line-height: 1;">{"\u{2039}"}</span>
                 <span>"Back"</span>
             </button>
             <button
@@ -1916,7 +2148,7 @@ fn DetailPanel() -> impl IntoView {
             </button>
             {move || {
                 detail()
-                    .map(|(name, guild_name, guild_prefix, _uuid, acquired, location, (r, g, b), treasury, resources, conn_count, guild_territory_count, reference_secs, takes_in_window)| {
+                    .map(|(name, guild_name, guild_prefix, _uuid, acquired, location, (r, g, b), treasury, resources, runtime, conn_count, guild_territory_count, reference_secs, takes_in_window)| {
                         let relative_time = format_relative_time(&acquired, reference_secs);
                         let (tr, tg, tb) = treasury.color_rgb();
                         let treasury_label = treasury.label();
@@ -1960,6 +2192,50 @@ fn DetailPanel() -> impl IntoView {
                             }
                         };
 
+                        let runtime_hq = runtime.as_ref().and_then(|runtime| runtime.headquarters);
+                        let runtime_defense = runtime
+                            .as_ref()
+                            .and_then(|runtime| runtime.defense_tier.clone());
+                        let runtime_held_resources = runtime
+                            .as_ref()
+                            .and_then(|runtime| runtime.held_resources.clone())
+                            .filter(|value| !value.is_empty());
+                        let runtime_prod_resources = runtime
+                            .as_ref()
+                            .and_then(|runtime| runtime.production_rates.clone())
+                            .filter(|value| !value.is_empty());
+                        let runtime_capacity_resources = runtime
+                            .as_ref()
+                            .and_then(|runtime| runtime.storage_capacity.clone())
+                            .filter(|value| !value.is_empty());
+                        let runtime_provenance = runtime
+                            .as_ref()
+                            .and_then(|runtime| runtime.provenance.clone())
+                            .map(|provenance| {
+                                let source = if provenance.source.trim().is_empty() {
+                                    "unknown".to_string()
+                                } else {
+                                    provenance.source.clone()
+                                };
+                                let observed_label = format_relative_time(
+                                    &provenance.observed_at,
+                                    reference_secs,
+                                );
+                                let visibility = visibility_label(&provenance);
+                                let confidence = format_confidence(provenance.confidence);
+                                let reporter_count = provenance.reporter_count;
+                                (
+                                    format!(
+                                        "{} source \u{00b7} {} \u{00b7} conf {}",
+                                        visibility, source, confidence
+                                    ),
+                                    format!(
+                                        "Observed {} \u{00b7} reporters {}",
+                                        observed_label, reporter_count
+                                    ),
+                                )
+                            });
+
                         // Cooldown: territory can be queued again after 10 minutes
                         let cooldown = chrono::DateTime::parse_from_rfc3339(&acquired).ok().and_then(|dt| {
                             let age = (reference_secs - dt.timestamp()).max(0);
@@ -1986,49 +2262,73 @@ fn DetailPanel() -> impl IntoView {
                                         rgba_css(r, g, b, 0.8),
                                         rgba_css(r, g, b, 0.3),
                                     )} />
-                                    <div style="font-size: 1.15rem; font-weight: 700; color: #e2e0d8; font-family: 'Silkscreen', monospace;">{name}</div>
+                                    <div style="font-size: 1.242rem; font-weight: 700; color: #e2e0d8; font-family: 'Silkscreen', monospace;">{name}</div>
                                 </div>
-                                <div style="font-size: 0.95rem; color: #f5c542; font-family: 'Inter', system-ui, sans-serif; margin-bottom: 2px; margin-left: 28px;">{guild_name}</div>
-                                <div style="font-size: 0.8rem; color: #9a9590; font-family: 'JetBrains Mono', monospace; margin-bottom: 16px; margin-left: 28px;">
+                                <div style="font-size: 1.102rem; color: #f5c542; font-family: 'Inter', system-ui, sans-serif; margin-bottom: 2px; margin-left: 28px;">{guild_name}</div>
+                                <div style="font-size: 0.928rem; color: #9a9590; font-family: 'JetBrains Mono', monospace; margin-bottom: 16px; margin-left: 28px;">
                                     "[" {guild_prefix} "]"
                                 </div>
 
                                 // Detail rows with dotted leaders
-                                <div style="display: flex; justify-content: space-between; padding: 8px 0; font-size: 0.85rem; border-bottom: 1px solid rgba(40,44,62,0.6);">
+                                <div style="display: flex; justify-content: space-between; padding: 8px 0; font-size: 0.986rem; border-bottom: 1px solid rgba(40,44,62,0.6);">
                                     <span style="color: #9a9590; font-family: 'Inter', system-ui, sans-serif;">"Acquired"</span>
-                                    <span style="color: #e2e0d8; font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;" title=acquired>{relative_time}</span>
+                                    <span style="color: #e2e0d8; font-family: 'JetBrains Mono', monospace; font-size: 0.905rem;" title=acquired>{relative_time}</span>
                                 </div>
-                                <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; font-size: 0.85rem; border-bottom: 1px solid rgba(40,44,62,0.6);">
+                                <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; font-size: 0.986rem; border-bottom: 1px solid rgba(40,44,62,0.6);">
                                     <span style="color: #9a9590; font-family: 'Inter', system-ui, sans-serif;">"Treasury"</span>
                                     <span style="display: flex; align-items: center; gap: 6px;">
-                                        <span style={format!("color: {}; font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;", rgba_css(tr, tg, tb, 1.0))}>{treasury_label}</span>
+                                        <span style={format!("color: {}; font-family: 'JetBrains Mono', monospace; font-size: 0.905rem;", rgba_css(tr, tg, tb, 1.0))}>{treasury_label}</span>
                                         {(buff > 0).then(|| view! {
-                                            <span style={format!("font-size: 0.65rem; font-family: 'JetBrains Mono', monospace; color: {}; background: {}; padding: 1px 5px; border-radius: 3px;", rgba_css(tr, tg, tb, 0.9), rgba_css(tr, tg, tb, 0.08))}>{format!("+{}%", buff)}</span>
+                                            <span style={format!("font-size: 0.754rem; font-family: 'JetBrains Mono', monospace; color: {}; background: {}; padding: 1px 5px; border-radius: 3px;", rgba_css(tr, tg, tb, 0.9), rgba_css(tr, tg, tb, 0.08))}>{format!("+{}%", buff)}</span>
                                         })}
                                     </span>
                                 </div>
-                                <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; font-size: 0.85rem; border-bottom: 1px solid rgba(40,44,62,0.6);">
+                                <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; font-size: 0.986rem; border-bottom: 1px solid rgba(40,44,62,0.6);">
                                     <span style="color: #9a9590; font-family: 'Inter', system-ui, sans-serif;">"Passive SR"</span>
-                                    <span style="color: #6ab6ff; font-family: 'JetBrains Mono', monospace; font-size: 0.76rem;">
+                                    <span style="color: var(--accent-live); font-family: 'JetBrains Mono', monospace; font-size: 0.882rem;">
                                         {passive_sr_label}
                                     </span>
                                 </div>
                                 {takes_in_window.map(|count| view! {
-                                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; font-size: 0.85rem; border-bottom: 1px solid rgba(40,44,62,0.6);">
+                                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; font-size: 0.986rem; border-bottom: 1px solid rgba(40,44,62,0.6);">
                                         <span style="color: #9a9590; font-family: 'Inter', system-ui, sans-serif;">"Takes in window"</span>
-                                        <span style="color: #e2e0d8; font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; font-variant-numeric: tabular-nums;">{count}</span>
+                                        <span style="color: #e2e0d8; font-family: 'JetBrains Mono', monospace; font-size: 0.905rem; font-variant-numeric: tabular-nums;">{count}</span>
                                     </div>
                                 })}
                                 <div style="padding: 6px 0 8px; border-bottom: 1px solid rgba(40,44,62,0.6);">
-                                    <span style="font-size: 0.68rem; color: #7c829e; font-family: 'JetBrains Mono', monospace;">
+                                    <span style="font-size: 0.789rem; color: #7c829e; font-family: 'JetBrains Mono', monospace;">
                                         {scalar_note}
                                     </span>
                                 </div>
+                                {runtime_hq.map(|is_hq| view! {
+                                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; font-size: 0.986rem; border-bottom: 1px solid rgba(40,44,62,0.6);">
+                                        <span style="color: #9a9590; font-family: 'Inter', system-ui, sans-serif;">"Headquarters"</span>
+                                        <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.835rem; color: #e2e0d8;">
+                                            {if is_hq { "Yes" } else { "No" }}
+                                        </span>
+                                    </div>
+                                })}
+                                {runtime_defense.map(|defense_tier| view! {
+                                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; font-size: 0.986rem; border-bottom: 1px solid rgba(40,44,62,0.6);">
+                                        <span style="color: #9a9590; font-family: 'Inter', system-ui, sans-serif;">"Defense Tier"</span>
+                                        <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.835rem; color: #e2e0d8;">{defense_tier}</span>
+                                    </div>
+                                })}
+                                {runtime_provenance.map(|(primary, secondary)| view! {
+                                    <div style="padding: 8px 0; border-bottom: 1px solid rgba(40,44,62,0.6); display: flex; flex-direction: column; gap: 2px;">
+                                        <span style="font-size: 0.777rem; color: var(--accent-live); font-family: 'JetBrains Mono', monospace;">
+                                            {primary}
+                                        </span>
+                                        <span style="font-size: 0.742rem; color: #7c829e; font-family: 'JetBrains Mono', monospace;">
+                                            {secondary}
+                                        </span>
+                                    </div>
+                                })}
                                 {cooldown.map(|(remaining_text, frac)| view! {
                                     <div style="padding: 8px 0; border-bottom: 1px solid rgba(40,44,62,0.6);">
-                                        <div style="display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 6px;">
+                                        <div style="display: flex; justify-content: space-between; font-size: 0.986rem; margin-bottom: 6px;">
                                             <span style="color: #f5c542; font-family: 'Silkscreen', monospace;">"Cooldown"</span>
-                                            <span style="color: #f5c542; font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;">{remaining_text}</span>
+                                            <span style="color: #f5c542; font-family: 'JetBrains Mono', monospace; font-size: 0.905rem;">{remaining_text}</span>
                                         </div>
                                         <div style="height: 5px; background: rgba(255,255,255,0.06); border-radius: 2px; overflow: hidden;">
                                             <div style={format!(
@@ -2038,9 +2338,9 @@ fn DetailPanel() -> impl IntoView {
                                         </div>
                                     </div>
                                 })}
-                                <div style="display: flex; justify-content: space-between; padding: 8px 0; font-size: 0.85rem; border-bottom: 1px solid rgba(40,44,62,0.6);">
+                                <div style="display: flex; justify-content: space-between; padding: 8px 0; font-size: 0.986rem; border-bottom: 1px solid rgba(40,44,62,0.6);">
                                     <span style="color: #9a9590; font-family: 'Inter', system-ui, sans-serif;">"Region"</span>
-                                    <span style="color: #e2e0d8; font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;">
+                                    <span style="color: #e2e0d8; font-family: 'JetBrains Mono', monospace; font-size: 0.905rem;">
                                         {format!(
                                             "({}, {}) \u{2192} ({}, {})",
                                             location.start[0],
@@ -2050,9 +2350,9 @@ fn DetailPanel() -> impl IntoView {
                                         )}
                                     </span>
                                 </div>
-                                <div style="display: flex; justify-content: space-between; padding: 8px 0; font-size: 0.85rem; border-bottom: 1px solid rgba(40,44,62,0.6);">
+                                <div style="display: flex; justify-content: space-between; padding: 8px 0; font-size: 0.986rem; border-bottom: 1px solid rgba(40,44,62,0.6);">
                                     <span style="color: #9a9590; font-family: 'Inter', system-ui, sans-serif;">"Size"</span>
-                                    <span style="color: #e2e0d8; font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;">
+                                    <span style="color: #e2e0d8; font-family: 'JetBrains Mono', monospace; font-size: 0.905rem;">
                                         {format!(
                                             "{}\u{00d7}{}",
                                             location.width(),
@@ -2060,9 +2360,9 @@ fn DetailPanel() -> impl IntoView {
                                         )}
                                     </span>
                                 </div>
-                                <div style="display: flex; justify-content: space-between; padding: 8px 0; font-size: 0.85rem; border-bottom: 1px solid rgba(40,44,62,0.6);">
+                                <div style="display: flex; justify-content: space-between; padding: 8px 0; font-size: 0.986rem; border-bottom: 1px solid rgba(40,44,62,0.6);">
                                     <span style="color: #9a9590; font-family: 'Inter', system-ui, sans-serif;">"Connections"</span>
-                                    <span style="color: #e2e0d8; font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;">
+                                    <span style="color: #e2e0d8; font-family: 'JetBrains Mono', monospace; font-size: 0.905rem;">
                                         {move || guild_counts.get().map(|(gc, tc, _)| format!("{}/{}", gc, tc)).unwrap_or_else(|| format!("{}", conn_count))}
                                     </span>
                                 </div>
@@ -2070,8 +2370,8 @@ fn DetailPanel() -> impl IntoView {
                                     let res_items = build_resource_items(&resources);
                                     view! {
                                         <div style="padding: 10px 0 4px;">
-                                            <div style="font-family: 'Silkscreen', monospace; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.12em; color: #5a5860; margin-bottom: 8px;">
-                                                <span style="color: #f5c542; margin-right: 5px; font-size: 0.7rem;">{"\u{25C6}"}</span>"Resources"
+                                            <div style="font-family: 'Silkscreen', monospace; font-size: 0.986rem; text-transform: uppercase; letter-spacing: 0.12em; color: #5a5860; margin-bottom: 8px;">
+                                                <span style="color: #f5c542; margin-right: 5px; font-size: 0.812rem;">{"\u{25C6}"}</span>"Resources"
                                             </div>
                                             <div style="display: flex; flex-wrap: wrap; gap: 6px;">
                                                 {res_items.into_iter().map(|(label, value, icon_name)| {
@@ -2079,8 +2379,74 @@ fn DetailPanel() -> impl IntoView {
                                                     view! {
                                                         <div style="display: flex; align-items: center; gap: 5px; background: #1a1d2a; padding: 4px 8px; border-radius: 4px; border: 1px solid #282c3e;">
                                                             <span style={icon_style} />
-                                                            <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: #e2e0d8;">{value}</span>
-                                                            <span style="font-family: 'Inter', system-ui, sans-serif; font-size: 0.62rem; color: #5a5860;">{label}</span>
+                                                            <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.812rem; color: #e2e0d8;">{value}</span>
+                                                            <span style="font-family: 'Inter', system-ui, sans-serif; font-size: 0.719rem; color: #5a5860;">{label}</span>
+                                                        </div>
+                                                    }
+                                                }).collect::<Vec<_>>()}
+                                            </div>
+                                        </div>
+                                    }
+                                })}
+                                {runtime_held_resources.clone().map(|held| {
+                                    let held_items = build_resource_items(&held);
+                                    view! {
+                                        <div style="padding: 8px 0 4px;">
+                                            <div style="font-family: 'Silkscreen', monospace; font-size: 0.835rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--accent-live); margin-bottom: 6px;">
+                                                "Held Resources (Live)"
+                                            </div>
+                                            <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+                                                {held_items.into_iter().map(|(label, value, icon_name)| {
+                                                    let icon_style = icons::sprite_style(icon_name, 14).unwrap_or_default();
+                                                    view! {
+                                                        <div style="display: flex; align-items: center; gap: 5px; background: #1a1d2a; padding: 4px 8px; border-radius: 4px; border: 1px solid rgba(var(--accent-live-rgb),0.25);">
+                                                            <span style={icon_style} />
+                                                            <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.812rem; color: #e2e0d8;">{value}</span>
+                                                            <span style="font-family: 'Inter', system-ui, sans-serif; font-size: 0.719rem; color: var(--accent-live);">{label}</span>
+                                                        </div>
+                                                    }
+                                                }).collect::<Vec<_>>()}
+                                            </div>
+                                        </div>
+                                    }
+                                })}
+                                {runtime_prod_resources.clone().map(|prod| {
+                                    let prod_items = build_resource_items(&prod);
+                                    view! {
+                                        <div style="padding: 8px 0 4px;">
+                                            <div style="font-family: 'Silkscreen', monospace; font-size: 0.835rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--accent-live); margin-bottom: 6px;">
+                                                "Production/Hr (Live)"
+                                            </div>
+                                            <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+                                                {prod_items.into_iter().map(|(label, value, icon_name)| {
+                                                    let icon_style = icons::sprite_style(icon_name, 14).unwrap_or_default();
+                                                    view! {
+                                                        <div style="display: flex; align-items: center; gap: 5px; background: #1a1d2a; padding: 4px 8px; border-radius: 4px; border: 1px solid rgba(var(--accent-live-rgb),0.2);">
+                                                            <span style={icon_style} />
+                                                            <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.812rem; color: #e2e0d8;">{value}</span>
+                                                            <span style="font-family: 'Inter', system-ui, sans-serif; font-size: 0.719rem; color: var(--accent-live);">{label}</span>
+                                                        </div>
+                                                    }
+                                                }).collect::<Vec<_>>()}
+                                            </div>
+                                        </div>
+                                    }
+                                })}
+                                {runtime_capacity_resources.clone().map(|cap| {
+                                    let cap_items = build_resource_items(&cap);
+                                    view! {
+                                        <div style="padding: 8px 0 4px;">
+                                            <div style="font-family: 'Silkscreen', monospace; font-size: 0.835rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--accent-live); margin-bottom: 6px;">
+                                                "Storage Cap (Live)"
+                                            </div>
+                                            <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+                                                {cap_items.into_iter().map(|(label, value, icon_name)| {
+                                                    let icon_style = icons::sprite_style(icon_name, 14).unwrap_or_default();
+                                                    view! {
+                                                        <div style="display: flex; align-items: center; gap: 5px; background: #1a1d2a; padding: 4px 8px; border-radius: 4px; border: 1px solid rgba(var(--accent-live-rgb),0.2);">
+                                                            <span style={icon_style} />
+                                                            <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.812rem; color: #e2e0d8;">{value}</span>
+                                                            <span style="font-family: 'Inter', system-ui, sans-serif; font-size: 0.719rem; color: var(--accent-live);">{label}</span>
                                                         </div>
                                                     }
                                                 }).collect::<Vec<_>>()}
@@ -2150,11 +2516,11 @@ fn StatsBar() -> impl IntoView {
     let is_history = move || mode.get() == MapMode::History;
 
     view! {
-        <div style="padding: 10px 12px; border-top: 1px solid #282c3e; display: flex; align-items: center; justify-content: space-between; gap: 8px; font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; color: #6a6870;">
+        <div style="padding: 10px 12px; border-top: 1px solid #282c3e; display: flex; align-items: center; justify-content: space-between; gap: 8px; font-family: 'JetBrains Mono', monospace; font-size: 0.789rem; color: #6a6870;">
             <div style="display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; overflow-x: auto; scrollbar-width: none;">
             <button
                 style:display=move || if history_available.get() && !is_mobile.get() { "flex" } else { "none" }
-                style="background: none; border: 1px solid #282c3e; border-radius: 999px; padding: 5px 10px; cursor: pointer; align-items: center; justify-content: center; transition: border-color 0.15s, background 0.15s, color 0.15s; font-size: 0.66rem; min-width: 64px;"
+                style="background: none; border: 1px solid #282c3e; border-radius: 999px; padding: 5px 10px; cursor: pointer; align-items: center; justify-content: center; transition: border-color 0.15s, background 0.15s, color 0.15s; font-size: 0.766rem; min-width: 64px;"
                 title=move || if is_history() { "Disable history mode (h)" } else { "Enable history mode (h)" }
                 style:color=move || if is_history() { "#13161f" } else { "#5a5860" }
                 style:background=move || if is_history() { "#f5c542" } else { "#1a1d2a" }
@@ -2213,7 +2579,7 @@ fn StatsBar() -> impl IntoView {
             </button>
             <button
                 style:display=move || if !is_mobile.get() { "flex" } else { "none" }
-                style="background: none; border: 1px solid #282c3e; border-radius: 999px; padding: 5px 10px; cursor: pointer; align-items: center; justify-content: center; transition: border-color 0.15s, background 0.15s, color 0.15s; font-size: 0.66rem; min-width: 58px;"
+                style="background: none; border: 1px solid #282c3e; border-radius: 999px; padding: 5px 10px; cursor: pointer; align-items: center; justify-content: center; transition: border-color 0.15s, background 0.15s, color 0.15s; font-size: 0.766rem; min-width: 58px;"
                 title=move || if heat_mode_enabled.get() { "Disable heat map" } else { "Enable heat map" }
                 style:color=move || if heat_mode_enabled.get() { "#13161f" } else { "#5a5860" }
                 style:background=move || if heat_mode_enabled.get() { "#f58c32" } else { "#1a1d2a" }

@@ -14,7 +14,7 @@ use crate::app::{
     SseSeqGapDetectedCount,
 };
 use crate::history;
-use crate::territory::{ClientTerritoryMap, apply_changes, from_snapshot};
+use crate::territory::{ClientTerritoryMap, apply_changes, apply_runtime_updates, from_snapshot};
 
 const LIVE_RESYNC_RETRY_BASE_MS: f64 = 500.0;
 const LIVE_RESYNC_RETRY_MAX_MS: f64 = 10_000.0;
@@ -33,6 +33,7 @@ struct SseConnection {
     on_error: Closure<dyn Fn()>,
     snapshot_handler: Closure<dyn Fn(MessageEvent)>,
     update_handler: Closure<dyn Fn(MessageEvent)>,
+    runtime_update_handler: Closure<dyn Fn(MessageEvent)>,
 }
 
 struct ReconnectWatchdog {
@@ -57,6 +58,12 @@ impl SseConnection {
             .remove_event_listener_with_callback(
                 "update",
                 self.update_handler.as_ref().unchecked_ref(),
+            )
+            .ok();
+        self.es
+            .remove_event_listener_with_callback(
+                "runtime_update",
+                self.runtime_update_handler.as_ref().unchecked_ref(),
             )
             .ok();
         self.es.close();
@@ -426,6 +433,87 @@ pub fn connect(territories: RwSignal<ClientTerritoryMap>, connection: RwSignal<C
     es.add_event_listener_with_callback("update", update_handler.as_ref().unchecked_ref())
         .ok();
 
+    // On "runtime_update" event
+    let terr = territories;
+    let runtime_update_handler = Closure::<dyn Fn(MessageEvent)>::new(move |e: MessageEvent| {
+        let Some(data) = e.data().as_string() else {
+            return;
+        };
+
+        let Ok(TerritoryEvent::RuntimeUpdate { seq, updates, .. }) =
+            serde_json::from_str::<TerritoryEvent>(&data)
+        else {
+            return;
+        };
+        mark_post_reconnect_event_received();
+
+        if mode.get_untracked() == MapMode::History || buffer_mode_active.get_untracked() {
+            if seq > 0 {
+                needs_live_resync.set(true);
+            }
+            return;
+        }
+
+        if needs_live_resync.get_untracked() {
+            trigger_live_resync(
+                mode,
+                resync_in_flight,
+                needs_live_resync,
+                last_live_seq,
+                terr,
+            );
+            return;
+        }
+
+        if seq == 0 {
+            terr.update(|map| {
+                apply_runtime_updates(map, &updates);
+            });
+            last_live_seq.set(None);
+            return;
+        }
+
+        if let Some(last_seq) = last_live_seq.get_untracked() {
+            if seq <= last_seq {
+                return;
+            }
+
+            if history::has_seq_gap(Some(last_seq), seq) {
+                let mut gap_count = 0;
+                sse_seq_gap_detected_count.update(|count| {
+                    *count = count.saturating_add(1);
+                    gap_count = *count;
+                });
+                web_sys::console::warn_1(
+                    &format!(
+                        "sse_seq_gap_detected_count={} (last_seq={}, incoming_seq={})",
+                        gap_count, last_seq, seq
+                    )
+                    .into(),
+                );
+                needs_live_resync.set(true);
+                trigger_live_resync(
+                    mode,
+                    resync_in_flight,
+                    needs_live_resync,
+                    last_live_seq,
+                    terr,
+                );
+                return;
+            }
+        }
+
+        terr.update(|map| {
+            apply_runtime_updates(map, &updates);
+        });
+        last_live_seq.set(Some(seq));
+    });
+    es.add_event_listener_with_callback(
+        "runtime_update",
+        runtime_update_handler.as_ref().unchecked_ref(),
+    )
+    .ok();
+
     // On error
     let conn = connection;
     let on_error = Closure::<dyn Fn()>::new(move || {
@@ -447,6 +535,7 @@ pub fn connect(territories: RwSignal<ClientTerritoryMap>, connection: RwSignal<C
             on_error,
             snapshot_handler,
             update_handler,
+            runtime_update_handler,
         });
     });
 }

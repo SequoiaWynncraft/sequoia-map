@@ -10,6 +10,7 @@ pub struct Viewport {
 const MIN_SCALE: f64 = 0.05;
 const MAX_SCALE: f64 = 8.0;
 const ZOOM_SENSITIVITY: f64 = 0.001;
+const FIT_SCALE_BOOST: f64 = 1.08;
 
 impl Default for Viewport {
     fn default() -> Self {
@@ -77,7 +78,8 @@ impl Viewport {
         let padding = 0.05;
         let scale_x = canvas_w / (world_w * (1.0 + padding * 2.0));
         let scale_y = canvas_h / (world_h * (1.0 + padding * 2.0));
-        self.scale = scale_x.min(scale_y).clamp(MIN_SCALE, MAX_SCALE);
+        // Slight global zoom-in so fitted views feel less distant by default.
+        self.scale = (scale_x.min(scale_y) * FIT_SCALE_BOOST).clamp(MIN_SCALE, MAX_SCALE);
 
         let center_x = (min_x + max_x) / 2.0;
         let center_y = (min_y + max_y) / 2.0;

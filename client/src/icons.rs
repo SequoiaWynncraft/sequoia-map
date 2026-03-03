@@ -6,11 +6,13 @@ use web_sys::HtmlImageElement;
 #[derive(Clone)]
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub struct ResourceAtlas {
-    pub image: HtmlImageElement,
+    pub resource_image: HtmlImageElement,
+    pub hq_crown_image: HtmlImageElement,
 }
 
 pub const ICON_COUNT: u32 = 6;
 pub const ATLAS_SRC: &str = "/icons/territory-resources-atlas.png";
+pub const HQ_CROWN_SRC: &str = "/icons/crown_icon.png";
 
 static ATLAS_WARNED: AtomicBool = AtomicBool::new(false);
 
@@ -27,6 +29,7 @@ pub fn icon_index(name: &str) -> Option<u32> {
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn icon_uv(index: u32) -> [f32; 4] {
     debug_assert!(index < ICON_COUNT, "icon_uv index out of range: {index}");
     let idx = index.min(ICON_COUNT - 1);
@@ -57,17 +60,32 @@ fn warn_atlas_once(message: &str) {
 
 pub fn load_resource_atlas(signal: RwSignal<Option<ResourceAtlas>>) {
     wasm_bindgen_futures::spawn_local(async move {
-        let Ok(image) = HtmlImageElement::new() else {
+        let Ok(resource_image) = HtmlImageElement::new() else {
             signal.set(None);
             warn_atlas_once("Failed to create resource atlas image element.");
             return;
         };
-        image.set_src(ATLAS_SRC);
-        match wasm_bindgen_futures::JsFuture::from(image.decode()).await {
-            Ok(_) => signal.set(Some(ResourceAtlas { image })),
+        resource_image.set_src(ATLAS_SRC);
+        if let Err(err) = wasm_bindgen_futures::JsFuture::from(resource_image.decode()).await {
+            signal.set(None);
+            warn_atlas_once(&format!("Failed to decode resource atlas: {:?}", err));
+            return;
+        }
+
+        let Ok(hq_crown_image) = HtmlImageElement::new() else {
+            signal.set(None);
+            warn_atlas_once("Failed to create HQ crown icon image element.");
+            return;
+        };
+        hq_crown_image.set_src(HQ_CROWN_SRC);
+        match wasm_bindgen_futures::JsFuture::from(hq_crown_image.decode()).await {
+            Ok(_) => signal.set(Some(ResourceAtlas {
+                resource_image,
+                hq_crown_image,
+            })),
             Err(err) => {
                 signal.set(None);
-                warn_atlas_once(&format!("Failed to decode resource atlas: {:?}", err));
+                warn_atlas_once(&format!("Failed to decode HQ crown icon: {:?}", err));
             }
         }
     });

@@ -12,6 +12,7 @@ pub enum IconKind {
     Fish,
     Wood,
     Rainbow,
+    HqCrown,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

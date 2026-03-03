@@ -7,12 +7,21 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-pub(crate) const DEFAULT_SIDEBAR_WIDTH: f64 = 380.0;
-pub(crate) const SIDEBAR_WIDTH_MIN: f64 = 300.0;
+pub(crate) const DEFAULT_SIDEBAR_WIDTH: f64 = 420.0;
+pub(crate) const SIDEBAR_WIDTH_MIN: f64 = 320.0;
 pub(crate) const SIDEBAR_WIDTH_MAX: f64 = 620.0;
+const LEGACY_DEFAULT_SIDEBAR_WIDTH: f64 = 380.0;
 
 pub(crate) fn clamp_sidebar_width(value: f64) -> f64 {
     value.clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)
+}
+
+fn migrate_sidebar_width(value: f64) -> f64 {
+    if (value - LEGACY_DEFAULT_SIDEBAR_WIDTH).abs() < f64::EPSILON {
+        DEFAULT_SIDEBAR_WIDTH
+    } else {
+        value
+    }
 }
 
 pub(crate) fn canvas_dimensions() -> (f64, f64) {
@@ -120,9 +129,11 @@ pub(crate) struct ShowLeaderboardSrGain(pub RwSignal<bool>);
 #[derive(Clone, Copy)]
 pub(crate) struct ShowLeaderboardSrValue(pub RwSignal<bool>);
 #[derive(Clone, Copy)]
-pub(crate) struct WhiteGuildTags(pub RwSignal<bool>);
-#[derive(Clone, Copy)]
 pub(crate) struct NameColorSetting(pub RwSignal<NameColor>);
+#[derive(Clone, Copy)]
+pub(crate) struct TagColorSetting(pub RwSignal<NameColor>);
+#[derive(Clone, Copy)]
+pub(crate) struct ReadableFont(pub RwSignal<bool>);
 #[derive(Clone, Copy)]
 pub(crate) struct ShowMinimap(pub RwSignal<bool>);
 #[derive(Clone, Copy)]
@@ -325,11 +336,14 @@ struct SettingsV2 {
     heat_history_basis: HeatHistoryBasis,
     #[serde(default)]
     heat_selected_season_id: Option<i32>,
-    white_guild_tags: bool,
+    #[serde(default)]
+    readable_font: bool,
     #[serde(default = "default_true")]
     show_minimap: bool,
     #[serde(default = "default_name_color")]
     name_color: NameColor,
+    #[serde(default = "default_tag_color")]
+    tag_color: NameColor,
     #[serde(default = "default_label_scale_master")]
     label_scale_master: f64,
     #[serde(default = "default_label_scale_static_tag")]
@@ -345,6 +359,10 @@ struct SettingsV2 {
 }
 
 const fn default_name_color() -> NameColor {
+    NameColor::Guild
+}
+
+const fn default_tag_color() -> NameColor {
     NameColor::Guild
 }
 
@@ -394,8 +412,8 @@ const fn default_sidebar_width() -> f64 {
 
 pub(crate) const DEFAULT_LABEL_SCALE_MASTER: f64 = 1.0;
 pub(crate) const DEFAULT_LABEL_SCALE_GROUP: f64 = 1.0;
-pub(crate) const DEFAULT_LABEL_SCALE_STATIC_TAG: f64 = 1.10;
-pub(crate) const DEFAULT_LABEL_SCALE_STATIC_NAME: f64 = 0.90;
+pub(crate) const DEFAULT_LABEL_SCALE_STATIC_TAG: f64 = 1.0;
+pub(crate) const DEFAULT_LABEL_SCALE_STATIC_NAME: f64 = 1.0;
 pub(crate) const DEFAULT_CONNECTION_OPACITY_SCALE: f64 = 1.0;
 pub(crate) const DEFAULT_CONNECTION_THICKNESS_SCALE: f64 = 1.0;
 pub(crate) const CONNECTION_OPACITY_SCALE_MIN: f64 = 0.60;
@@ -434,7 +452,7 @@ impl Default for SettingsV2 {
             show_countdown: false,
             granular_map_time: false,
             compound_map_time: true,
-            show_names: true,
+            show_names: false,
             thick_cooldown_borders: true,
             bold_connections: false,
             connection_opacity_scale: default_connection_opacity_scale(),
@@ -453,9 +471,10 @@ impl Default for SettingsV2 {
             heat_live_source: default_heat_live_source(),
             heat_history_basis: default_heat_history_basis(),
             heat_selected_season_id: None,
-            white_guild_tags: false,
+            readable_font: false,
             show_minimap: true,
             name_color: default_name_color(),
+            tag_color: default_tag_color(),
             label_scale_master: default_label_scale_master(),
             label_scale_static: default_label_scale_static_tag(),
             label_scale_static_name: Some(default_label_scale_static_name()),
@@ -504,7 +523,7 @@ impl Default for LegacySettings {
             show_countdown: false,
             granular_map_time: false,
             compound_map_time: true,
-            show_names: true,
+            show_names: false,
             thick_cooldown_borders: true,
             bold_names: false,
             bold_tags: false,
@@ -552,9 +571,10 @@ impl From<LegacySettings> for SettingsV2 {
             heat_live_source: default_heat_live_source(),
             heat_history_basis: default_heat_history_basis(),
             heat_selected_season_id: None,
-            white_guild_tags: false,
+            readable_font: value.readable_font,
             show_minimap: true,
             name_color: value.name_color,
+            tag_color: default_tag_color(),
             label_scale_master: default_label_scale_master(),
             label_scale_static: default_label_scale_static_tag(),
             label_scale_static_name: Some(default_label_scale_static_name()),
@@ -580,7 +600,6 @@ use crate::colors::rgba_css;
 use crate::heat::{self, HeatFetchInput};
 use crate::history;
 use crate::icons::{self, ResourceAtlas};
-use crate::label_layout::abbreviate_name;
 use crate::season_scalar;
 use crate::sidebar::Sidebar;
 use crate::sse::{self, ConnectionStatus};
@@ -599,18 +618,26 @@ fn format_resource_compact(val: i32) -> String {
     }
 }
 
-fn tooltip_resource_items(res: &Resources) -> Vec<(i32, bool, &'static str, &'static str)> {
+fn tooltip_resource_items(
+    values: &Resources,
+    double_source: &Resources,
+) -> Vec<(i32, bool, &'static str, &'static str)> {
     vec![
         (
-            res.emeralds,
-            res.has_double_emeralds(),
+            values.emeralds,
+            double_source.has_double_emeralds(),
             "emerald",
             "Emeralds",
         ),
-        (res.ore, res.has_double_ore(), "ore", "Ore"),
-        (res.crops, res.has_double_crops(), "crops", "Crops"),
-        (res.fish, res.has_double_fish(), "fish", "Fish"),
-        (res.wood, res.has_double_wood(), "wood", "Wood"),
+        (values.ore, double_source.has_double_ore(), "ore", "Ore"),
+        (
+            values.crops,
+            double_source.has_double_crops(),
+            "crops",
+            "Crops",
+        ),
+        (values.fish, double_source.has_double_fish(), "fish", "Fish"),
+        (values.wood, double_source.has_double_wood(), "wood", "Wood"),
     ]
 }
 
@@ -689,8 +716,9 @@ pub fn App() -> impl IntoView {
     let auto_sr_scalar_enabled: RwSignal<bool> = RwSignal::new(saved.auto_sr_scalar_enabled);
     let show_leaderboard_sr_gain: RwSignal<bool> = RwSignal::new(saved.show_leaderboard_sr_gain);
     let show_leaderboard_sr_value: RwSignal<bool> = RwSignal::new(saved.show_leaderboard_sr_value);
-    let white_guild_tags: RwSignal<bool> = RwSignal::new(saved.white_guild_tags);
     let name_color: RwSignal<NameColor> = RwSignal::new(saved.name_color);
+    let tag_color: RwSignal<NameColor> = RwSignal::new(saved.tag_color);
+    let readable_font: RwSignal<bool> = RwSignal::new(saved.readable_font);
     let show_minimap: RwSignal<bool> = RwSignal::new(saved.show_minimap);
     let label_scale_master: RwSignal<f64> =
         RwSignal::new(clamp_label_scale_master(saved.label_scale_master));
@@ -705,7 +733,9 @@ pub fn App() -> impl IntoView {
         RwSignal::new(clamp_label_scale_group(saved.label_scale_dynamic));
     let label_scale_icons: RwSignal<f64> =
         RwSignal::new(clamp_label_scale_group(saved.label_scale_icons));
-    let sidebar_width: RwSignal<f64> = RwSignal::new(clamp_sidebar_width(saved.sidebar_width));
+    let sidebar_width: RwSignal<f64> = RwSignal::new(clamp_sidebar_width(migrate_sidebar_width(
+        saved.sidebar_width,
+    )));
     let sidebar_open: RwSignal<bool> = RwSignal::new(saved.sidebar_open);
     let sidebar_transient: RwSignal<bool> = RwSignal::new(false);
     let sidebar_ready: RwSignal<bool> = RwSignal::new(false);
@@ -793,8 +823,9 @@ pub fn App() -> impl IntoView {
     provide_context(AutoSrScalarEnabled(auto_sr_scalar_enabled));
     provide_context(ShowLeaderboardSrGain(show_leaderboard_sr_gain));
     provide_context(ShowLeaderboardSrValue(show_leaderboard_sr_value));
-    provide_context(WhiteGuildTags(white_guild_tags));
     provide_context(NameColorSetting(name_color));
+    provide_context(TagColorSetting(tag_color));
+    provide_context(ReadableFont(readable_font));
     provide_context(ShowMinimap(show_minimap));
     provide_context(LabelScaleMaster(label_scale_master));
     provide_context(LabelScaleStatic(label_scale_static));
@@ -1167,9 +1198,10 @@ pub fn App() -> impl IntoView {
             heat_live_source: heat_live_source.get(),
             heat_history_basis: heat_history_basis.get(),
             heat_selected_season_id: heat_selected_season_id.get(),
-            white_guild_tags: white_guild_tags.get(),
+            readable_font: readable_font.get(),
             show_minimap: show_minimap.get(),
             name_color: name_color.get(),
+            tag_color: tag_color.get(),
             label_scale_master: clamp_label_scale_master(label_scale_master.get()),
             label_scale_static: clamp_label_scale_group(label_scale_static.get()),
             label_scale_static_name: Some(clamp_label_scale_group(label_scale_static_name.get())),
@@ -1473,6 +1505,9 @@ pub fn App() -> impl IntoView {
                     }
                     "b" => {
                         bold_connections.update(|v| *v = !*v);
+                    }
+                    "f" => {
+                        readable_font.update(|v| *v = !*v);
                     }
                     "p" => {
                         resource_highlight.update(|v| *v = !*v);
@@ -2060,6 +2095,24 @@ fn MobileHistoryToggle() -> impl IntoView {
     }
 }
 
+#[derive(Clone, PartialEq)]
+struct TooltipInfo {
+    name: String,
+    guild_name: String,
+    guild_prefix: String,
+    held: String,
+    guild_color: (u8, u8, u8),
+    cooldown: Option<(String, f64)>,
+    treasury: TreasuryLevel,
+    base_resources: Resources,
+    resources: Resources,
+    resources_from_live: bool,
+    provenance_source: Option<String>,
+    live_production_rates: Option<Resources>,
+    live_storage_capacity: Option<Resources>,
+    takes_in_window: Option<u64>,
+}
+
 /// Tooltip that follows the mouse cursor when hovering a territory.
 #[component]
 fn Tooltip() -> impl IntoView {
@@ -2069,7 +2122,6 @@ fn Tooltip() -> impl IntoView {
     let tick: RwSignal<i64> = expect_context();
     let CurrentMode(mode) = expect_context();
     let HistoryTimestamp(history_timestamp) = expect_context();
-    let AbbreviateNames(abbreviate_names) = expect_context();
     let HeatModeEnabled(heat_mode_enabled) = expect_context();
     let HeatEntriesByTerritory(heat_entries_by_territory) = expect_context();
 
@@ -2082,8 +2134,36 @@ fn Tooltip() -> impl IntoView {
         let name = hovered.get()?;
         let map = territories.get();
         let ct = map.get(&name)?;
-        let (r, g, b) = ct.guild_color;
-        let resources = ct.territory.resources.clone();
+        let base_resources = ct.territory.resources.clone();
+        let live_held_resources = ct
+            .territory
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.held_resources.clone())
+            .filter(|value| !value.is_empty());
+        let live_production_rates = ct
+            .territory
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.production_rates.clone())
+            .filter(|value| !value.is_empty());
+        let live_storage_capacity = ct
+            .territory
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.storage_capacity.clone())
+            .filter(|value| !value.is_empty());
+        let resources = live_held_resources
+            .clone()
+            .unwrap_or_else(|| base_resources.clone());
+        let resources_from_live = live_held_resources.is_some();
+        let provenance_source = ct
+            .territory
+            .runtime
+            .as_ref()
+            .and_then(|rt| rt.provenance.as_ref())
+            .map(|p| p.source.clone())
+            .filter(|s| !s.trim().is_empty());
         let takes_in_window = if heat_mode_enabled.get() {
             Some(
                 heat_entries_by_territory
@@ -2095,23 +2175,7 @@ fn Tooltip() -> impl IntoView {
         } else {
             None
         };
-        let acquired = ct.territory.acquired.to_rfc3339();
-        let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&acquired) else {
-            let treasury = TreasuryLevel::VeryLow;
-            return Some((
-                name,
-                ct.territory.guild.name.clone(),
-                ct.territory.guild.prefix.clone(),
-                format_hms(0),
-                (r, g, b),
-                None::<(String, f64)>,
-                treasury,
-                resources,
-                takes_in_window,
-            ));
-        };
-        let secs = (reference_secs - dt.timestamp()).max(0);
-        let held = format_hms(secs);
+        let secs = (reference_secs - ct.territory.acquired.timestamp()).max(0);
         let cooldown = if secs < 600 {
             let remaining = 600 - secs;
             let frac = remaining as f64 / 600.0;
@@ -2119,18 +2183,23 @@ fn Tooltip() -> impl IntoView {
         } else {
             None
         };
-        let treasury = TreasuryLevel::from_held_seconds(secs);
-        Some((
+
+        Some(TooltipInfo {
             name,
-            ct.territory.guild.name.clone(),
-            ct.territory.guild.prefix.clone(),
-            held,
-            (r, g, b),
+            guild_name: ct.territory.guild.name.clone(),
+            guild_prefix: ct.territory.guild.prefix.clone(),
+            held: format_hms(secs),
+            guild_color: ct.guild_color,
             cooldown,
-            treasury,
+            treasury: TreasuryLevel::from_held_seconds(secs),
+            base_resources,
             resources,
+            resources_from_live,
+            provenance_source,
+            live_production_rates,
+            live_storage_capacity,
             takes_in_window,
-        ))
+        })
     });
 
     view! {
@@ -2139,100 +2208,211 @@ fn Tooltip() -> impl IntoView {
                 return view! { <div style="display:none;" /> }.into_any();
             };
             let (x, y) = mouse_pos.get();
-            let (r, g, b) = info.4;
-            let cooldown = info.5;
-            let treasury = info.6;
-            let resources = info.7;
-            let takes_in_window = info.8;
-            let (tr, tg, tb) = treasury.color_rgb();
-            let buff = treasury.buff_percent();
+            let (r, g, b) = info.guild_color;
+            let (tr, tg, tb) = info.treasury.color_rgb();
+            let buff = info.treasury.buff_percent();
+            let treasury_label = info.treasury.label();
+            let source_badge = if info.resources_from_live { "LIVE" } else { "MAP" };
+            let source_badge_style = if info.resources_from_live {
+                "background: rgba(var(--accent-live-rgb),0.14); border: 1px solid rgba(var(--accent-live-rgb),0.32); color: var(--accent-live);"
+            } else {
+                "background: rgba(154,149,144,0.12); border: 1px solid rgba(154,149,144,0.24); color: #9a9590;"
+            };
+            let is_iris = info
+                .provenance_source
+                .as_deref()
+                .is_some_and(|s| s.eq_ignore_ascii_case("iris"));
+
+            let render_resource_section = |title: &str,
+                                           title_color: &str,
+                                           chip_border: &str,
+                                           _value_color: &str,
+                                           resources: &Resources,
+                                           double_source: &Resources| {
+                let chips = tooltip_resource_items(resources, double_source)
+                    .into_iter()
+                    .filter(|(val, _, _, _)| *val > 0)
+                    .collect::<Vec<_>>();
+                if chips.is_empty() {
+                    return view! { <div style="display:none;" /> }.into_any();
+                }
+                view! {
+                    <div style="padding: 7px 0 3px; border-top: 1px solid rgba(40,44,62,0.6);">
+                        <div style={format!(
+                            "font-family: 'Silkscreen', monospace; font-size: 0.64rem; text-transform: uppercase; letter-spacing: 0.10em; color: {title_color}; margin-bottom: 5px;"
+                        )}>
+                            {title.to_string()}
+                        </div>
+                        <div style="display: flex; flex-wrap: wrap; gap: 4px;">
+                            {chips.into_iter().map(|(val, is_double, icon, label)| {
+                                let icon_style = icons::sprite_style(icon, 12).unwrap_or_default();
+                                let double_style = icon_style.clone();
+                                let amount = format_resource_compact(val);
+                                view! {
+                                    <div style={format!(
+                                        "display: flex; align-items: center; gap: 4px; background: #1a1d2a; padding: 3px 7px; border-radius: 4px; border: 1px solid {chip_border};"
+                                    )}>
+                                        <span style={icon_style} />
+                                        {(is_double).then(|| view! { <span style={double_style} /> })}
+                                        <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.70rem; color: #e2e0d8; font-variant-numeric: tabular-nums;">
+                                            {amount}
+                                        </span>
+                                        <span style={format!(
+                                            "font-family: 'Inter', system-ui, sans-serif; font-size: 0.60rem; color: {title_color};"
+                                        )}>
+                                            {label}
+                                        </span>
+                                    </div>
+                                }
+                            }).collect::<Vec<_>>()}
+                        </div>
+                    </div>
+                }.into_any()
+            };
+
+            let held_section = if info.resources_from_live {
+                render_resource_section(
+                    "Held Resources",
+                    "var(--accent-live)",
+                    "rgba(var(--accent-live-rgb),0.25)",
+                    "#dbe8ff",
+                    &info.resources,
+                    &info.base_resources,
+                )
+            } else {
+                render_resource_section(
+                    "Resources (Map)",
+                    "#9a9590",
+                    "rgba(154,149,144,0.25)",
+                    "#e2e0d8",
+                    &info.resources,
+                    &info.base_resources,
+                )
+            };
+            let production_section = info
+                .live_production_rates
+                .as_ref()
+                .map(|resources| {
+                    render_resource_section(
+                        "Production/Hr (Live)",
+                        "var(--accent-live)",
+                        "rgba(var(--accent-live-rgb),0.25)",
+                        "#d4e9ff",
+                        resources,
+                        &info.base_resources,
+                    )
+                })
+                .unwrap_or_else(|| view! { <div style="display:none;" /> }.into_any());
+            let storage_section = info
+                .live_storage_capacity
+                .as_ref()
+                .map(|resources| {
+                    render_resource_section(
+                        "Storage Capacity (Live)",
+                        "var(--accent-live)",
+                        "rgba(var(--accent-live-rgb),0.25)",
+                        "#dcf1ff",
+                        resources,
+                        &info.base_resources,
+                    )
+                })
+                .unwrap_or_else(|| view! { <div style="display:none;" /> }.into_any());
+
             view! {
                 <div
                     class="tooltip-animate"
                     style:left=format!("{}px", x + 16.0)
                     style:top=format!("{}px", y - 8.0)
-                    style="position: fixed; pointer-events: none; z-index: 100; background: #161921; border: 1px solid #282c3e; border-radius: 6px; overflow: hidden; box-shadow: 0 4px 16px rgba(0,0,0,0.5); max-width: 220px; display: flex; flex-direction: row;"
+                    style="position: fixed; pointer-events: none; z-index: 100; min-width: 280px; max-width: 340px; background: #13161f; border: 1px solid #282c3e; border-radius: 8px; overflow: hidden; box-shadow: 0 8px 24px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.02) inset; backdrop-filter: blur(2px); display: flex; flex-direction: row;"
                 >
-                    <div style={format!("width: 3px; flex-shrink: 0; background: {};", rgba_css(r, g, b, 0.85))} />
-                    <div style="padding: 8px 10px; flex: 1;">
-                        <div style="font-size: 0.82rem; font-weight: 700; color: #e2e0d8; font-family: 'Silkscreen', monospace; line-height: 1.3;">
-                            <span style="color: #9a9590; font-weight: 400;">"[" {info.2.clone()} "] "</span>
-                            {info.1}
-                        </div>
-                        <div style="font-size: 0.72rem; color: #9a9590; font-family: 'JetBrains Mono', monospace; margin-top: 2px;">
-                            {if abbreviate_names.get() { abbreviate_name(&info.0) } else { info.0.clone() }}
-                        </div>
-                        <div style="font-size: 0.65rem; margin-top: 5px; padding-top: 4px; border-top: 1px solid rgba(40,44,62,0.5); display: flex; justify-content: space-between; align-items: center; gap: 8px;">
-                            <span style="color: #9a9590; font-family: 'Inter', system-ui, sans-serif;">"Held"</span>
-                            <span style="color: #e2e0d8; font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums;">{info.3}</span>
-                        </div>
-                        {takes_in_window.map(|count| view! {
-                            <div style="font-size: 0.65rem; margin-top: 3px; padding-top: 3px; border-top: 1px solid rgba(40,44,62,0.5); display: flex; justify-content: space-between; align-items: center; gap: 8px;">
-                                <span style="color: #9a9590; font-family: 'Inter', system-ui, sans-serif;">"Takes in window"</span>
-                                <span style="color: #e2e0d8; font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums;">{count}</span>
+                    <div style={format!(
+                        "width: 4px; flex-shrink: 0; background: linear-gradient(180deg, {} 0%, {} 100%);",
+                        rgba_css(r, g, b, 0.85),
+                        rgba_css(r, g, b, 0.30),
+                    )} />
+                    <div style="padding: 12px 14px 10px; flex: 1; min-width: 0;">
+                        // Header: swatch + territory name + source badge
+                        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 3px;">
+                            <div style={format!(
+                                "width: 14px; height: 14px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.10); background: {}; flex-shrink: 0; box-shadow: 0 0 4px {};",
+                                rgba_css(r, g, b, 0.75),
+                                rgba_css(r, g, b, 0.25),
+                            )} />
+                            <div style="font-size: 0.92rem; font-weight: 700; color: #e2e0d8; font-family: 'Silkscreen', monospace; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0;">
+                                {info.name.clone()}
                             </div>
-                        })}
-                        <div style="font-size: 0.65rem; font-family: 'JetBrains Mono', monospace; margin-top: 3px; padding-top: 3px; border-top: 1px solid rgba(40,44,62,0.5); display: flex; align-items: center; gap: 4px;">
-                            <span style={format!("color: {}; font-size: 0.5rem;", rgba_css(tr, tg, tb, 1.0))}>{"\u{25C6}"}</span>
-                            <span style={format!("color: {};", rgba_css(tr, tg, tb, 0.9))}>{treasury.label()}</span>
-                            {(buff > 0).then(|| view! {
-                                <span style="color: #5a5860; margin-left: auto; font-size: 0.58rem;">{format!("+{}%", buff)}</span>
+                            <span style="display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0;">
+                                {is_iris.then(|| view! {
+                                    <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.60rem; letter-spacing: 0.08em; padding: 2px 7px; border-radius: 999px; text-transform: uppercase; background: rgba(168,85,247,0.14); border: 1px solid rgba(168,85,247,0.32); color: #a855f7;">
+                                        "IRIS"
+                                    </span>
+                                })}
+                                <span style={format!(
+                                    "font-family: 'JetBrains Mono', monospace; font-size: 0.60rem; letter-spacing: 0.08em; padding: 2px 7px; border-radius: 999px; text-transform: uppercase; {}",
+                                    source_badge_style
+                                )}>
+                                    {source_badge}
+                                </span>
+                            </span>
+                        </div>
+                        // Guild name + prefix
+                        <div style="display: flex; align-items: baseline; gap: 4px; margin-left: 22px; margin-bottom: 8px;">
+                            <span style="font-size: 0.78rem; color: #f5c542; font-family: 'Inter', system-ui, sans-serif;">{info.guild_name.clone()}</span>
+                            <span style="font-size: 0.70rem; color: #9a9590; font-family: 'JetBrains Mono', monospace;">"[" {info.guild_prefix.clone()} "]"</span>
+                        </div>
+
+                        // Key-value rows
+                        <div style="display: flex; flex-direction: column;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-top: 1px solid rgba(40,44,62,0.6);">
+                                <span style="color: #9a9590; font-size: 0.72rem; font-family: 'Inter', system-ui, sans-serif;">"Held"</span>
+                                <span style="color: #e2e0d8; font-size: 0.82rem; font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums;">{info.held.clone()}</span>
+                            </div>
+                            {match info.cooldown.clone() {
+                                Some((remaining, frac)) => view! {
+                                    <div style="padding: 6px 0; border-top: 1px solid rgba(40,44,62,0.6);">
+                                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
+                                            <span style="color: #f5c542; font-size: 0.72rem; font-family: 'Silkscreen', monospace;">"Cooldown"</span>
+                                            <span style="color: #f5c542; font-size: 0.82rem; font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums;">{remaining}</span>
+                                        </div>
+                                        <div style="height: 4px; background: rgba(255,255,255,0.06); border-radius: 2px; overflow: hidden;">
+                                            <div style={format!(
+                                                "height: 100%; width: {:.1}%; background: linear-gradient(to right, #f5c542, #d4a030); border-radius: 2px; box-shadow: 0 0 6px rgba(245,197,66,0.1);",
+                                                frac * 100.0
+                                            )} />
+                                        </div>
+                                    </div>
+                                }.into_any(),
+                                None => view! {
+                                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-top: 1px solid rgba(40,44,62,0.6);">
+                                        <span style="color: #9a9590; font-size: 0.72rem; font-family: 'Inter', system-ui, sans-serif;">"Cooldown"</span>
+                                        <span style="color: #50c878; font-size: 0.82rem; font-family: 'JetBrains Mono', monospace;">"Ready"</span>
+                                    </div>
+                                }.into_any(),
+                            }}
+                            <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-top: 1px solid rgba(40,44,62,0.6);">
+                                <span style="color: #9a9590; font-size: 0.72rem; font-family: 'Inter', system-ui, sans-serif;">"Treasury"</span>
+                                <span style="display: inline-flex; align-items: center; gap: 5px;">
+                                    <span style={format!("color: {}; font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;", rgba_css(tr, tg, tb, 1.0))}>{treasury_label}</span>
+                                    {(buff > 0).then(|| view! {
+                                        <span style={format!(
+                                            "font-size: 0.65rem; font-family: 'JetBrains Mono', monospace; color: {}; background: {}; padding: 1px 5px; border-radius: 3px;",
+                                            rgba_css(tr, tg, tb, 0.9),
+                                            rgba_css(tr, tg, tb, 0.08),
+                                        )}>{format!("+{}%", buff)}</span>
+                                    })}
+                                </span>
+                            </div>
+                            {info.takes_in_window.map(|count| view! {
+                                <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-top: 1px solid rgba(40,44,62,0.6);">
+                                    <span style="color: #9a9590; font-size: 0.72rem; font-family: 'Inter', system-ui, sans-serif;">"Takes in window"</span>
+                                    <span style="color: #e2e0d8; font-size: 0.78rem; font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums;">{count}</span>
+                                </div>
                             })}
                         </div>
-                        {(!resources.is_empty()).then(|| {
-                            if resources.has_all() {
-                                let rainbow_style =
-                                    icons::sprite_style("rainbow", 11).unwrap_or_default();
-                                view! {
-                                    <div style="font-size: 0.65rem; font-family: 'JetBrains Mono', monospace; margin-top: 3px; padding-top: 3px; border-top: 1px solid rgba(40,44,62,0.5); display: flex; flex-wrap: wrap; align-items: center; gap: 3px;">
-                                        <span style="display:inline-flex;align-items:center;gap:3px;background:#1a1d2a;padding:1px 5px;border-radius:3px;border:1px solid #282c3e;">
-                                            <span style={rainbow_style} />
-                                            <span style="font-size:0.6rem;color:#e2e0d8;">"All"</span>
-                                        </span>
-                                    </div>
-                                }
-                                .into_any()
-                            } else {
-                                let badges = tooltip_resource_items(&resources)
-                                    .into_iter()
-                                    .filter(|(val, _, _, _)| *val > 0)
-                                    .map(|(val, is_double, icon, label)| {
-                                        let icon_style =
-                                            icons::sprite_style(icon, 11).unwrap_or_default();
-                                        let double_style = icon_style.clone();
-                                        let amount = format_resource_compact(val);
-                                        view! {
-                                            <span style="display:inline-flex;align-items:center;gap:3px;background:#1a1d2a;padding:1px 5px;border-radius:3px;border:1px solid #282c3e;">
-                                                <span style={icon_style} />
-                                                {(is_double).then(|| view! { <span style={double_style} /> })}
-                                                <span style="font-size:0.6rem;color:#e2e0d8;">{amount}</span>
-                                                <span style="font-size:0.52rem;color:#5a5860;">{label}</span>
-                                            </span>
-                                        }
-                                    })
-                                    .collect::<Vec<_>>();
-                                view! {
-                                    <div style="font-size: 0.65rem; font-family: 'JetBrains Mono', monospace; margin-top: 3px; padding-top: 3px; border-top: 1px solid rgba(40,44,62,0.5); display: flex; flex-wrap: wrap; align-items: center; gap: 3px;">
-                                        {badges}
-                                    </div>
-                                }
-                                .into_any()
-                            }
-                        })}
-                        {cooldown.map(|(remaining, frac)| view! {
-                            <div style="margin-top: 4px; padding-top: 3px; border-top: 1px solid rgba(40,44,62,0.5);">
-                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 3px;">
-                                    <span style="font-size: 0.62rem; color: #f5c542; font-family: 'Inter', system-ui, sans-serif;">"Cooldown"</span>
-                                    <span style="font-size: 0.65rem; color: #f5c542; font-family: 'JetBrains Mono', monospace;">{remaining}</span>
-                                </div>
-                                <div style="height: 3px; background: rgba(255,255,255,0.06); border-radius: 2px; overflow: hidden;">
-                                    <div style={format!(
-                                        "height: 100%; width: {:.1}%; background: linear-gradient(to right, #f5c542, #d4a030); border-radius: 2px;",
-                                        frac * 100.0
-                                    )} />
-                                </div>
-                            </div>
-                        })}
+
+                        {held_section}
+                        {production_section}
+                        {storage_section}
                     </div>
                 </div>
             }.into_any()
@@ -2376,21 +2556,21 @@ mod tests {
     fn normalize_heat_selected_season_id_keeps_valid_saved_selection() {
         let meta = HistoryHeatMeta {
             latest_season_id: Some(31),
-             seasons: vec![
-                 HistoryHeatSeasonWindow {
-                     season_id: 31,
-                     start: "2026-01-01T00:00:00Z".to_string(),
-                     end: "2026-01-08T00:00:00Z".to_string(),
-                     is_current: true,
-                 },
-                 HistoryHeatSeasonWindow {
-                     season_id: 30,
-                     start: "2025-12-24T00:00:00Z".to_string(),
-                     end: "2025-12-31T00:00:00Z".to_string(),
-                     is_current: false,
-                 },
-             ],
-             all_time_earliest: None,
+            seasons: vec![
+                HistoryHeatSeasonWindow {
+                    season_id: 31,
+                    start: "2026-01-01T00:00:00Z".to_string(),
+                    end: "2026-01-08T00:00:00Z".to_string(),
+                    is_current: true,
+                },
+                HistoryHeatSeasonWindow {
+                    season_id: 30,
+                    start: "2025-12-24T00:00:00Z".to_string(),
+                    end: "2025-12-31T00:00:00Z".to_string(),
+                    is_current: false,
+                },
+            ],
+            all_time_earliest: None,
             retention_days: 30,
             season_fallback_days: 60,
         };
@@ -2401,14 +2581,14 @@ mod tests {
     #[test]
     fn normalize_heat_selected_season_id_replaces_invalid_saved_selection() {
         let meta = HistoryHeatMeta {
-             latest_season_id: Some(31),
-             seasons: vec![HistoryHeatSeasonWindow {
-                 season_id: 31,
-                 start: "2026-01-01T00:00:00Z".to_string(),
-                 end: "2026-01-08T00:00:00Z".to_string(),
-                 is_current: true,
-             }],
-             all_time_earliest: None,
+            latest_season_id: Some(31),
+            seasons: vec![HistoryHeatSeasonWindow {
+                season_id: 31,
+                start: "2026-01-01T00:00:00Z".to_string(),
+                end: "2026-01-08T00:00:00Z".to_string(),
+                is_current: true,
+            }],
+            all_time_earliest: None,
             retention_days: 30,
             season_fallback_days: 60,
         };
@@ -2422,9 +2602,9 @@ mod tests {
     #[test]
     fn normalize_heat_selected_season_id_returns_none_without_valid_latest() {
         let meta = HistoryHeatMeta {
-             latest_season_id: Some(31),
-             seasons: vec![],
-             all_time_earliest: None,
+            latest_season_id: Some(31),
+            seasons: vec![],
+            all_time_earliest: None,
             retention_days: 30,
             season_fallback_days: 60,
         };

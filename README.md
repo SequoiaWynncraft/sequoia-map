@@ -50,29 +50,60 @@ cd client && NO_COLOR=true trunk serve
 
 ### Development (Docker Hot Reload)
 
-Run the full dev stack (Postgres + Rust server hot reload + Trunk hot reload):
+Run the full dev stack (Postgres + server hot reload + ingest hot reload + client hot reload):
 
 ```bash
-POSTGRES_PASSWORD=changeme docker compose -f docker-compose.dev.yml up --build
+POSTGRES_PASSWORD=replace-with-strong-db-password \
+INTERNAL_INGEST_TOKEN=replace-with-long-random-token \
+docker compose -f docker-compose.dev.yml up --build
 ```
 
 - Client dev server: `http://localhost:8080`
 - Server API: `http://localhost:3000/api/...`
+- Ingest API: `http://localhost:3010` (`/health`, `/metrics`, `/v1/*`)
 - Postgres (optional host access): `localhost:55432` (override with `POSTGRES_PORT`)
 - Server reload: `cargo watch` (watches `server/` and `shared/`)
+- Ingest reload: `cargo watch` (watches `services/sequoia-ingest/` and `shared/`)
 - Client reload: Trunk watch/rebuild in `client/`
+- `POSTGRES_PASSWORD` is required (use a strong random value).
+- Internal ingest token is required in dev via `INTERNAL_INGEST_TOKEN` (use a random value with at least 24 chars; common placeholders are rejected)
+- Compile speed defaults for dev containers:
+  - shared native `CARGO_TARGET_DIR` between `server` + `ingest` to avoid duplicate dependency builds
+  - `CARGO_PROFILE_DEV_DEBUG=0` and `RUSTFLAGS=-C debuginfo=0` for faster incremental compile/link
+  - `CARGO_BUILD_JOBS=16` default (override higher/lower per machine)
 
 ### Docker Compose
 
 ```bash
-POSTGRES_PASSWORD=changeme docker compose up --build
+POSTGRES_PASSWORD=replace-with-strong-db-password docker compose up --build
 ```
 
-The app will be available at `http://localhost:3000`.
-Compose now also runs:
+Production compose is TLS-first and now runs:
+- Caddy reverse proxy (`80/443`) as the public edge
+- Sequoia server and ingest on private container networking only (no direct host port exposure)
 - `restart: unless-stopped` for long-running services
 - default Docker log rotation (`json-file`, configurable size/count)
 - automatic PostgreSQL backups to a dedicated `pgbackups` volume
+
+Set DNS for your domains and provide environment variables before starting:
+
+```bash
+POSTGRES_PASSWORD=replace-with-strong-db-password \
+INTERNAL_INGEST_TOKEN=replace-with-long-random-token \
+MAP_DOMAIN=map.example.com \
+IRIS_DOMAIN=iris.example.com \
+ACME_EMAIL=ops@example.com \
+docker compose up --build -d
+```
+
+Public routes:
+- `https://$MAP_DOMAIN` -> `server:3000`
+- `https://$IRIS_DOMAIN` -> `ingest:3010`
+
+Security notes:
+- `/api/internal/ingest/*` is blocked at the public edge proxy.
+- Compose defaults `INGEST_DEGRADED_SINGLE_REPORTER_ENABLED=true` so a single active reporter can still emit live updates.
+- For local development, use `docker-compose.dev.yml` (plain localhost HTTP endpoints).
 
 For faster repeat builds/deploys (especially on Coolify/VPS), use BuildKit cache and avoid
 rebuilding unless needed:
@@ -85,6 +116,40 @@ docker compose up -d
 # Normal restart without rebuilding
 docker compose up -d --no-build
 ```
+
+### Coolify (Docker Compose)
+
+Use the Coolify-specific stack file (includes an internal edge proxy on `8080`; no host `80`/`443` bindings):
+
+```bash
+docker-compose.coolify.yml
+```
+
+Required environment variables in Coolify:
+
+- `POSTGRES_PASSWORD`
+- `INTERNAL_INGEST_TOKEN`
+
+Routing in Coolify should target the `edge` service (port `8080`) for your map domain.
+The included edge config then routes:
+
+- `/v1/*` -> `ingest:3010` (reporter enroll/heartbeat/report)
+- `/iris/v1/*` -> `ingest:3010` (same as above, via `/iris` subdirectory)
+- everything else -> `server:3000` (map UI + API)
+
+This allows a single public domain such as `https://map.example.com` for both map and ingest.
+
+Health checks:
+
+- `edge`: `/api/health` (map server health through edge)
+- optional direct checks:
+  - `server`: `/api/health`
+  - `ingest`: `/health`
+
+Reporter base URL examples:
+
+- direct: `https://map.example.com`
+- subdirectory: `https://map.example.com/iris` (the edge proxy strips `/iris`)
 
 ## Architecture
 
@@ -121,9 +186,21 @@ Notes:
 | `RUST_LOG` | Tracing filter directive | `info` |
 | `DB_MAX_CONNECTIONS` | SQLx PostgreSQL pool max connections | `10` |
 | `SSE_BROADCAST_BUFFER` | In-memory SSE broadcast channel capacity | `256` |
+| `INTERNAL_INGEST_TOKEN` | Shared secret for ingest -> server internal routes (>=24 chars; placeholders rejected) | *(required for ingest)* |
+| `API_BODY_LIMIT_BYTES` | Max request body size accepted by server routes | `2097152` |
+| `MAX_INGEST_UPDATES_PER_REQUEST` | Max canonical territory updates accepted per internal ingest request | `1024` |
+| `MAX_HISTORY_REPLAY_EVENTS` | Max historical events replayed in `/api/history/at` reconstruction | `20000` |
+| `MAX_HISTORY_SR_SAMPLE_ROWS` | Max raw rows loaded for `/api/history/sr-samples` | `20000` |
 | `SEQ_LIVE_HANDOFF_V1` | Enable sequence-aware live-state handoff | `true` |
 | `GUILDS_ONLINE_CACHE_TTL_SECS` | Cache freshness threshold used by `/api/guilds/online` | `120` |
 | `GUILDS_ONLINE_MAX_CONCURRENCY` | Max concurrent upstream guild fetches in `/api/guilds/online` | `8` |
+| `MAP_DOMAIN` | Public HTTPS domain routed to Sequoia server by Caddy | `map.example.com` |
+| `IRIS_DOMAIN` | Public HTTPS domain routed to ingest by Caddy | `iris.example.com` |
+| `ACME_EMAIL` | Email used for ACME certificate registration in Caddy | *(empty)* |
+| `INGEST_TRUSTED_PROXY_CIDRS` | Comma-separated trusted reverse proxy CIDRs for `X-Forwarded-For` | *(empty in service; compose defaults to loopback + RFC1918 ranges)* |
+| `INGEST_DEGRADED_SINGLE_REPORTER_ENABLED` | Allow single active reporter to emit degraded canonical updates without quorum | `false` *(compose defaults to `true`)* |
+| `INGEST_API_BODY_LIMIT_BYTES` | Max request body size accepted by ingest routes | `2097152` |
+| `INGEST_MAX_REPORTS_PER_BATCH` | Max territory updates accepted per reporter upload batch | `1024` |
 | `DOCKER_LOG_MAX_SIZE` | Docker log max size before rotation (Compose) | `10m` |
 | `DOCKER_LOG_MAX_FILE` | Docker log file count to retain (Compose) | `5` |
 | `BACKUP_INTERVAL_HOURS` | Interval between automatic PostgreSQL backups | `6` |
@@ -184,9 +261,9 @@ Predefined alerts in `ops/prometheus/alerts/sequoia-map-alerts.yml`:
 - `SequoiaMapSeqLiveHandoffDisabled`
 - `SequoiaMapLiveStateRequestSpike`
 
-Coolify/VPS deployment notes:
+Coolify/VPS monitoring notes:
 
-- Configure health checks against `/api/health`.
+- Configure health checks against `/api/health` (server) and `/health` (ingest).
 - Ensure Prometheus can scrape `/api/metrics`
 - Mount or sync `ops/prometheus/alerts/sequoia-map-alerts.yml` into your Prometheus rules directory.
 - Tune alert thresholds (`for:` windows and request-rate thresholds) to match production traffic.
@@ -219,7 +296,8 @@ DATABASE_URL="postgres://postgres:postgres@localhost:5432/sequoia" \
 .
 ├── Cargo.toml            # Workspace root
 ├── Dockerfile            # Multi-stage build (client WASM + server binary)
-├── docker-compose.yml    # Server + PostgreSQL 17
+├── docker-compose.yml    # Production stack (Caddy TLS edge + server + ingest + PostgreSQL)
+├── docker-compose.coolify.yml # Coolify stack (platform TLS edge + server + ingest + PostgreSQL)
 ├── client/
 │   ├── index.html        # Trunk entry point
 │   ├── input.css         # Tailwind CSS input
@@ -244,6 +322,12 @@ DATABASE_URL="postgres://postgres:postgres@localhost:5432/sequoia" \
 │   │   ├── routes/       # HTTP & SSE route handlers
 │   │   └── services/     # Wynncraft poller, DB persistence
 │   └── ...
+├── services/
+│   └── sequoia-ingest/   # Iris ingest gateway service
+├── mods/
+│   └── wynn-iris/        # Fabric reporter mod
+├── ops/
+│   └── caddy/            # Caddy TLS edge config
 └── shared/
     └── src/
         ├── lib.rs        # Re-exports

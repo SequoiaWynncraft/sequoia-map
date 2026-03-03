@@ -209,6 +209,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let is_hovered = (u32(flags) & 1u) != 0u;
     let is_selected = (u32(flags) & 2u) != 0u;
+    let is_headquarters = (u32(flags) & 4u) != 0u;
 
     // GPU-side color animation
     var base_color = in.color.rgb;
@@ -261,9 +262,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     } else {
         b_alpha = border_alpha;
     }
+    if is_headquarters {
+        b_alpha = max(b_alpha, 0.88);
+    }
 
     // Fill zone — compute color and alpha with all effects
     var fill_color = compute_resource_fill(in.resource_data, in.uv, in.size_px, base_color);
+    if is_headquarters {
+        let hq_tint = vec3<f32>(0.973, 0.831, 0.275);
+        fill_color = mix(fill_color, hq_tint, 0.06);
+    }
     var f_alpha = fill_alpha + zoom_fill_boost;
     var cooldown_strip_mix: f32 = 0.0;
     var cooldown_strip_color: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
@@ -345,7 +353,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // Blend border and fill with anti-aliased transition
-    var color = mix(fill_color, base_color, border_t);
+    var border_color = base_color;
+    if is_headquarters {
+        border_color = mix(base_color, vec3<f32>(0.973, 0.831, 0.275), 0.8);
+    }
+    var color = mix(fill_color, border_color, border_t);
     var alpha = mix(f_alpha, b_alpha, border_t) * outer_aa;
     if cooldown_strip_mix > 0.0 {
         color = mix(color, cooldown_strip_color, cooldown_strip_mix);

@@ -44,8 +44,11 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Soft-threshold sampled alpha — tight range for bold, readable glyphs at distance.
+    // Derivative-aware alpha shaping to reduce grain/shimmer at distance while keeping edge contrast.
     let sampled_alpha = textureSample(glyph_texture, glyph_sampler, in.uv).a;
-    let alpha = smoothstep(0.18, 0.52, sampled_alpha) * in.color.a;
+    let base_softness = 0.12;
+    let adaptive = clamp(fwidth(sampled_alpha) * 1.25, 0.0, 0.10);
+    let softness = clamp(base_softness + adaptive, 0.10, 0.22);
+    let alpha = smoothstep(0.44 - softness, 0.44 + softness, sampled_alpha) * in.color.a;
     return vec4<f32>(in.color.rgb, alpha);
 }
