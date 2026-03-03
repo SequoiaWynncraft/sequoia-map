@@ -916,6 +916,11 @@ async fn check_rate_limit(
     max_keys: usize,
     window: Duration,
 ) -> bool {
+    if limit == 0 {
+        // Explicit zero disables this limiter without rejecting traffic.
+        return true;
+    }
+
     let now = Instant::now();
     let mut guard = windows.write().await;
 
@@ -1752,14 +1757,17 @@ async fn persist_raw_report(
 #[cfg(test)]
 mod tests {
     use super::{
-        ReporterFieldToggles, apply_toggle_policy, normalize_idempotency_key,
+        ReporterFieldToggles, apply_toggle_policy, check_rate_limit, normalize_idempotency_key,
         normalize_persisted_token, normalize_territory_name, parse_trusted_proxy_cidrs,
         quorum_satisfied, resolve_client_ip, territory_claim_hash, territory_idempotency_hash,
     };
     use axum::http::{HeaderMap, HeaderValue};
     use sequoia_shared::{CanonicalTerritoryUpdate, DataProvenance, TerritoryRuntimeData};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
     use std::net::{IpAddr, SocketAddr};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tokio::sync::RwLock;
 
     fn runtime_with_scalar_provenance(
         observed_at: &str,
@@ -2045,5 +2053,30 @@ mod tests {
         );
         assert_eq!(normalize_idempotency_key(Some("bad\u{0000}key"), 128), None);
         assert_eq!(normalize_idempotency_key(Some(&long_key), 128), None);
+    }
+
+    #[tokio::test]
+    async fn check_rate_limit_treats_zero_limit_as_disabled() {
+        let windows: Arc<RwLock<HashMap<String, VecDeque<Instant>>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+
+        for _ in 0..100 {
+            assert!(check_rate_limit(&windows, "shared-ip", 0, 1, Duration::from_secs(60)).await);
+        }
+
+        assert!(
+            windows.read().await.is_empty(),
+            "disabled limiter should not accumulate window state"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_rate_limit_enforces_non_zero_limit() {
+        let windows: Arc<RwLock<HashMap<String, VecDeque<Instant>>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+
+        assert!(check_rate_limit(&windows, "reporter-a", 2, 100, Duration::from_secs(60)).await);
+        assert!(check_rate_limit(&windows, "reporter-a", 2, 100, Duration::from_secs(60)).await);
+        assert!(!check_rate_limit(&windows, "reporter-a", 2, 100, Duration::from_secs(60)).await);
     }
 }

@@ -9,9 +9,9 @@ use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use sequoia_shared::{
-    BASE_HOURLY_SR, CanonicalTerritoryBatch, CanonicalTerritoryUpdate, SeasonScalarCurrent,
-    SeasonScalarSample, TerritoryChange, TerritoryEvent, TerritoryMap, TerritoryRuntimeChange,
-    weighted_units,
+    BASE_HOURLY_SR, CanonicalTerritoryBatch, CanonicalTerritoryUpdate, DataProvenance,
+    SeasonScalarCurrent, SeasonScalarSample, TerritoryChange, TerritoryEvent, TerritoryMap,
+    TerritoryRuntimeChange, weighted_units,
 };
 use tracing::{info, warn};
 
@@ -555,13 +555,12 @@ async fn persist_authoritative_scalar_sample(
 ) -> Result<(), String> {
     const MAX_REASONABLE_SCALAR: f64 = 20.0;
     const DUPLICATE_EPSILON: f64 = 0.0005;
-    const AUTHORITATIVE_CONFIDENCE: f64 = 0.99;
 
     let Some(pool) = state.db.as_ref() else {
         return Ok(());
     };
 
-    let mut candidate: Option<(DateTime<Utc>, i32, u16, i32)> = None;
+    let mut candidate: Option<(DateTime<Utc>, i32, u16, i32, f64, u32)> = None;
     for update in updates {
         let Some(provenance) = update
             .runtime
@@ -583,6 +582,7 @@ async fn persist_authoritative_scalar_sample(
         if season_id <= 0 || captured_territories == 0 || sr_per_hour <= 0 {
             continue;
         }
+        let (confidence, sample_count) = scalar_sample_quality(provenance);
 
         let observed_at = parse_optional_rfc3339(provenance.menu_observed_at.as_deref())
             .or_else(|| parse_optional_rfc3339(Some(provenance.observed_at.as_str())))
@@ -590,14 +590,23 @@ async fn persist_authoritative_scalar_sample(
 
         if candidate
             .as_ref()
-            .map(|(current, _, _, _)| observed_at > *current)
+            .map(|(current, _, _, _, _, _)| observed_at > *current)
             .unwrap_or(true)
         {
-            candidate = Some((observed_at, season_id, captured_territories, sr_per_hour));
+            candidate = Some((
+                observed_at,
+                season_id,
+                captured_territories,
+                sr_per_hour,
+                confidence,
+                sample_count,
+            ));
         }
     }
 
-    let Some((sampled_at, season_id, captured_territories, sr_per_hour)) = candidate else {
+    let Some((sampled_at, season_id, captured_territories, sr_per_hour, confidence, sample_count)) =
+        candidate
+    else {
         return Ok(());
     };
 
@@ -643,8 +652,8 @@ async fn persist_authoritative_scalar_sample(
     .bind(season_id)
     .bind(scalar_weighted)
     .bind(scalar_raw)
-    .bind(AUTHORITATIVE_CONFIDENCE)
-    .bind(1_i32)
+    .bind(confidence)
+    .bind(i32::try_from(sample_count).unwrap_or(i32::MAX))
     .execute(pool)
     .await
     .map_err(|e| format!("insert authoritative season scalar sample: {e}"))?;
@@ -654,8 +663,8 @@ async fn persist_authoritative_scalar_sample(
         season_id,
         scalar_weighted,
         scalar_raw,
-        confidence: AUTHORITATIVE_CONFIDENCE,
-        sample_count: 1,
+        confidence,
+        sample_count,
     };
     if let Ok(json) = serde_json::to_vec(&SeasonScalarCurrent {
         sample: Some(sample.clone()),
@@ -688,6 +697,12 @@ fn is_duplicate_scalar_sample(
         && (sample.scalar_raw - scalar_raw).abs() < epsilon
 }
 
+fn scalar_sample_quality(provenance: &DataProvenance) -> (f64, u32) {
+    let confidence = f64::from(provenance.confidence.clamp(0.0, 1.0));
+    let sample_count = u32::from(provenance.reporter_count.max(1));
+    (confidence, sample_count)
+}
+
 #[cfg(test)]
 mod tests {
     use axum::Json;
@@ -701,7 +716,7 @@ mod tests {
 
     use crate::routes::ingest::{
         constant_time_eq, ingest_territory, is_duplicate_scalar_sample,
-        sanitize_override_observed_at, should_replace_ingest_override,
+        sanitize_override_observed_at, scalar_sample_quality, should_replace_ingest_override,
     };
     use crate::state::{AppState, IngestTerritoryOverride, PreSerializedEvent};
 
@@ -1119,6 +1134,32 @@ mod tests {
         assert!(!is_duplicate_scalar_sample(
             &sample, 29, 2.151, 3.11218, 0.0005
         ));
+    }
+
+    #[test]
+    fn scalar_sample_quality_preserves_provenance_confidence_and_reporter_count() {
+        let degraded = DataProvenance {
+            confidence: 0.42,
+            reporter_count: 3,
+            ..DataProvenance::default()
+        };
+        let (confidence, sample_count) = scalar_sample_quality(&degraded);
+        assert!((confidence - 0.42).abs() < 1e-6);
+        assert_eq!(sample_count, 3);
+
+        let missing_count = DataProvenance {
+            confidence: -3.0,
+            reporter_count: 0,
+            ..DataProvenance::default()
+        };
+        assert_eq!(scalar_sample_quality(&missing_count), (0.0, 1));
+
+        let over_confident = DataProvenance {
+            confidence: 5.0,
+            reporter_count: 9,
+            ..DataProvenance::default()
+        };
+        assert_eq!(scalar_sample_quality(&over_confident), (1.0, 9));
     }
 
     #[test]
