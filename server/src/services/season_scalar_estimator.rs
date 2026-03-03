@@ -17,7 +17,7 @@ use crate::state::AppState;
 const OBSERVATION_INTERVAL_SECS: u64 = 300;
 const LEADERBOARD_SAMPLE_GUILDS: usize = 50;
 const AUTHORITATIVE_CONFIDENCE_MIN: f64 = 0.99;
-const AUTHORITATIVE_SAMPLE_COUNT: i32 = 1;
+const AUTHORITATIVE_SAMPLE_COUNT_MIN: i32 = 1;
 
 type LatestScalarSampleRow = (DateTime<Utc>, i32, f64, f64, f64, i32);
 
@@ -233,15 +233,14 @@ async fn refresh_latest_scalar_cache(state: &AppState, pool: &sqlx::PgPool) -> R
     let row: Option<LatestScalarSampleRow> = sqlx::query_as(
         "SELECT sampled_at, season_id, scalar_weighted, scalar_raw, confidence, sample_count \
          FROM season_scalar_samples \
-         WHERE confidence >= $1 AND sample_count = $2 \
-         ORDER BY sampled_at DESC \
+         ORDER BY (confidence >= $1 AND sample_count >= $2) DESC, sampled_at DESC \
          LIMIT 1",
     )
     .bind(AUTHORITATIVE_CONFIDENCE_MIN)
-    .bind(AUTHORITATIVE_SAMPLE_COUNT)
+    .bind(AUTHORITATIVE_SAMPLE_COUNT_MIN)
     .fetch_optional(pool)
     .await
-    .map_err(|e| format!("load latest authoritative season scalar sample: {e}"))?;
+    .map_err(|e| format!("load latest preferred season scalar sample: {e}"))?;
 
     let cached = row
         .map(

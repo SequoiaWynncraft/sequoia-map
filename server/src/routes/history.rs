@@ -42,7 +42,7 @@ type HistoryBoundsRow = (
 );
 type SeasonScalarRow = (DateTime<Utc>, i32, f64, f64, f64, i32);
 const AUTHORITATIVE_SCALAR_CONFIDENCE_MIN: f64 = 0.99;
-const AUTHORITATIVE_SCALAR_SAMPLE_COUNT: i32 = 1;
+const AUTHORITATIVE_SCALAR_SAMPLE_COUNT_MIN: i32 = 1;
 type SeasonObservationRow = (
     DateTime<Utc>,
     i32,
@@ -392,13 +392,13 @@ pub async fn history_at(
         sqlx::query_as::<_, SeasonScalarRow>(
             "SELECT sampled_at, season_id, scalar_weighted, scalar_raw, confidence, sample_count \
              FROM season_scalar_samples \
-             WHERE sampled_at <= $1 AND confidence >= $2 AND sample_count = $3 \
-             ORDER BY sampled_at DESC \
+             WHERE sampled_at <= $1 \
+             ORDER BY (confidence >= $2 AND sample_count >= $3) DESC, sampled_at DESC \
              LIMIT 1",
         )
         .bind(target)
         .bind(AUTHORITATIVE_SCALAR_CONFIDENCE_MIN)
-        .bind(AUTHORITATIVE_SCALAR_SAMPLE_COUNT)
+        .bind(AUTHORITATIVE_SCALAR_SAMPLE_COUNT_MIN)
         .fetch_optional(pool)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
@@ -1095,7 +1095,7 @@ mod tests {
         .await
         .expect("insert season guild observations");
 
-        let state = AppState::new(Some(pool));
+        let state = AppState::new(Some(pool.clone()));
         let (addr, server_handle) = spawn_test_server(state).await;
         let base_url = format!("http://{addr}");
         let client = reqwest::Client::new();
@@ -1391,7 +1391,7 @@ mod tests {
         .await
         .expect("insert inferred scalar sample");
 
-        let state = AppState::new(Some(pool));
+        let state = AppState::new(Some(pool.clone()));
         let (addr, server_handle) = spawn_test_server(state).await;
         let base_url = format!("http://{addr}");
         let client = reqwest::Client::new();
@@ -1419,6 +1419,51 @@ mod tests {
         assert_eq!(sample.season_id, 29);
         assert_eq!(sample.sample_count, 1);
         assert!((sample.scalar_weighted - 2.15).abs() < 1e-9);
+
+        sqlx::query("TRUNCATE TABLE season_scalar_samples RESTART IDENTITY")
+            .execute(&pool)
+            .await
+            .expect("truncate scalar samples");
+        let fallback_time = Utc::now() - chrono::TimeDelta::seconds(30);
+        sqlx::query(
+            "INSERT INTO season_scalar_samples \
+             (sampled_at, season_id, scalar_weighted, scalar_raw, confidence, sample_count) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(fallback_time)
+        .bind(30_i32)
+        .bind(1.91_f64)
+        .bind(2.02_f64)
+        .bind(0.44_f64)
+        .bind(3_i32)
+        .execute(&pool)
+        .await
+        .expect("insert fallback scalar sample");
+
+        let fallback_url = {
+            let mut url = reqwest::Url::parse(&format!("{base_url}/api/history/at"))
+                .expect("history at url (fallback sample)");
+            url.query_pairs_mut()
+                .append_pair("t", &Utc::now().to_rfc3339());
+            url
+        };
+        let fallback_at = client
+            .get(fallback_url)
+            .send()
+            .await
+            .expect("history at request (fallback sample)")
+            .error_for_status()
+            .expect("history at status (fallback sample)")
+            .json::<HistorySnapshot>()
+            .await
+            .expect("parse history snapshot (fallback sample)");
+
+        let fallback_sample = fallback_at
+            .season_scalar
+            .expect("fallback scalar should be attached when authoritative sample is absent");
+        assert_eq!(fallback_sample.season_id, 30);
+        assert_eq!(fallback_sample.sample_count, 3);
+        assert!((fallback_sample.confidence - 0.44).abs() < 1e-9);
 
         let at_before_url = {
             let mut url = reqwest::Url::parse(&format!("{base_url}/api/history/at"))
