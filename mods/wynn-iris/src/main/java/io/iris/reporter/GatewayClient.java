@@ -4,7 +4,6 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import net.fabricmc.loader.api.FabricLoader;
 
 import java.io.IOException;
 import java.net.URI;
@@ -35,11 +34,8 @@ public final class GatewayClient {
         String reporterId = config.reporterId;
         boolean guildOptIn = config.guildOptIn;
         GatewayModels.FieldToggles toggles = GatewayModels.fromConfig(config);
-        String minecraftVersion = FabricLoader.getInstance()
-            .getModContainer("minecraft")
-            .map(container -> container.getMetadata().getVersion().getFriendlyString())
-            .orElse("unknown");
-        String modVersion = IrisReporterClient.MOD_VERSION;
+        String minecraftVersion = RuntimeVersionResolver.currentMinecraftVersion();
+        String modVersion = RuntimeVersionResolver.currentModVersion();
 
         return CompletableFuture.supplyAsync(
             () -> enroll(
