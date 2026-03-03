@@ -89,14 +89,14 @@ services:
     logging: *default-logging
 
   edge:
-    image: caddy:2.10-alpine
+    build:
+      context: .
+      dockerfile: ops/caddy/Dockerfile.coolify
     restart: unless-stopped
     init: true
     stop_grace_period: 30s
     expose:
       - "8080"
-    volumes:
-      - ./ops/caddy/Caddyfile.coolify:/etc/caddy/Caddyfile:ro
     depends_on:
       server:
         condition: service_healthy
