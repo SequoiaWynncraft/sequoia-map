@@ -1,11 +1,18 @@
 :80, :8080 {
     encode zstd gzip
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
 
     route {
         @internalIngest path /api/internal/ingest/*
         @internalIngestViaIris path /iris/api/internal/ingest/*
+        @metrics path /api/metrics /metrics /iris/metrics /iris/api/metrics
         respond @internalIngest 403
         respond @internalIngestViaIris 403
+        respond @metrics 403
 
         # Optional subdirectory mode for the reporter base URL:
         # https://map.example.com/iris -> /v1/* on ingest

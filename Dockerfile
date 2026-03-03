@@ -75,14 +75,18 @@ RUN --mount=type=cache,id=sequoia-cargo-registry,target=/usr/local/cargo/registr
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
+RUN groupadd --system --gid 10001 sequoia \
+    && useradd --system --uid 10001 --gid 10001 --create-home --home-dir /home/sequoia sequoia
 
 WORKDIR /app
 
 COPY --from=server-build /app/sequoia-server /app/sequoia-server
 COPY --from=server-build /app/server/migrations /app/server/migrations
 COPY --from=client-build /app/client/dist /app/client/dist
+RUN chown -R sequoia:sequoia /app
 
 ENV RUST_LOG=info
 EXPOSE 3000
+USER sequoia
 
 CMD ["/app/sequoia-server"]

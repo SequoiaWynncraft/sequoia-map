@@ -4,12 +4,19 @@
 
 {$MAP_DOMAIN:map.example.com} {
     encode zstd gzip
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
 
     route {
         @internalIngest path /api/internal/ingest/*
         @internalIngestViaIris path /iris/api/internal/ingest/*
+        @metrics path /api/metrics /metrics /iris/metrics /iris/api/metrics
         respond @internalIngest 403
         respond @internalIngestViaIris 403
+        respond @metrics 403
 
         # Allow reporter traffic on the map domain.
         # - https://map.example.com/v1/*
@@ -33,9 +40,16 @@
 
 {$IRIS_DOMAIN:iris.example.com} {
     encode zstd gzip
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
     route {
         @internalIngest path /api/internal/ingest/*
+        @metrics path /metrics /api/metrics
         respond @internalIngest 403
+        respond @metrics 403
         reverse_proxy ingest:3010
     }
 }

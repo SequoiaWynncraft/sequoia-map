@@ -42,8 +42,8 @@ Default bind: `0.0.0.0:3010`.
 - `INGEST_RATE_LIMIT_REPORTER_PER_MIN` (default: `120`)
 - `INGEST_MAX_RATE_LIMIT_KEYS` (default: `20000`)
 - `INGEST_QUORUM_MIN_REPORTERS` (default: `2`)
-- `INGEST_DEGRADED_SINGLE_REPORTER_ENABLED` (default: `false`; compose stacks set `true` unless overridden)
-- `INGEST_TRUSTED_PROXY_CIDRS` (default: empty in service; compose defaults to loopback + RFC1918 private ranges)
+- `INGEST_DEGRADED_SINGLE_REPORTER_ENABLED` (default: `false`; prod/coolify compose defaults to `false`, dev compose defaults to `true`)
+- `INGEST_TRUSTED_PROXY_CIDRS` (default: empty in service; prod/coolify compose defaults to loopback only)
 - `INGEST_RAW_RETENTION_DAYS` (default: `7`)
 - `INGEST_REPORTER_RETENTION_DAYS` (default: `30`)
 - `INGEST_DUP_SUPPRESS_SECS` (default: `300`)
@@ -97,7 +97,7 @@ Signed endpoints (`/v1/heartbeat`, `/v1/report/territory`) also require:
 - Set `SEQUOIA_SERVER_URL` to a private/internal server address.
 - Set a high-entropy `SEQUOIA_INTERNAL_INGEST_TOKEN` / `INTERNAL_INGEST_TOKEN`.
 - Set `INGEST_DEGRADED_SINGLE_REPORTER_ENABLED=true` if single-reporter visibility is required; set it to `false` for strict multi-reporter quorum only.
-- Configure `INGEST_TRUSTED_PROXY_CIDRS` to your proxy network ranges so client IP rate limits/quarantine use real origins.
+- Configure `INGEST_TRUSTED_PROXY_CIDRS` to explicit edge proxy CIDRs so client IP rate limits/quarantine use real origins safely.
 - Keep `INGEST_AUTH_REQUIRED=true` in production.
 - Keep `INGEST_SINGLE_REPORTER_MODE=true` for Sybil resistance in single-reporter deployments.
 - Set `INGEST_ALLOWED_SERVER_HOST_SUFFIXES` to your Wynncraft host allowlist.

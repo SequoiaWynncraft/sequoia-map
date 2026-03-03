@@ -2633,6 +2633,16 @@ async fn purge_expired(state: &AppState) -> Result<(), String> {
         .await
         .map_err(|e| format!("delete expired reporters: {e}"))?;
 
+    let now_utc = Utc::now();
+    let now_rfc3339 = now_utc.to_rfc3339();
+    sqlx::query(
+        "DELETE FROM attestation_challenges WHERE expires_at < ? OR used_at IS NOT NULL",
+    )
+    .bind(&now_rfc3339)
+    .execute(&state.db)
+    .await
+    .map_err(|e| format!("delete expired/used attestation_challenges: {e}"))?;
+
     {
         let mut reporters = state.reporters.write().await;
         let mut token_index = state.token_index.write().await;
@@ -2680,7 +2690,6 @@ async fn purge_expired(state: &AppState) -> Result<(), String> {
     }
     {
         let mut challenges = state.challenges.write().await;
-        let now_utc = Utc::now();
         challenges.retain(|_, challenge| challenge.expires_at > now_utc);
     }
     {
@@ -2822,6 +2831,20 @@ async fn initialize_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
          expires_at TEXT NOT NULL,\
          used_at TEXT\
          )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_attestation_challenges_expires_at \
+         ON attestation_challenges (expires_at)",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_attestation_challenges_used_at \
+         ON attestation_challenges (used_at)",
     )
     .execute(pool)
     .await?;
