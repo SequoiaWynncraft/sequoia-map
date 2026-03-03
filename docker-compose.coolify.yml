@@ -89,14 +89,14 @@ services:
     logging: *default-logging
 
   edge:
-    image: caddy:2.10-alpine
+    build:
+      context: .
+      dockerfile: ops/caddy/Dockerfile.coolify
     restart: unless-stopped
     init: true
     stop_grace_period: 30s
     expose:
       - "8080"
-    volumes:
-      - ./ops/caddy/Caddyfile.coolify:/etc/caddy/Caddyfile:ro
     depends_on:
       server:
         condition: service_healthy
@@ -130,6 +130,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h \"$${POSTGRES_HOST}\" -p \"$${POSTGRES_PORT}\" -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\" >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     command: >
       sh -ec '
       mkdir -p /backups;
