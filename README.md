@@ -102,7 +102,9 @@ Public routes:
 
 Security notes:
 - `/api/internal/ingest/*` is blocked at the public edge proxy.
-- Compose defaults `INGEST_DEGRADED_SINGLE_REPORTER_ENABLED=true` so a single active reporter can still emit live updates.
+- Public edge routes block `/api/metrics`, `/metrics`, and `/iris/metrics`; scrape metrics over private service networking.
+- Compose defaults `INGEST_DEGRADED_SINGLE_REPORTER_ENABLED=false`; set it to `true` explicitly only if single-reporter degraded updates are required.
+- Compose defaults `INGEST_TRUSTED_PROXY_CIDRS` to loopback-only; set explicit edge proxy CIDRs in production so `X-Forwarded-For` can be trusted safely.
 - For local development, use `docker-compose.dev.yml` (plain localhost HTTP endpoints).
 
 For faster repeat builds/deploys (especially on Coolify/VPS), use BuildKit cache and avoid
@@ -197,8 +199,8 @@ Notes:
 | `MAP_DOMAIN` | Public HTTPS domain routed to Sequoia server by Caddy | `map.example.com` |
 | `IRIS_DOMAIN` | Public HTTPS domain routed to ingest by Caddy | `iris.example.com` |
 | `ACME_EMAIL` | Email used for ACME certificate registration in Caddy | *(empty)* |
-| `INGEST_TRUSTED_PROXY_CIDRS` | Comma-separated trusted reverse proxy CIDRs for `X-Forwarded-For` | *(empty in service; compose defaults to loopback + RFC1918 ranges)* |
-| `INGEST_DEGRADED_SINGLE_REPORTER_ENABLED` | Allow single active reporter to emit degraded canonical updates without quorum | `false` *(compose defaults to `true`)* |
+| `INGEST_TRUSTED_PROXY_CIDRS` | Comma-separated trusted reverse proxy CIDRs for `X-Forwarded-For` | *(empty in service; prod/coolify compose defaults to loopback only)* |
+| `INGEST_DEGRADED_SINGLE_REPORTER_ENABLED` | Allow single active reporter to emit degraded canonical updates without quorum | `false` *(prod/coolify compose defaults to `false`; dev compose defaults to `true`)* |
 | `INGEST_API_BODY_LIMIT_BYTES` | Max request body size accepted by ingest routes | `2097152` |
 | `INGEST_MAX_REPORTS_PER_BATCH` | Max territory updates accepted per reporter upload batch | `1024` |
 | `DOCKER_LOG_MAX_SIZE` | Docker log max size before rotation (Compose) | `10m` |
@@ -264,7 +266,7 @@ Predefined alerts in `ops/prometheus/alerts/sequoia-map-alerts.yml`:
 Coolify/VPS monitoring notes:
 
 - Configure health checks against `/api/health` (server) and `/health` (ingest).
-- Ensure Prometheus can scrape `/api/metrics`
+- Scrape metrics from private service addresses (`server:3000/api/metrics` and `ingest:3010/metrics`); public edge routes now block metrics paths.
 - Mount or sync `ops/prometheus/alerts/sequoia-map-alerts.yml` into your Prometheus rules directory.
 - Tune alert thresholds (`for:` windows and request-rate thresholds) to match production traffic.
 

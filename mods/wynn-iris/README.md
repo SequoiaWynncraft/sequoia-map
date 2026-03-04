@@ -42,6 +42,21 @@ Important fields:
 - `shareTradingRoutes` (default `false`; sends route scrape metadata only)
 - `shareLegacyCaptureSignals` (default `false`)
 - `shareLegacyWarSignals` (default `false`)
+- `autoUpdateEnabled` (default `true`; startup release checks enabled by default)
+- `autoUpdateRepo` (default `OneNoted/sequoia-map`)
+- `autoUpdateIncludePrerelease` (default `false`; stable releases only)
+- `autoUpdateLastCheckAt` (set automatically)
+- `autoUpdateLastResult` (set automatically)
+- `autoUpdatePendingVersion` (set automatically)
+- `autoUpdatePendingAssetUrl` (set automatically)
+- `autoUpdatePendingAssetSha256` (set automatically from signed manifest)
+- `autoUpdateApplyState` (set automatically; `idle`, `applying`, `staged_waiting_for_exit`, `helper_running`, `failed`)
+- `autoUpdateJobId` (set automatically when a staged update job exists)
+- `autoUpdateStagedPath` (set automatically)
+- `autoUpdateStagedSha256` (set automatically)
+- `autoUpdateLastApplyReason` (set automatically)
+- `autoUpdateLastApplyAt` (set automatically)
+- `autoUpdateHelperDeadlineMs` (default `1200000`)
 - `reporterId`
 - `token`
 
@@ -52,6 +67,10 @@ Important fields:
 - `/iris toggles`
 - `/iris toggle <field> <true|false>`
 - `/iris set-base-url <url>`
+- `/iris update status`
+- `/iris update check`
+- `/iris update apply`
+- `/iris update auto <true|false>`
 - `/iris privacy`
 - `/iris help`
 - `/ir <subcommand>` (short alias)
@@ -73,7 +92,7 @@ Supported `<field>` values:
 
 ```bash
 cd mods/wynn-iris
-gradle --no-daemon build
+./gradlew --no-daemon build
 ```
 
 ## Live Reload Development
@@ -133,9 +152,25 @@ cd mods/wynn-iris
 
 Profile definitions are in `profiles/`.
 
+## Release Tags
+
+- updater checks GitHub releases in `OneNoted/sequoia-map` by default
+- stable tags must follow `iris-vX.Y.Z` (for example `iris-v0.1.0`)
+- release assets must include versioned profile jars like:
+  - `wynn-iris-mc1.21.11-<version>.jar`
+  - `wynn-iris-mc1.21.4-<version>.jar`
+- releases must include signed updater metadata assets:
+  - `iris-update-manifest.json`
+  - `iris-update-manifest.sig`
+- GitHub release workflow expects repository secret `IRIS_MANIFEST_SIGNING_KEY_PEM_B64` (base64-encoded Ed25519 private key in PEM format)
+- `-sources.jar` assets are ignored by updater checks
+
 ## Notes
 
 - Default target is `minecraft_version=1.21.11`; `1.21.4` is also supported via profile build.
+- updater checks still run at startup, but apply is now staged for next launch
+- on Windows, `/iris update apply` stages the jar and schedules post-exit helper install
+- signed manifest + SHA-256 verification are required before staging any update
 - Parser is standalone and does not depend on Wynntils internals.
 - When validity gating is active, `/iris status` shows:
   - `data_validity` (`valid`, `paused_afk`, `paused_invalid_world`, `recovering`)

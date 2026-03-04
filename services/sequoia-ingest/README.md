@@ -3,10 +3,15 @@
 Standalone gateway for live reporter submissions (`/v1/*`) with:
 
 - reporter enrollment + rotating bearer tokens
+- challenge-based enrollment attestation (`/v1/attest/challenge`)
+- signed heartbeat/report envelopes (`X-Iris-*` headers) with replay rejection
+- single-active reporter identity enforcement (optional)
+- world/session attestation checks for no-interaction account binding
 - SHA-256 token hashing at rest in SQLite (legacy plaintext tokens auto-migrated on startup)
 - per-IP and per-reporter rate limits
 - duplicate suppression + temporary quarantine for malformed spam
 - quorum/degraded decisioning before canonical emit
+- provisional ownership corroboration + optional auto-revert from Wynncraft API
 - raw report persistence (SQLite) with retention purge
 - async forwarding to Sequoia internal territory ingest route
 
@@ -37,8 +42,8 @@ Default bind: `0.0.0.0:3010`.
 - `INGEST_RATE_LIMIT_REPORTER_PER_MIN` (default: `120`)
 - `INGEST_MAX_RATE_LIMIT_KEYS` (default: `20000`)
 - `INGEST_QUORUM_MIN_REPORTERS` (default: `2`)
-- `INGEST_DEGRADED_SINGLE_REPORTER_ENABLED` (default: `false`; compose stacks set `true` unless overridden)
-- `INGEST_TRUSTED_PROXY_CIDRS` (default: empty in service; compose defaults to loopback + RFC1918 private ranges)
+- `INGEST_DEGRADED_SINGLE_REPORTER_ENABLED` (default: `false`; prod/coolify compose defaults to `false`, dev compose defaults to `true`)
+- `INGEST_TRUSTED_PROXY_CIDRS` (default: empty in service; prod/coolify compose defaults to loopback only)
 - `INGEST_RAW_RETENTION_DAYS` (default: `7`)
 - `INGEST_REPORTER_RETENTION_DAYS` (default: `30`)
 - `INGEST_DUP_SUPPRESS_SECS` (default: `300`)
@@ -53,16 +58,37 @@ Default bind: `0.0.0.0:3010`.
 - `INGEST_MAX_CLAIMS_PER_TERRITORY` (default: `64`)
 - `INGEST_MAX_FORWARD_QUEUE` (default: `2048`)
 - `INGEST_FORWARD_MAX_ATTEMPTS` (default: `10`)
+- `INGEST_AUTH_REQUIRED` (default: `true`)
+- `INGEST_SINGLE_REPORTER_MODE` (default: `true`)
+- `INGEST_REQUIRE_SESSION_PROOF` (default: `true`)
+- `INGEST_SESSION_REFRESH_INTERVAL_SECS` (default: `600`)
+- `INGEST_SESSION_FAIL_OPEN_GRACE_SECS` (default: `1800`)
+- `INGEST_ALLOWED_SERVER_HOST_SUFFIXES` (default: `.wynncraft.com`)
+- `INGEST_WORLD_ATTESTATION_MAX_AGE_SECS` (default: `120`)
+- `INGEST_MAX_SIGNED_NONCE_KEYS` (default: `100000`)
+- `INGEST_SIGNED_NONCE_WINDOW_SECS` (default: `300`)
+- `INGEST_OWNER_SOFT_CORROBORATION` (default: `true`)
+- `INGEST_OWNER_CORROBORATION_WINDOW_SECS` (default: `90`)
+- `INGEST_OWNER_REVERT_ON_MISMATCH` (default: `true`)
+- `INGEST_ACTIVE_REPORTER_STALE_SECS` (default: `1800`)
 
 ## API
 
+- `POST /v1/attest/challenge`
 - `POST /v1/enroll`
 - `POST /v1/report/territory`
 - `POST /v1/heartbeat`
 - `GET /health`
 - `GET /metrics`
 
-Reporter endpoints require `Authorization: Bearer <token>` (except `/v1/enroll`).
+Reporter endpoints require `Authorization: Bearer <token>` (except `/v1/attest/challenge` and `/v1/enroll`).
+
+Signed endpoints (`/v1/heartbeat`, `/v1/report/territory`) also require:
+
+- `X-Iris-Key-Id`
+- `X-Iris-Ts`
+- `X-Iris-Nonce`
+- `X-Iris-Sig`
 
 ## Production Security Guidance
 
@@ -71,7 +97,10 @@ Reporter endpoints require `Authorization: Bearer <token>` (except `/v1/enroll`)
 - Set `SEQUOIA_SERVER_URL` to a private/internal server address.
 - Set a high-entropy `SEQUOIA_INTERNAL_INGEST_TOKEN` / `INTERNAL_INGEST_TOKEN`.
 - Set `INGEST_DEGRADED_SINGLE_REPORTER_ENABLED=true` if single-reporter visibility is required; set it to `false` for strict multi-reporter quorum only.
-- Configure `INGEST_TRUSTED_PROXY_CIDRS` to your proxy network ranges so client IP rate limits/quarantine use real origins.
+- Configure `INGEST_TRUSTED_PROXY_CIDRS` to explicit edge proxy CIDRs so client IP rate limits/quarantine use real origins safely.
+- Keep `INGEST_AUTH_REQUIRED=true` in production.
+- Keep `INGEST_SINGLE_REPORTER_MODE=true` for Sybil resistance in single-reporter deployments.
+- Set `INGEST_ALLOWED_SERVER_HOST_SUFFIXES` to your Wynncraft host allowlist.
 
 ## Reporter Field Toggles
 

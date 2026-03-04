@@ -28,7 +28,7 @@ fi
 BASE_NAME="wynn-iris-mc${minecraft_version}"
 MOD_VERSION_SUFFIX="${TARGET//./_}"
 
-gradle --no-daemon clean build \
+./gradlew --no-daemon clean build \
   -Pminecraft_version="${minecraft_version}" \
   -Pyarn_mappings="${yarn_mappings}" \
   -Ploader_version="${loader_version}" \
