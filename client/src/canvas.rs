@@ -37,6 +37,8 @@ const WHEEL_DELTA_MODE_LINE: u32 = 1;
 const WHEEL_DELTA_MODE_PAGE: u32 = 2;
 const TRACKPAD_BURST_GAP_MS: f64 = 45.0;
 const TRACKPAD_STICKY_MS: f64 = 900.0;
+const TRACKPAD_STICKY_CONTINUE_GAP_MS: f64 = 180.0;
+const TRACKPAD_STICKY_PIXEL_DELTA_LIMIT: f64 = 96.0;
 const TRACKPAD_SMALL_PIXEL_DELTA: f64 = 32.0;
 const TRACKPAD_BURST_DELTA_LIMIT: f64 = 80.0;
 const TRACKPAD_LINE_HEIGHT_PX: f64 = 18.0;
@@ -75,15 +77,13 @@ impl Default for TrackpadWheelClassifier {
 
 impl TrackpadWheelClassifier {
     fn is_trackpad(&mut self, sample: WheelSample) -> bool {
-        if self.trackpad_until_ms > 0.0 && sample.timestamp_ms <= self.trackpad_until_ms {
-            self.last_event_ms = sample.timestamp_ms;
-            return true;
-        }
+        let elapsed_ms = if self.last_event_ms >= 0.0 && sample.timestamp_ms > self.last_event_ms {
+            sample.timestamp_ms - self.last_event_ms
+        } else {
+            f64::INFINITY
+        };
 
-        let rapid = self.last_event_ms >= 0.0
-            && sample.timestamp_ms > self.last_event_ms
-            && (sample.timestamp_ms - self.last_event_ms) <= TRACKPAD_BURST_GAP_MS;
-        self.last_event_ms = sample.timestamp_ms;
+        let rapid = elapsed_ms <= TRACKPAD_BURST_GAP_MS;
         self.rapid_streak = if rapid {
             self.rapid_streak.saturating_add(1)
         } else {
@@ -106,8 +106,17 @@ impl TrackpadWheelClassifier {
             && abs_y > 0.0
             && abs_y <= TRACKPAD_BURST_DELTA_LIMIT;
 
-        let is_trackpad =
+        let has_direct_trackpad_signal =
             fractional || small_pixel_delta || mixed_axis_scroll || bursty_precision_scroll;
+        let sticky_continuation = self.trackpad_until_ms > 0.0
+            && sample.timestamp_ms <= self.trackpad_until_ms
+            && sample.delta_mode == WHEEL_DELTA_MODE_PIXEL
+            && elapsed_ms <= TRACKPAD_STICKY_CONTINUE_GAP_MS
+            && abs_y > 0.0
+            && abs_y <= TRACKPAD_STICKY_PIXEL_DELTA_LIMIT;
+        let is_trackpad = has_direct_trackpad_signal || sticky_continuation;
+
+        self.last_event_ms = sample.timestamp_ms;
         if is_trackpad {
             self.trackpad_until_ms = sample.timestamp_ms + TRACKPAD_STICKY_MS;
         }
@@ -145,15 +154,31 @@ fn normalize_pinch_zoom_delta(sample: WheelSample, viewport_height: f64) -> f64 
     (raw_pixels * PINCH_ZOOM_GAIN).clamp(-PINCH_ZOOM_CLAMP, PINCH_ZOOM_CLAMP)
 }
 
+fn has_trackpad_like_ctrl_pinch_signal(sample: WheelSample) -> bool {
+    let abs_x = sample.delta_x.abs();
+    let abs_y = sample.delta_y.abs();
+    let fractional = has_fractional_component(abs_x) || has_fractional_component(abs_y);
+    let small_or_mid_pixel_delta = sample.delta_mode == WHEEL_DELTA_MODE_PIXEL
+        && abs_y > 0.0
+        && abs_y <= TRACKPAD_STICKY_PIXEL_DELTA_LIMIT;
+    let mixed_axis_scroll = sample.delta_mode == WHEEL_DELTA_MODE_PIXEL
+        && abs_x > 0.0
+        && abs_y > 0.0
+        && abs_x <= TRACKPAD_BURST_DELTA_LIMIT
+        && abs_y <= TRACKPAD_BURST_DELTA_LIMIT;
+    fractional || small_or_mid_pixel_delta || mixed_axis_scroll
+}
+
 fn normalize_wheel_zoom_delta(
     sample: WheelSample,
     viewport_height: f64,
     ctrl_pinch: bool,
     classifier: &mut TrackpadWheelClassifier,
 ) -> f64 {
-    if ctrl_pinch {
+    let is_trackpad = classifier.is_trackpad(sample);
+    if ctrl_pinch && (is_trackpad || has_trackpad_like_ctrl_pinch_signal(sample)) {
         normalize_pinch_zoom_delta(sample, viewport_height)
-    } else if classifier.is_trackpad(sample) {
+    } else if is_trackpad {
         normalize_trackpad_zoom_delta(sample, viewport_height)
     } else {
         sample.delta_y
@@ -1147,8 +1172,26 @@ mod tests {
         let mut classifier = TrackpadWheelClassifier::default();
         assert!(classifier.is_trackpad(sample(0.5, WHEEL_DELTA_MODE_LINE, 10.0)));
 
-        let momentum_tail = sample(90.0, WHEEL_DELTA_MODE_PIXEL, 420.0);
+        let momentum_tail = sample(90.0, WHEEL_DELTA_MODE_PIXEL, 120.0);
         assert!(classifier.is_trackpad(momentum_tail));
+    }
+
+    #[test]
+    fn sticky_window_does_not_reclassify_mouse_line_wheel() {
+        let mut classifier = TrackpadWheelClassifier::default();
+        assert!(classifier.is_trackpad(sample(0.5, WHEEL_DELTA_MODE_LINE, 10.0)));
+
+        let mouse_wheel_event = sample(3.0, WHEEL_DELTA_MODE_LINE, 80.0);
+        assert!(!classifier.is_trackpad(mouse_wheel_event));
+    }
+
+    #[test]
+    fn sticky_window_does_not_reclassify_large_pixel_mouse_ticks() {
+        let mut classifier = TrackpadWheelClassifier::default();
+        assert!(classifier.is_trackpad(sample(0.4, WHEEL_DELTA_MODE_LINE, 10.0)));
+
+        let mouse_wheel_event = sample(120.0, WHEEL_DELTA_MODE_PIXEL, 90.0);
+        assert!(!classifier.is_trackpad(mouse_wheel_event));
     }
 
     #[test]
@@ -1175,6 +1218,22 @@ mod tests {
         let normalized = normalize_wheel_zoom_delta(s, 800.0, true, &mut classifier);
         let expected = 0.5 * PINCH_LINE_HEIGHT_PX * PINCH_ZOOM_GAIN;
         assert_close(normalized, expected);
+    }
+
+    #[test]
+    fn ctrl_line_mode_mouse_wheel_keeps_legacy_delta() {
+        let mut classifier = TrackpadWheelClassifier::default();
+        let s = sample(3.0, WHEEL_DELTA_MODE_LINE, 0.0);
+        let normalized = normalize_wheel_zoom_delta(s, 800.0, true, &mut classifier);
+        assert_close(normalized, 3.0);
+    }
+
+    #[test]
+    fn ctrl_large_pixel_mouse_wheel_keeps_legacy_delta() {
+        let mut classifier = TrackpadWheelClassifier::default();
+        let s = sample(120.0, WHEEL_DELTA_MODE_PIXEL, 0.0);
+        let normalized = normalize_wheel_zoom_delta(s, 800.0, true, &mut classifier);
+        assert_close(normalized, 120.0);
     }
 
     #[test]
