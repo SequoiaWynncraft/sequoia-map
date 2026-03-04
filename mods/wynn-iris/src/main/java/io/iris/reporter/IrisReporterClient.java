@@ -23,7 +23,7 @@ import java.lang.reflect.Constructor;
 import java.util.Locale;
 
 public final class IrisReporterClient implements ClientModInitializer {
-    public static final String MOD_VERSION = "0.1.3";
+    public static final String MOD_VERSION = "0.1.0";
     public static final Logger LOGGER = LoggerFactory.getLogger("wynn-iris");
     private static final String ROOT_COMMAND = "iris";
 
@@ -604,22 +604,47 @@ public final class IrisReporterClient implements ClientModInitializer {
     }
 
     private static ClickEvent buildRunCommandClickEvent(String command) {
+        String modernCommand = normalizeRunCommandForModernClickEvent(command);
         ClickEvent modern = instantiate(
             ClickEvent.class,
             "net.minecraft.text.ClickEvent$RunCommand",
             new Class<?>[] { String.class },
-            command
+            modernCommand
         );
         if (modern != null) {
             return modern;
         }
+        String legacyCommand = normalizeRunCommandForLegacyClickEvent(command);
         return instantiate(
             ClickEvent.class,
             "net.minecraft.text.ClickEvent",
             new Class<?>[] { ClickEvent.Action.class, String.class },
             ClickEvent.Action.RUN_COMMAND,
-            command
+            legacyCommand
         );
+    }
+
+    static String normalizeRunCommandForModernClickEvent(String command) {
+        String normalized = normalizeRunCommand(command);
+        if (normalized.startsWith("/")) {
+            return normalized.substring(1);
+        }
+        return normalized;
+    }
+
+    static String normalizeRunCommandForLegacyClickEvent(String command) {
+        String normalized = normalizeRunCommand(command);
+        if (normalized.startsWith("/")) {
+            return normalized;
+        }
+        return "/" + normalized;
+    }
+
+    private static String normalizeRunCommand(String command) {
+        if (command == null) {
+            return "";
+        }
+        return command.trim();
     }
 
     private static ClickEvent buildOpenUrlClickEvent(URI uri) {
