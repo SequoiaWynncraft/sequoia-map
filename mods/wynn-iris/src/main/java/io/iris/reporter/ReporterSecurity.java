@@ -104,6 +104,12 @@ public final class ReporterSecurity {
         }
         String username = asString(invoke(session, "getUsername"));
         String token = asString(invoke(session, "getAccessToken"));
+        if (token == null || token.isBlank()) {
+            token = asString(readField(session, "accessToken"));
+        }
+        if (token == null || token.isBlank()) {
+            token = parseAccessTokenFromSessionId(asString(invoke(session, "getSessionId")));
+        }
 
         String uuid = asString(invoke(session, "getUuidOrNull"));
         if (uuid == null || uuid.isBlank()) {
@@ -175,6 +181,25 @@ public final class ReporterSecurity {
             return null;
         }
         return raw.trim().replace("-", "").toLowerCase(Locale.ROOT);
+    }
+
+    static String parseAccessTokenFromSessionId(String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return null;
+        }
+        String normalized = sessionId.trim();
+        if (!normalized.startsWith("token:")) {
+            return null;
+        }
+        String[] parts = normalized.split(":", 3);
+        if (parts.length < 3) {
+            return null;
+        }
+        String token = parts[1] == null ? "" : parts[1].trim();
+        if (token.isBlank()) {
+            return null;
+        }
+        return token;
     }
 
     private static String asString(Object value) {
