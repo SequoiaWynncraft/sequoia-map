@@ -1,5 +1,7 @@
 use js_sys::{Function, Reflect, encode_uri_component};
 use leptos::prelude::*;
+use leptos_router::NavigateOptions;
+use leptos_router::hooks::{use_location, use_navigate};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 
@@ -203,10 +205,25 @@ const GUILD_ONLINE_POLL_INTERVAL_SECS: u64 = 120;
 const GUILD_ONLINE_BOOTSTRAP_RETRY_SECS: u64 = 3;
 const GUILD_ONLINE_ERROR_RETRY_SECS: u64 = 15;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MapMode {
     Live,
     History,
+}
+
+fn map_mode_from_path(path: &str) -> MapMode {
+    if path == "/history" || path.starts_with("/history/") {
+        MapMode::History
+    } else {
+        MapMode::Live
+    }
+}
+
+fn canonical_path_for_mode(mode: MapMode) -> &'static str {
+    match mode {
+        MapMode::Live => "/",
+        MapMode::History => "/history",
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -682,6 +699,9 @@ fn normalize_heat_selected_season_id(meta: &HistoryHeatMeta, selected: Option<i3
 /// Root application component. Provides global reactive signals via context.
 #[component]
 pub fn App() -> impl IntoView {
+    let location = use_location();
+    let navigate = use_navigate();
+
     // Global signals
     let territories: RwSignal<ClientTerritoryMap> = RwSignal::new(Default::default());
     let viewport: RwSignal<Viewport> = RwSignal::new(Viewport::default());
@@ -793,6 +813,7 @@ pub fn App() -> impl IntoView {
     let history_season_scalar_sample: RwSignal<Option<SeasonScalarSample>> = RwSignal::new(None);
     let history_season_leaderboard: RwSignal<Option<Vec<HistoryGuildSrEntry>>> =
         RwSignal::new(None);
+    let route_mode_sync_in_flight: RwSignal<bool> = RwSignal::new(false);
     let territory_geometry: StoredValue<TerritoryGeometryMap> = StoredValue::new(HashMap::new());
     let guild_colors: StoredValue<GuildColorMap> = StoredValue::new(HashMap::new());
 
@@ -892,6 +913,98 @@ pub fn App() -> impl IntoView {
 
     // Probe history capability once on startup so the History toggle appears automatically.
     history::check_availability(history_available);
+
+    // Keep URL path and map mode in sync without remounting the app.
+    Effect::new({
+        let navigate = navigate.clone();
+        move || {
+            let path = location.pathname.get();
+            let target_mode = map_mode_from_path(&path);
+            let current_mode = map_mode.get();
+            let history_is_available = history_available.get();
+
+            if target_mode == current_mode {
+                if route_mode_sync_in_flight.get() {
+                    route_mode_sync_in_flight.set(false);
+                }
+                return;
+            }
+
+            route_mode_sync_in_flight.set(true);
+
+            match target_mode {
+                MapMode::History => {
+                    if !history_is_available {
+                        // History storage may become available shortly after startup.
+                        history::check_availability(history_available);
+                        route_mode_sync_in_flight.set(false);
+                        navigate(
+                            "/",
+                            NavigateOptions {
+                                replace: true,
+                                ..Default::default()
+                            },
+                        );
+                        return;
+                    }
+                    history::enter_history_mode(history::EnterHistoryModeInput {
+                        mode: map_mode,
+                        history_timestamp,
+                        history_bounds,
+                        history_fetch_nonce,
+                        history_buffered_updates,
+                        history_buffer_mode_active,
+                        needs_live_resync,
+                        history_scalar_sample: history_season_scalar_sample,
+                        history_sr_leaderboard: history_season_leaderboard,
+                        geo_store: territory_geometry,
+                        guild_color_store: guild_colors,
+                        territories,
+                    });
+                }
+                MapMode::Live => {
+                    history::exit_history_mode(history::ExitHistoryModeInput {
+                        mode: map_mode,
+                        playback_active,
+                        history_fetch_nonce,
+                        history_timestamp,
+                        history_buffered_updates,
+                        history_buffer_mode_active,
+                        last_live_seq,
+                        needs_live_resync,
+                        live_handoff_resync_count,
+                        history_sr_leaderboard: history_season_leaderboard,
+                        territories,
+                    });
+                }
+            }
+        }
+    });
+
+    Effect::new({
+        move || {
+            let mode_now = map_mode.get();
+            let path_now = location.pathname.get();
+
+            if route_mode_sync_in_flight.get() {
+                if map_mode_from_path(&path_now) == mode_now {
+                    route_mode_sync_in_flight.set(false);
+                }
+                return;
+            }
+
+            let target_path = canonical_path_for_mode(mode_now);
+            if path_now != target_path {
+                navigate(
+                    target_path,
+                    NavigateOptions {
+                        replace: true,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+    });
 
     // Reset history scalar snapshot when returning to live mode.
     Effect::new(move || {
@@ -2534,8 +2647,9 @@ fn TerritoryPeekCard() -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_SIDEBAR_WIDTH, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN, SettingsV2,
-        clamp_sidebar_width, normalize_heat_selected_season_id,
+        DEFAULT_SIDEBAR_WIDTH, MapMode, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN, SettingsV2,
+        canonical_path_for_mode, clamp_sidebar_width, map_mode_from_path,
+        normalize_heat_selected_season_id,
     };
     use sequoia_shared::history::{HistoryHeatMeta, HistoryHeatSeasonWindow};
 
@@ -2610,5 +2724,15 @@ mod tests {
         };
 
         assert_eq!(normalize_heat_selected_season_id(&meta, Some(999)), None);
+    }
+
+    #[test]
+    fn map_mode_helpers_keep_canonical_history_paths() {
+        assert_eq!(map_mode_from_path("/"), MapMode::Live);
+        assert_eq!(map_mode_from_path("/history"), MapMode::History);
+        assert_eq!(map_mode_from_path("/history/"), MapMode::History);
+        assert_eq!(map_mode_from_path("/history/extra"), MapMode::History);
+        assert_eq!(canonical_path_for_mode(MapMode::Live), "/");
+        assert_eq!(canonical_path_for_mode(MapMode::History), "/history");
     }
 }
