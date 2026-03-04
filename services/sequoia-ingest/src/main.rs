@@ -1676,20 +1676,33 @@ async fn maybe_refresh_session_attestation(
         }
         SessionVerifyResult::Invalid => Err(StatusCode::UNAUTHORIZED),
         SessionVerifyResult::Unavailable => {
-            let fail_open_until = now
-                + chrono::Duration::seconds(
-                    i64::try_from(state.cfg.session_fail_open_grace_secs).unwrap_or(1800),
-                );
             let mut fail_open = state.session_verifier_fail_open_until.write().await;
-            *fail_open =
-                Some(Instant::now() + Duration::from_secs(state.cfg.session_fail_open_grace_secs));
-            if now <= fail_open_until {
+            if session_verifier_within_fail_open_grace(
+                &mut fail_open,
+                Instant::now(),
+                state.cfg.session_fail_open_grace_secs,
+            ) {
                 Ok(())
             } else {
                 Err(StatusCode::SERVICE_UNAVAILABLE)
             }
         }
     }
+}
+
+fn session_verifier_within_fail_open_grace(
+    fail_open_until: &mut Option<Instant>,
+    now: Instant,
+    grace_secs: u64,
+) -> bool {
+    let deadline = if let Some(existing_deadline) = *fail_open_until {
+        existing_deadline
+    } else {
+        let created_deadline = now + Duration::from_secs(grace_secs);
+        *fail_open_until = Some(created_deadline);
+        created_deadline
+    };
+    now <= deadline
 }
 
 enum SessionVerifyResult {
@@ -2635,13 +2648,11 @@ async fn purge_expired(state: &AppState) -> Result<(), String> {
 
     let now_utc = Utc::now();
     let now_rfc3339 = now_utc.to_rfc3339();
-    sqlx::query(
-        "DELETE FROM attestation_challenges WHERE expires_at < ? OR used_at IS NOT NULL",
-    )
-    .bind(&now_rfc3339)
-    .execute(&state.db)
-    .await
-    .map_err(|e| format!("delete expired/used attestation_challenges: {e}"))?;
+    sqlx::query("DELETE FROM attestation_challenges WHERE expires_at < ? OR used_at IS NOT NULL")
+        .bind(&now_rfc3339)
+        .execute(&state.db)
+        .await
+        .map_err(|e| format!("delete expired/used attestation_challenges: {e}"))?;
 
     {
         let mut reporters = state.reporters.write().await;
@@ -3337,7 +3348,8 @@ mod tests {
         AppState, Config, Metrics, ReporterFieldToggles, ReporterRecord, apply_toggle_policy,
         check_rate_limit, evaluate_territory_claim, normalize_idempotency_key,
         normalize_persisted_token, normalize_territory_name, parse_trusted_proxy_cidrs,
-        quorum_satisfied, resolve_client_ip, territory_claim_hash, territory_idempotency_hash,
+        quorum_satisfied, resolve_client_ip, session_verifier_within_fail_open_grace,
+        territory_claim_hash, territory_idempotency_hash,
     };
     use axum::http::{HeaderMap, HeaderValue};
     use chrono::Utc;
@@ -3700,6 +3712,32 @@ mod tests {
     fn parse_trusted_proxy_cidrs_skips_invalid_entries() {
         let parsed = parse_trusted_proxy_cidrs("10.0.0.0/8, not-a-cidr, 192.168.0.0/16");
         assert_eq!(parsed.len(), 2);
+    }
+
+    #[test]
+    fn session_verifier_fail_open_window_is_bounded_to_first_outage() {
+        let start = Instant::now();
+        let grace_secs = 3_u64;
+        let mut fail_open_until = None;
+
+        assert!(session_verifier_within_fail_open_grace(
+            &mut fail_open_until,
+            start,
+            grace_secs,
+        ));
+        let first_deadline = fail_open_until.expect("deadline should be created");
+
+        assert!(session_verifier_within_fail_open_grace(
+            &mut fail_open_until,
+            start + Duration::from_secs(2),
+            grace_secs,
+        ));
+        assert!(!session_verifier_within_fail_open_grace(
+            &mut fail_open_until,
+            start + Duration::from_secs(4),
+            grace_secs,
+        ));
+        assert_eq!(fail_open_until, Some(first_deadline));
     }
 
     #[test]
