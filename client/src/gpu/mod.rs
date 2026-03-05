@@ -163,6 +163,7 @@ struct GpuIconRenderer {
     instance_capacity: u32,
     instances_buf: Vec<IconInstance>,
     uv_by_kind: HashMap<IconKind, [f32; 4]>,
+    ornament_aspect: f32,
 }
 
 const GLYPH_ATLAS_FONT_PX: f64 = 96.0;
@@ -222,11 +223,14 @@ const RELATIVE_BOOST_EPS: f32 = 0.01;
 const LABEL_VISIBILITY_MIN_SCALE: f64 = 0.10;
 const DYNAMIC_COOLDOWN_MIN_WORLD: f32 = 11.2;
 const DYNAMIC_COOLDOWN_MAX_WORLD: f32 = 66.0;
-const HQ_CROWN_ATLAS_SLOT_INDEX: u32 = ICON_COUNT;
-const ICON_ATLAS_SLOT_COUNT: u32 = ICON_COUNT + 1;
 const HQ_CROWN_MIN_PX: f32 = 12.0;
 const HQ_CROWN_SIZE_MULTIPLIER: f32 = 1.02;
 const HQ_CROWN_MAX_BOX_FRACTION: f32 = 0.40;
+const ORNAMENT_MIN_BOX_PX: f32 = 34.0;
+const ORNAMENT_INSET_PX: f32 = 2.0;
+const ORNAMENT_CORNER_SHORT_SIDE_PX: f32 = 26.0;
+const ORNAMENT_CORNER_MAX_FRACTION: f32 = 0.36;
+const ORNAMENT_TINT_ALPHA: f32 = 0.86;
 
 #[inline]
 fn lerp_f32(a: f32, b: f32, t: f32) -> f32 {
@@ -1852,51 +1856,132 @@ impl GpuRenderer {
         let ctx = get_2d_context(&canvas, true)?;
         let resource_atlas_w = icons.resource_image.natural_width().max(1);
         let resource_atlas_h = icons.resource_image.natural_height().max(1);
+        let crown_w = icons.hq_crown_image.natural_width().max(1);
         let crown_h = icons.hq_crown_image.natural_height().max(1);
+        let ornament_w = icons.territory_ornament_image.natural_width().max(1);
+        let ornament_h = icons.territory_ornament_image.natural_height().max(1);
         let icon_cell_w = (resource_atlas_w / ICON_COUNT).max(1);
         let icon_cell_h = resource_atlas_h.max(1);
-        let atlas_w = icon_cell_w * ICON_ATLAS_SLOT_COUNT;
-        let atlas_h = icon_cell_h.max(crown_h);
+        let crown_slot_w = icon_cell_w.max(crown_w);
+        let resource_x = 0u32;
+        let crown_x = resource_x + resource_atlas_w;
+        let ornament_x = crown_x + crown_slot_w;
+        let atlas_w = ornament_x + ornament_w;
+        let atlas_h = icon_cell_h.max(crown_h).max(ornament_h);
         canvas.set_width(atlas_w);
         canvas.set_height(atlas_h);
         ctx.clear_rect(0.0, 0.0, atlas_w as f64, atlas_h as f64);
         ctx.set_image_smoothing_enabled(false);
         ctx.draw_image_with_html_image_element_and_dw_and_dh(
             &icons.resource_image,
+            resource_x as f64,
             0.0,
-            0.0,
-            (icon_cell_w * ICON_COUNT) as f64,
+            resource_atlas_w as f64,
             icon_cell_h as f64,
         )
         .ok()?;
         ctx.draw_image_with_html_image_element_and_dw_and_dh(
             &icons.hq_crown_image,
-            (icon_cell_w * HQ_CROWN_ATLAS_SLOT_INDEX) as f64,
+            crown_x as f64,
             0.0,
-            icon_cell_w as f64,
+            crown_slot_w as f64,
             icon_cell_h as f64,
+        )
+        .ok()?;
+        ctx.draw_image_with_html_image_element(
+            &icons.territory_ornament_image,
+            ornament_x as f64,
+            0.0,
         )
         .ok()?;
         ctx.set_image_smoothing_enabled(true);
 
-        let icon_uv = |slot: u32| {
-            let cell_w = 1.0 / ICON_ATLAS_SLOT_COUNT as f32;
-            let u0 = slot as f32 * cell_w;
-            [u0, 0.0, u0 + cell_w, 1.0]
-        };
-        let mut uv_by_kind = HashMap::with_capacity(ICON_ATLAS_SLOT_COUNT as usize);
-        uv_by_kind.insert(IconKind::Emerald, icon_uv(0));
-        uv_by_kind.insert(IconKind::Ore, icon_uv(1));
-        uv_by_kind.insert(IconKind::Crops, icon_uv(2));
-        uv_by_kind.insert(IconKind::Fish, icon_uv(3));
-        uv_by_kind.insert(IconKind::Wood, icon_uv(4));
-        uv_by_kind.insert(IconKind::Rainbow, icon_uv(5));
-        uv_by_kind.insert(IconKind::HqCrown, icon_uv(HQ_CROWN_ATLAS_SLOT_INDEX));
-
         let image_data = ctx
             .get_image_data(0.0, 0.0, atlas_w as f64, atlas_h as f64)
             .ok()?;
-        let pixels = image_data.data();
+        let mut pixels = image_data.data().0;
+        let mut orn_min_x = ornament_w;
+        let mut orn_min_y = ornament_h;
+        let mut orn_max_x = 0u32;
+        let mut orn_max_y = 0u32;
+        let mut orn_found = false;
+        for y in 0..ornament_h {
+            for x in 0..ornament_w {
+                let atlas_px_x = ornament_x + x;
+                let idx = ((y * atlas_w + atlas_px_x) * 4) as usize;
+                let r = pixels[idx] as u16;
+                let g = pixels[idx + 1] as u16;
+                let b = pixels[idx + 2] as u16;
+                let src_a = pixels[idx + 3] as u16;
+                let lum = r.max(g).max(b);
+                let alpha = ((lum * src_a + 127) / 255) as u8;
+                pixels[idx] = 255;
+                pixels[idx + 1] = 255;
+                pixels[idx + 2] = 255;
+                pixels[idx + 3] = alpha;
+                if alpha > 6 {
+                    orn_found = true;
+                    orn_min_x = orn_min_x.min(x);
+                    orn_min_y = orn_min_y.min(y);
+                    orn_max_x = orn_max_x.max(x);
+                    orn_max_y = orn_max_y.max(y);
+                }
+            }
+        }
+
+        let atlas_wf = atlas_w as f32;
+        let atlas_hf = atlas_h as f32;
+        let icon_v1 = (icon_cell_h as f32 / atlas_hf).clamp(0.0, 1.0);
+        let mut uv_by_kind = HashMap::with_capacity((ICON_COUNT + 2) as usize);
+        let resource_icon_uv = |index: u32| {
+            let x0 = resource_x + index * icon_cell_w;
+            let x1 = (resource_x + (index + 1) * icon_cell_w).min(resource_x + resource_atlas_w);
+            [
+                (x0 as f32) / atlas_wf,
+                0.0,
+                (x1 as f32) / atlas_wf,
+                icon_v1,
+            ]
+        };
+        uv_by_kind.insert(IconKind::Emerald, resource_icon_uv(0));
+        uv_by_kind.insert(IconKind::Ore, resource_icon_uv(1));
+        uv_by_kind.insert(IconKind::Crops, resource_icon_uv(2));
+        uv_by_kind.insert(IconKind::Fish, resource_icon_uv(3));
+        uv_by_kind.insert(IconKind::Wood, resource_icon_uv(4));
+        uv_by_kind.insert(IconKind::Rainbow, resource_icon_uv(5));
+        uv_by_kind.insert(
+            IconKind::HqCrown,
+            [
+                (crown_x as f32) / atlas_wf,
+                0.0,
+                ((crown_x + crown_slot_w) as f32) / atlas_wf,
+                icon_v1,
+            ],
+        );
+        let (ornament_uv, ornament_aspect) = if orn_found {
+            let tight_w = (orn_max_x - orn_min_x + 1).max(1);
+            let tight_h = (orn_max_y - orn_min_y + 1).max(1);
+            (
+                [
+                    ((ornament_x + orn_min_x) as f32) / atlas_wf,
+                    (orn_min_y as f32) / atlas_hf,
+                    ((ornament_x + orn_max_x + 1) as f32) / atlas_wf,
+                    ((orn_max_y + 1) as f32) / atlas_hf,
+                ],
+                (tight_w as f32 / tight_h as f32).clamp(0.2, 5.0),
+            )
+        } else {
+            (
+                [
+                    (ornament_x as f32) / atlas_wf,
+                    0.0,
+                    ((ornament_x + ornament_w) as f32) / atlas_wf,
+                    (ornament_h as f32) / atlas_hf,
+                ],
+                (ornament_w as f32 / ornament_h as f32).clamp(0.2, 5.0),
+            )
+        };
+        uv_by_kind.insert(IconKind::TerritoryOrnament, ornament_uv);
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("icon-atlas-tex"),
@@ -2052,6 +2137,7 @@ impl GpuRenderer {
             instance_capacity: initial_capacity,
             instances_buf: Vec::new(),
             uv_by_kind,
+            ornament_aspect,
         })
     }
 
@@ -3332,6 +3418,11 @@ impl GpuRenderer {
             self.icon_dirty = false;
             return;
         };
+        let ornament_uv = renderer
+            .uv_by_kind
+            .get(&IconKind::TerritoryOrnament)
+            .copied();
+        let ornament_aspect = renderer.ornament_aspect.max(0.2);
         renderer.instances_buf.clear();
         if !self.use_full_gpu_text || vp.scale < LABEL_VISIBILITY_MIN_SCALE {
             renderer.instance_count = 0;
@@ -3382,6 +3473,87 @@ impl GpuRenderer {
             let px_per_world = scale.max(0.0001);
             let cx = loc.midpoint_x() as f32;
             let cy = loc.midpoint_y() as f32;
+            if let Some(base_ornament_uv) = ornament_uv
+                && sw >= ORNAMENT_MIN_BOX_PX
+                && sh >= ORNAMENT_MIN_BOX_PX
+            {
+                let inset_px = ORNAMENT_INSET_PX;
+                let target_short_px = ORNAMENT_CORNER_SHORT_SIDE_PX * icon_scale;
+                let max_short_px =
+                    ((sw.min(sh) - inset_px * 2.0) * ORNAMENT_CORNER_MAX_FRACTION).max(0.0);
+                let corner_short_px = target_short_px.min(max_short_px);
+                if corner_short_px >= 8.0 {
+                    let (raw_corner_w_px, raw_corner_h_px) = if ornament_aspect >= 1.0 {
+                        (corner_short_px * ornament_aspect, corner_short_px)
+                    } else {
+                        (corner_short_px, corner_short_px / ornament_aspect.max(0.01))
+                    };
+                    let max_corner_w_px = ((sw - inset_px * 2.0) * 0.48).max(0.0);
+                    let max_corner_h_px = ((sh - inset_px * 2.0) * 0.48).max(0.0);
+                    let fit_scale = if raw_corner_w_px <= 0.0 || raw_corner_h_px <= 0.0 {
+                        0.0
+                    } else {
+                        (max_corner_w_px / raw_corner_w_px)
+                            .min(max_corner_h_px / raw_corner_h_px)
+                            .min(1.0)
+                    };
+                    let corner_w_px = raw_corner_w_px * fit_scale;
+                    let corner_h_px = raw_corner_h_px * fit_scale;
+                    if corner_w_px >= 6.0 && corner_h_px >= 6.0 {
+                        let corner_w_world = corner_w_px / px_per_world;
+                        let corner_h_world = corner_h_px / px_per_world;
+                        let inset_world = inset_px / px_per_world;
+                        let left = loc.left() as f32 + inset_world;
+                        let top = loc.top() as f32 + inset_world;
+                        let right = loc.left() as f32 + ww - inset_world - corner_w_world;
+                        let bottom = loc.top() as f32 + hh - inset_world - corner_h_world;
+                        if right >= left && bottom >= top {
+                            let (gr, gg, gb) = ct.guild_color;
+                            let tint = [
+                                (gr as f32 / 255.0) * 0.42 + 0.58,
+                                (gg as f32 / 255.0) * 0.42 + 0.58,
+                                (gb as f32 / 255.0) * 0.42 + 0.58,
+                                ORNAMENT_TINT_ALPHA,
+                            ];
+                            renderer.instances_buf.push(IconInstance {
+                                rect: [left, top, corner_w_world, corner_h_world],
+                                uv_rect: base_ornament_uv,
+                                tint,
+                            });
+                            renderer.instances_buf.push(IconInstance {
+                                rect: [right, top, corner_w_world, corner_h_world],
+                                uv_rect: [
+                                    base_ornament_uv[2],
+                                    base_ornament_uv[1],
+                                    base_ornament_uv[0],
+                                    base_ornament_uv[3],
+                                ],
+                                tint,
+                            });
+                            renderer.instances_buf.push(IconInstance {
+                                rect: [left, bottom, corner_w_world, corner_h_world],
+                                uv_rect: [
+                                    base_ornament_uv[0],
+                                    base_ornament_uv[3],
+                                    base_ornament_uv[2],
+                                    base_ornament_uv[1],
+                                ],
+                                tint,
+                            });
+                            renderer.instances_buf.push(IconInstance {
+                                rect: [right, bottom, corner_w_world, corner_h_world],
+                                uv_rect: [
+                                    base_ornament_uv[2],
+                                    base_ornament_uv[3],
+                                    base_ornament_uv[0],
+                                    base_ornament_uv[1],
+                                ],
+                                tint,
+                            });
+                        }
+                    }
+                }
+            }
             if is_hq
                 && let Some(crown_uv) = renderer.uv_by_kind.get(&IconKind::HqCrown).copied()
                 && let Some(static_preboost_tag) = static_preboost_tag_size(ww, hh, scale)

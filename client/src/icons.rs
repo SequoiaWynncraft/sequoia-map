@@ -8,11 +8,13 @@ use web_sys::HtmlImageElement;
 pub struct ResourceAtlas {
     pub resource_image: HtmlImageElement,
     pub hq_crown_image: HtmlImageElement,
+    pub territory_ornament_image: HtmlImageElement,
 }
 
 pub const ICON_COUNT: u32 = 6;
 pub const ATLAS_SRC: &str = "/icons/territory-resources-atlas.png";
 pub const HQ_CROWN_SRC: &str = "/icons/crown_icon.png";
+pub const TERRITORY_ORNAMENT_SRC: &str = "/icons/IMG_1643.png";
 
 static ATLAS_WARNED: AtomicBool = AtomicBool::new(false);
 
@@ -78,11 +80,31 @@ pub fn load_resource_atlas(signal: RwSignal<Option<ResourceAtlas>>) {
             return;
         };
         hq_crown_image.set_src(HQ_CROWN_SRC);
+        let Ok(territory_ornament_image) = HtmlImageElement::new() else {
+            signal.set(None);
+            warn_atlas_once("Failed to create territory ornament image element.");
+            return;
+        };
+        territory_ornament_image.set_src(TERRITORY_ORNAMENT_SRC);
+
         match wasm_bindgen_futures::JsFuture::from(hq_crown_image.decode()).await {
-            Ok(_) => signal.set(Some(ResourceAtlas {
-                resource_image,
-                hq_crown_image,
-            })),
+            Ok(_) => {
+                match wasm_bindgen_futures::JsFuture::from(territory_ornament_image.decode()).await
+                {
+                    Ok(_) => signal.set(Some(ResourceAtlas {
+                        resource_image,
+                        hq_crown_image,
+                        territory_ornament_image,
+                    })),
+                    Err(err) => {
+                        signal.set(None);
+                        warn_atlas_once(&format!(
+                            "Failed to decode territory ornament icon: {:?}",
+                            err
+                        ));
+                    }
+                }
+            }
             Err(err) => {
                 signal.set(None);
                 warn_atlas_once(&format!("Failed to decode HQ crown icon: {:?}", err));
