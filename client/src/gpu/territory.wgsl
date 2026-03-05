@@ -202,23 +202,60 @@ fn segment_distance_px(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
     return length(p - nearest);
 }
 
-fn corner_v_local(local_px: vec2<f32>, arm_px: f32, pad_px: f32, stroke_px: f32, aa_px: f32) -> f32 {
+fn stroke_alpha(dist_px: f32, stroke_px: f32, aa_px: f32) -> f32 {
+    return 1.0 - smoothstep(stroke_px - aa_px, stroke_px + aa_px, dist_px);
+}
+
+fn corner_branch_local(
+    local_px: vec2<f32>,
+    arm_px: f32,
+    pad_px: f32,
+    stroke_px: f32,
+    aa_px: f32,
+) -> f32 {
     let zone = pad_px + arm_px + stroke_px * 2.0;
     if local_px.x > zone || local_px.y > zone {
         return 0.0;
     }
 
-    let apex = vec2<f32>(pad_px + arm_px * 0.72, pad_px + arm_px * 0.72);
-    let edge_a = vec2<f32>(pad_px, pad_px + arm_px);
-    let edge_b = vec2<f32>(pad_px + arm_px, pad_px);
-    let dist_a = segment_distance_px(local_px, edge_a, apex);
-    let dist_b = segment_distance_px(local_px, edge_b, apex);
-    let dist = min(dist_a, dist_b);
+    // Stylized organic corner motif inspired by IMG_1643.png:
+    // two trunk arms with small branching twigs.
+    let left0 = vec2<f32>(pad_px + arm_px * 0.10, pad_px + arm_px * 0.96);
+    let left1 = vec2<f32>(pad_px + arm_px * 0.23, pad_px + arm_px * 0.74);
+    let left2 = vec2<f32>(pad_px + arm_px * 0.48, pad_px + arm_px * 0.53);
+    let join = vec2<f32>(pad_px + arm_px * 0.80, pad_px + arm_px * 0.28);
 
-    return 1.0 - smoothstep(stroke_px - aa_px, stroke_px + aa_px, dist);
+    let top0 = vec2<f32>(pad_px + arm_px * 0.96, pad_px + arm_px * 0.10);
+    let top1 = vec2<f32>(pad_px + arm_px * 0.74, pad_px + arm_px * 0.23);
+    let top2 = vec2<f32>(pad_px + arm_px * 0.53, pad_px + arm_px * 0.48);
+
+    var d_main = segment_distance_px(local_px, left0, left1);
+    d_main = min(d_main, segment_distance_px(local_px, left1, left2));
+    d_main = min(d_main, segment_distance_px(local_px, left2, join));
+    d_main = min(d_main, segment_distance_px(local_px, top0, top1));
+    d_main = min(d_main, segment_distance_px(local_px, top1, top2));
+    d_main = min(d_main, segment_distance_px(local_px, top2, join));
+
+    let twig_l1_a = left1;
+    let twig_l1_b = vec2<f32>(pad_px + arm_px * 0.06, pad_px + arm_px * 0.66);
+    let twig_l2_a = left2;
+    let twig_l2_b = vec2<f32>(pad_px + arm_px * 0.30, pad_px + arm_px * 0.34);
+    let twig_t1_a = top1;
+    let twig_t1_b = vec2<f32>(pad_px + arm_px * 0.66, pad_px + arm_px * 0.06);
+    let twig_t2_a = top2;
+    let twig_t2_b = vec2<f32>(pad_px + arm_px * 0.34, pad_px + arm_px * 0.30);
+
+    var d_twig = segment_distance_px(local_px, twig_l1_a, twig_l1_b);
+    d_twig = min(d_twig, segment_distance_px(local_px, twig_l2_a, twig_l2_b));
+    d_twig = min(d_twig, segment_distance_px(local_px, twig_t1_a, twig_t1_b));
+    d_twig = min(d_twig, segment_distance_px(local_px, twig_t2_a, twig_t2_b));
+
+    let main_alpha = stroke_alpha(d_main, stroke_px, aa_px);
+    let twig_alpha = stroke_alpha(d_twig, stroke_px * 0.62, aa_px) * 0.90;
+    return max(main_alpha, twig_alpha);
 }
 
-fn corner_v_mask(
+fn corner_branch_mask(
     uv: vec2<f32>,
     size_px: vec2<f32>,
     arm_px: f32,
@@ -234,10 +271,22 @@ fn corner_v_mask(
         return 0.0;
     }
 
-    let tl = corner_v_local(px, arm_px, pad_px, stroke_px, aa_px);
-    let tr = corner_v_local(vec2<f32>(size_px.x - px.x, px.y), arm_px, pad_px, stroke_px, aa_px);
-    let bl = corner_v_local(vec2<f32>(px.x, size_px.y - px.y), arm_px, pad_px, stroke_px, aa_px);
-    let br = corner_v_local(
+    let tl = corner_branch_local(px, arm_px, pad_px, stroke_px, aa_px);
+    let tr = corner_branch_local(
+        vec2<f32>(size_px.x - px.x, px.y),
+        arm_px,
+        pad_px,
+        stroke_px,
+        aa_px,
+    );
+    let bl = corner_branch_local(
+        vec2<f32>(px.x, size_px.y - px.y),
+        arm_px,
+        pad_px,
+        stroke_px,
+        aa_px,
+    );
+    let br = corner_branch_local(
         vec2<f32>(size_px.x - px.x, size_px.y - px.y),
         arm_px,
         pad_px,
@@ -417,15 +466,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         alpha = max(alpha, 0.9);
     }
 
-    // Corner ornament "V" accents for territory definition.
+    // Corner ornament accents for territory definition.
     let min_side = min(in.size_px.x, in.size_px.y);
-    let corner_visibility = smoothstep(26.0, 56.0, min_side);
+    let corner_visibility = smoothstep(18.0, 44.0, min_side);
     if corner_visibility > 0.0 {
-        let corner_pad = clamp(border_width + 1.0, 1.2, 4.8);
-        let corner_arm = clamp(min_side * 0.20, 6.0, 20.0);
-        let corner_stroke = clamp(0.95 * vp.scale, 0.8, 1.6);
+        let corner_pad = clamp(border_width + 0.8, 0.9, 5.4);
+        let corner_arm = clamp(min_side * 0.27, 8.0, 30.0);
+        let corner_stroke = clamp(1.25 * vp.scale, 1.0, 2.3);
         let corner_aa = max(feather * 0.9, 0.22);
-        let corner_mask = corner_v_mask(
+        let corner_core = corner_branch_mask(
             in.uv,
             in.size_px,
             corner_arm,
@@ -433,16 +482,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             corner_stroke,
             corner_aa,
         );
-        if corner_mask > 0.0 {
+        if corner_core > 0.0 {
+            let corner_glow = corner_branch_mask(
+                in.uv,
+                in.size_px,
+                corner_arm,
+                corner_pad,
+                corner_stroke * 2.05,
+                corner_aa * 1.3,
+            );
             var accent_color = mix(base_color, vec3<f32>(1.0), 0.42);
             if is_headquarters {
                 accent_color = mix(accent_color, vec3<f32>(0.973, 0.831, 0.275), 0.55);
             }
-            let shadow_strength = corner_mask * corner_visibility * 0.12;
-            let accent_strength = corner_mask * corner_visibility * (0.18 + b_alpha * 0.24);
-            color = mix(color, base_color * 0.36, shadow_strength);
+            let intensity = corner_visibility * (0.65 + b_alpha * 0.35);
+            let shadow_strength = corner_glow * intensity * 0.42;
+            let accent_strength = corner_core * intensity * 0.92;
+            color = mix(color, base_color * 0.14, shadow_strength);
             color = mix(color, accent_color, accent_strength);
-            alpha = max(alpha, min(1.0, alpha + accent_strength * 0.24));
+            alpha = max(alpha, min(1.0, alpha + corner_core * intensity * 0.44));
         }
     }
 
