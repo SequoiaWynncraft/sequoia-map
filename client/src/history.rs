@@ -35,18 +35,35 @@ pub struct HistoryStepContext {
 
 /// Check if history features are available by querying /api/health.
 pub fn check_availability(available: RwSignal<bool>) {
+    check_availability_with_probe(available, None);
+}
+
+/// Check if history features are available by querying /api/health and optionally
+/// increment a probe nonce when the request completes.
+pub fn check_availability_with_probe(
+    available: RwSignal<bool>,
+    probe_nonce: Option<RwSignal<u64>>,
+) {
     spawn_local(async move {
-        let Ok(resp) = gloo_net::http::Request::get("/api/health").send().await else {
-            return;
-        };
-        if !resp.ok() {
-            return;
+        let mut history_available = false;
+
+        if let Ok(resp) = gloo_net::http::Request::get("/api/health").send().await {
+            if resp.ok() {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    history_available = json
+                        .get("history_available")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                }
+            }
         }
-        let Ok(json) = resp.json::<serde_json::Value>().await else {
-            return;
-        };
-        if let Some(true) = json.get("history_available").and_then(|v| v.as_bool()) {
+
+        if history_available {
             available.set(true);
+        }
+
+        if let Some(probe_nonce) = probe_nonce {
+            probe_nonce.update(|n| *n = n.wrapping_add(1));
         }
     });
 }

@@ -1,12 +1,12 @@
 # Sequoia Map
 
 [![Rust](https://img.shields.io/badge/Rust-2024_Edition-b7410e?style=flat-square&logo=rust)](https://www.rust-lang.org/)
-[![Leptos](https://img.shields.io/badge/Leptos-0.7-ef3939?style=flat-square)](https://leptos.dev/)
+[![Leptos](https://img.shields.io/badge/Leptos-0.8-ef3939?style=flat-square)](https://leptos.dev/)
 [![wgpu](https://img.shields.io/badge/wgpu-24.0-4b8bbe?style=flat-square)](https://wgpu.rs/)
 [![Axum](https://img.shields.io/badge/Axum-0.8-222222?style=flat-square)](https://github.com/tokio-rs/axum)
 [![WebAssembly](https://img.shields.io/badge/WebAssembly-654ff0?style=flat-square&logo=webassembly&logoColor=white)](https://webassembly.org/)
 [![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-06b6d4?style=flat-square&logo=tailwindcss&logoColor=white)](https://tailwindcss.com/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-4169e1?style=flat-square&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-4169e1?style=flat-square&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Docker](https://img.shields.io/badge/Docker-2496ed?style=flat-square&logo=docker&logoColor=white)](https://www.docker.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
 
@@ -18,7 +18,7 @@ A [Wynncraft](https://wynncraft.com/) guild territory map built entirely in Rust
 | Layer | Crates |
 |-------|-------------|
 | **Server** | Axum 0.8, Tokio, SQLx 0.8, DashMap, Tower-HTTP |
-| **Client** | Leptos 0.7 (CSR &rarr; WASM), wgpu 24.0 (WebGL), Tailwind CSS |
+| **Client** | Leptos 0.8 (CSR &rarr; WASM), wgpu 24.0 (WebGL), Tailwind CSS |
 | **Shared** | Serde, Chrono, crc32fast |
 
 ## Quick Start
@@ -27,7 +27,7 @@ The comments in combination with the README.md should be enough for anyone to pi
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs/) 1.86+
+- [Rust](https://rustup.rs/) 1.88+
 - `wasm32-unknown-unknown` target | `rustup target add wasm32-unknown-unknown`
 - [Trunk](https://trunkrs.dev/) | `cargo install trunk --locked`
 - A running PostgreSQL instance
@@ -84,6 +84,7 @@ Production compose is TLS-first and now runs:
 - `restart: unless-stopped` for long-running services
 - default Docker log rotation (`json-file`, configurable size/count)
 - automatic PostgreSQL backups to a dedicated `pgbackups` volume
+- PostgreSQL 18 data layout (`/var/lib/postgresql` volume mount with `PGDATA=/var/lib/postgresql/18/docker`)
 
 Set DNS for your domains and provide environment variables before starting:
 
@@ -232,6 +233,26 @@ Utility scripts:
 
 Important: backups are generated with `--clean --if-exists`, so restore will drop/recreate dumped objects in the current database. It does not drop the database itself.
 
+## PostgreSQL 17 -> 18 Upgrade Runbook
+
+Use the scripted runbook under `ops/postgres` for preflight checks, cutover, and post-cutover validation:
+
+```bash
+# 1) Preflight checks (extensions/auth/collation/unlogged partitioned tables)
+./ops/postgres/precheck_17_to_18.sh
+
+# 2) Upgrade using pg_upgrade (check+link first, fallback to copy mode)
+./ops/postgres/upgrade_17_to_18.sh
+
+# 3) Post-cutover verification (version + API smoke checks)
+./ops/postgres/verify_18_postcutover.sh
+```
+
+Notes:
+- The upgrade script takes a logical backup first via `./ops/backup/backup_now.sh`.
+- It also writes a compressed Docker volume snapshot under `ops/postgres/snapshots/`.
+- If link mode cannot be used on your Docker storage backend, the script retries with `--copy`.
+
 ## Monitoring And Alerting
 
 - Health endpoint: `/api/health`
@@ -275,7 +296,7 @@ Coolify/VPS monitoring notes:
 ## CI And Integration Tests
 
 - GitHub Actions workflow: `.github/workflows/ci.yml`
-- CI provisions PostgreSQL (`postgres:17-alpine`) and runs server/client checks plus server tests.
+- CI provisions PostgreSQL (`postgres:18.3-alpine`) and runs server/client checks plus server tests.
 - Included a -Postgres integration test that verifies:
   - poller update persistence into `territory_events`
   - `/api/history/bounds`
