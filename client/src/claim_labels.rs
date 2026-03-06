@@ -18,6 +18,8 @@ pub(crate) const CLAIM_LABEL_LETTER_SPACING_EM: f32 = 0.065;
 const CLAIM_LABEL_BOUNDS_INSET_PX: f32 = 6.0;
 const CLAIM_LABEL_COLLISION_TOLERANCE_PX: f32 = 4.0;
 const CLAIM_CLUSTER_GAP_WORLD: f32 = 24.0;
+const CLAIM_CLUSTER_MERGE_GAP_WORLD: f32 = 220.0;
+const CLAIM_CLUSTER_MERGE_MIN_OVERLAP_WORLD: f32 = 40.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Rect {
@@ -160,30 +162,23 @@ pub(crate) fn build_claim_clusters(territories: &ClientTerritoryMap) -> Vec<Clai
     let mut clusters = Vec::new();
     for mut nodes in by_guild.into_values() {
         nodes.sort_by(|a, b| a.territory_name.cmp(&b.territory_name));
-        let mut visited = vec![false; nodes.len()];
-        for start in 0..nodes.len() {
-            if visited[start] {
-                continue;
-            }
-            visited[start] = true;
-            let mut stack = vec![start];
-            let mut component = Vec::new();
-            while let Some(idx) = stack.pop() {
-                component.push(idx);
-                for next in 0..nodes.len() {
-                    if visited[next]
-                        || !rectangles_share_claim_edge(
-                            nodes[idx].bounds_world,
-                            nodes[next].bounds_world,
-                        )
-                    {
-                        continue;
-                    }
-                    visited[next] = true;
-                    stack.push(next);
-                }
-            }
-            clusters.push(build_cluster(&nodes, &component));
+        let base_components = connected_components(nodes.len(), |idx, next| {
+            rectangles_share_claim_edge(nodes[idx].bounds_world, nodes[next].bounds_world)
+        });
+        let base_component_bounds = base_components
+            .iter()
+            .map(|component| component_bounds(&nodes, component))
+            .collect::<Vec<_>>();
+        let macro_components = connected_components(base_components.len(), |idx, next| {
+            rectangles_share_claim_blob(base_component_bounds[idx], base_component_bounds[next])
+        });
+
+        for macro_component in macro_components {
+            let territory_component = macro_component
+                .into_iter()
+                .flat_map(|component_idx| base_components[component_idx].iter().copied())
+                .collect::<Vec<_>>();
+            clusters.push(build_cluster(&nodes, &territory_component));
         }
     }
 
@@ -195,6 +190,34 @@ pub(crate) fn build_claim_clusters(territories: &ClientTerritoryMap) -> Vec<Clai
             .then_with(|| a.territory_count.cmp(&b.territory_count))
     });
     clusters
+}
+
+fn connected_components<F>(len: usize, are_connected: F) -> Vec<Vec<usize>>
+where
+    F: Fn(usize, usize) -> bool,
+{
+    let mut components = Vec::new();
+    let mut visited = vec![false; len];
+    for start in 0..len {
+        if visited[start] {
+            continue;
+        }
+        visited[start] = true;
+        let mut stack = vec![start];
+        let mut component = Vec::new();
+        while let Some(idx) = stack.pop() {
+            component.push(idx);
+            for next in 0..len {
+                if visited[next] || !are_connected(idx, next) {
+                    continue;
+                }
+                visited[next] = true;
+                stack.push(next);
+            }
+        }
+        components.push(component);
+    }
+    components
 }
 
 pub(crate) fn select_claim_label_candidates<F>(
@@ -378,6 +401,28 @@ fn build_cluster(nodes: &[TerritoryNode], component: &[usize]) -> ClaimCluster {
     }
 }
 
+fn component_bounds(nodes: &[TerritoryNode], component: &[usize]) -> Rect {
+    let mut left = f32::INFINITY;
+    let mut top = f32::INFINITY;
+    let mut right = f32::NEG_INFINITY;
+    let mut bottom = f32::NEG_INFINITY;
+
+    for idx in component {
+        let rect = nodes[*idx].bounds_world;
+        left = left.min(rect.left);
+        top = top.min(rect.top);
+        right = right.max(rect.right);
+        bottom = bottom.max(rect.bottom);
+    }
+
+    Rect {
+        left,
+        top,
+        right,
+        bottom,
+    }
+}
+
 fn claim_font_height_world(bounds_world: Rect) -> f32 {
     (bounds_world.height() * 0.60)
         .min(bounds_world.width() * 0.24)
@@ -440,6 +485,18 @@ fn rectangles_share_claim_edge(a: Rect, b: Rect) -> bool {
 
     (overlap_x > 0.0 && vertical_gap <= CLAIM_CLUSTER_GAP_WORLD)
         || (overlap_y > 0.0 && horizontal_gap <= CLAIM_CLUSTER_GAP_WORLD)
+}
+
+fn rectangles_share_claim_blob(a: Rect, b: Rect) -> bool {
+    let overlap_x = (a.right.min(b.right) - a.left.max(b.left)).max(0.0);
+    let overlap_y = (a.bottom.min(b.bottom) - a.top.max(b.top)).max(0.0);
+    let horizontal_gap = (b.left - a.right).max(a.left - b.right).max(0.0);
+    let vertical_gap = (b.top - a.bottom).max(a.top - b.bottom).max(0.0);
+
+    (overlap_x >= CLAIM_CLUSTER_MERGE_MIN_OVERLAP_WORLD
+        && vertical_gap <= CLAIM_CLUSTER_MERGE_GAP_WORLD)
+        || (overlap_y >= CLAIM_CLUSTER_MERGE_MIN_OVERLAP_WORLD
+            && horizontal_gap <= CLAIM_CLUSTER_MERGE_GAP_WORLD)
 }
 
 #[cfg(test)]
@@ -527,7 +584,7 @@ mod tests {
     fn build_claim_clusters_keeps_disconnected_regions_separate() {
         let map = make_map(&[
             ("A", "Nia", "NIA", [0, 0, 10, 10]),
-            ("B", "Nia", "NIA", [40, 0, 50, 10]),
+            ("B", "Nia", "NIA", [260, 0, 270, 10]),
         ]);
 
         let clusters = build_claim_clusters(&map);
@@ -547,6 +604,23 @@ mod tests {
 
         assert_eq!(clusters.len(), 1);
         assert_eq!(clusters[0].territory_count, 2);
+    }
+
+    #[test]
+    fn build_claim_clusters_merges_nearby_macro_regions() {
+        let map = make_map(&[
+            ("A", "Nia", "NIA", [0, 0, 100, 100]),
+            ("B", "Nia", "NIA", [100, 0, 200, 100]),
+            ("C", "Nia", "NIA", [350, 0, 450, 100]),
+            ("D", "Nia", "NIA", [450, 0, 550, 100]),
+        ]);
+
+        let clusters = build_claim_clusters(&map);
+
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].territory_count, 4);
+        assert_eq!(clusters[0].bounds_world.left, 0.0);
+        assert_eq!(clusters[0].bounds_world.right, 550.0);
     }
 
     #[test]
