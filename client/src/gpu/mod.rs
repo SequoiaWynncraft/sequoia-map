@@ -18,8 +18,8 @@ use crate::label_layout::{
     write_age_compound,
 };
 use crate::overlay_sizing::{
-    STATIC_NAME_BASELINE_GAP_MULTIPLIER, compute_dynamic_label_sizing, compute_static_label_sizing,
-    static_name_bottom_bound,
+    STATIC_NAME_BASELINE_GAP_MULTIPLIER, compute_dynamic_label_sizing,
+    compute_resource_icon_size_world, compute_static_label_sizing, static_name_bottom_bound,
 };
 use crate::renderer::{FrameMetrics, InvalidationReason, RenderCapabilities, SceneSnapshot};
 use crate::territory::ClientTerritoryMap;
@@ -199,6 +199,8 @@ const MINIMAP_HISTORY_BOTTOM: f32 = 68.0;
 const MINIMAP_DEFAULT_WORLD_BOUNDS: (f64, f64, f64, f64) = (-2200.0, -6600.0, 1600.0, 400.0);
 const STATIC_TAG_LETTER_SPACING_EM: f32 = 0.07;
 const STATIC_NAME_LETTER_SPACING_EM: f32 = 0.057;
+const STATIC_TAG_MIN_WIDTH_WORLD: f32 = 56.0;
+const STATIC_NAME_MIN_WIDTH_WORLD: f32 = 128.0;
 const DYNAMIC_TIME_LETTER_SPACING_EM: f32 = 0.035;
 const DYNAMIC_COOLDOWN_LETTER_SPACING_EM_MIN: f32 = 0.0035;
 /// Minimum viewport scale required before per-territory timer text (held/cooldown) is shown.
@@ -207,7 +209,6 @@ const DYNAMIC_TIMER_VISIBILITY_MIN_SCALE: f64 = 0.31;
 /// Minimum viewport scale at which any territory labels are drawn.
 /// Below this zoom level all text (static tags, dynamic time, icons) is hidden uniformly.
 const LABEL_VISIBILITY_MIN_SCALE: f64 = 0.10;
-const HQ_CROWN_MIN_PX: f32 = 12.0;
 const HQ_CROWN_SIZE_MULTIPLIER: f32 = 1.02;
 const HQ_CROWN_MAX_BOX_FRACTION: f32 = 0.40;
 const ORNAMENT_MIN_BOX_PX: f32 = 34.0;
@@ -2774,14 +2775,14 @@ impl GpuRenderer {
                 let tag_size = sizing.tag_size * static_tag_scale;
                 let detail_size = sizing.detail_size * static_name_scale;
                 let px_per_world = scale.max(0.0001);
-                // At far/mid zoom, allow labels to overflow territory bounds for readability.
+                // Keep static label sizing stable in world space; only user scale settings widen
+                // the fit budget a bit to accommodate larger configured text.
                 let max_static_scale = static_tag_scale.max(static_name_scale);
                 let overflow_scale =
                     (1.0 + (max_static_scale - 1.0).max(0.0) * 0.22).clamp(1.0, 1.35);
-                let overflow =
-                    (1.0 + (1.0 - smoothstep_f32(0.25, 0.65, px_per_world)) * 0.7) * overflow_scale;
+                let overflow = overflow_scale;
                 let tag_padding = lerp_f32(3.0, 8.0, detail_layout_alpha);
-                let tag_max_w = (ww * overflow - tag_padding).max(3.0);
+                let tag_max_w = (ww * overflow - tag_padding).max(STATIC_TAG_MIN_WIDTH_WORLD);
                 let tag_y = lerp_f32(cy, cy - (detail_size + 1.0) * 0.45, detail_layout_alpha);
                 let tag = ct.territory.guild.prefix.as_str();
                 let tag_color = {
@@ -2825,7 +2826,7 @@ impl GpuRenderer {
                     } else {
                         name.as_str()
                     };
-                    let name_max_w = (ww * overflow - 10.0).max(4.0);
+                    let name_max_w = (ww * overflow - 10.0).max(STATIC_NAME_MIN_WIDTH_WORLD);
                     let units_per_world = line_height / detail_size.max(0.001);
                     let fitted = fit_text_to_units_with_tracking(
                         base_name,
@@ -3066,7 +3067,7 @@ impl GpuRenderer {
                     let remaining = 600 - state.age_secs;
                     text_buf.clear();
                     let _ = write!(&mut text_buf, "{}:{:02}", remaining / 60, remaining % 60);
-                    let cooldown_gap = (3.5 / scale).max(0.0) + line_gap * 0.35;
+                    let cooldown_gap = 3.5 + line_gap * 0.35;
                     let cd_y = content_bottom_y + cooldown_size / 2.0 + cooldown_gap;
                     let urgency = 1.0 - state.cooldown_frac as f64;
                     let (cr, cg, cb) = cooldown_color(urgency);
@@ -3269,11 +3270,11 @@ impl GpuRenderer {
                     cy - (crown_detail_size + 1.0) * 0.45,
                     static_sizing.detail_layout_alpha,
                 );
-                let min_crown_world = (HQ_CROWN_MIN_PX / px_per_world).max(1.0);
+                let min_crown_world = 1.0;
                 let max_crown_world = (ww.min(hh) * HQ_CROWN_MAX_BOX_FRACTION).max(min_crown_world);
                 let crown_size_world = (crown_tag_size * HQ_CROWN_SIZE_MULTIPLIER)
                     .clamp(min_crown_world, max_crown_world);
-                let crown_gap_world = ((2.5 / px_per_world) + crown_tag_size * 0.08).max(0.0);
+                let crown_gap_world = (2.5 + crown_tag_size * 0.08).max(0.0);
                 let crown_center_y =
                     crown_tag_y - crown_tag_size * 0.5 - crown_gap_world - crown_size_world * 0.5;
                 renderer.instances_buf.push(IconInstance {
@@ -3352,15 +3353,13 @@ impl GpuRenderer {
             if let Some(name_bottom_y) = static_name_bottom {
                 content_bottom_y = content_bottom_y.max(name_bottom_y + line_gap * 0.6);
             }
-            let cooldown_anchor_y = content_bottom_y
-                + cooldown_size / 2.0
-                + (lerp_f32(3.0, 4.0, detail_layout_alpha) / scale);
+            let cooldown_anchor_y =
+                content_bottom_y + cooldown_size / 2.0 + lerp_f32(3.0, 4.0, detail_layout_alpha);
 
-            // Slightly larger icon footprint (+~12.5%) for better readability at gameplay zooms.
-            let icon_size_px = ((sw.min(sh) * 0.27).clamp(13.0, 38.0) * icon_scale).round();
-            let icon_size_world = (icon_size_px / scale).max(1.0);
+            // Keep resource icons on the same world-space sizing model as the text overlays.
+            let icon_size_world = compute_resource_icon_size_world(icon_scale);
             let icon_gap_world = icon_size_world * 1.3;
-            let icon_offset_world = (lerp_f32(3.0, 4.0, detail_layout_alpha) / scale).max(0.0);
+            let icon_offset_world = lerp_f32(3.0, 4.0, detail_layout_alpha).max(0.0);
             let icon_y = if cooldown_timer_visible {
                 cooldown_anchor_y + cooldown_size / 2.0 + icon_size_world / 2.0 + icon_offset_world
             } else {
