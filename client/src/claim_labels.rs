@@ -21,6 +21,13 @@ const CLAIM_LABEL_COLLISION_TOLERANCE_PX: f32 = 4.0;
 const CLAIM_CLUSTER_GAP_WORLD: f32 = 24.0;
 const CLAIM_CLUSTER_MERGE_GAP_WORLD: f32 = 220.0;
 const CLAIM_CLUSTER_MERGE_MIN_OVERLAP_WORLD: f32 = 40.0;
+const CLAIM_COMPACT_LABEL_MIN_SCREEN_WIDTH: f32 = 24.0;
+const CLAIM_COMPACT_LABEL_MIN_SCREEN_HEIGHT: f32 = 20.0;
+const CLAIM_COMPACT_LABEL_MAX_TERRITORIES: usize = 2;
+const CLAIM_COMPACT_LABEL_MAX_WIDTH_FRACTION: f32 = 0.78;
+const CLAIM_COMPACT_LABEL_FONT_MIN_WORLD: f32 = 18.0;
+const CLAIM_COMPACT_LABEL_FONT_MAX_WORLD: f32 = 42.0;
+const CLAIM_COMPACT_LABEL_BOUNDS_INSET_PX: f32 = 2.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Rect {
@@ -248,7 +255,14 @@ where
             .push(cluster);
     }
 
+    let mut guilds_with_primary_labels = BTreeMap::new();
     for guild_clusters in clusters_by_guild.into_values() {
+        let guild_key = (
+            guild_clusters[0].guild_name.clone(),
+            guild_clusters[0].guild_prefix.clone(),
+            guild_clusters[0].guild_color,
+        );
+        let mut emitted_primary = false;
         if vp.scale <= CLAIM_LABEL_GUILD_AGGREGATE_MAX_SCALE && guild_clusters.len() > 1 {
             let aggregate_cluster = merge_claim_cluster_group(&guild_clusters);
             if let Some(candidate) = claim_label_candidate_for_cluster(
@@ -258,6 +272,7 @@ where
                 &measure_units,
             ) {
                 candidates.push(candidate);
+                guilds_with_primary_labels.insert(guild_key, true);
                 continue;
             }
         }
@@ -267,7 +282,30 @@ where
                 claim_label_candidate_for_cluster(cluster, vp, line_height_units, &measure_units)
             {
                 candidates.push(candidate);
+                emitted_primary = true;
             }
+        }
+        if emitted_primary {
+            guilds_with_primary_labels.insert(guild_key, true);
+        }
+    }
+
+    for cluster in clusters {
+        let guild_key = (
+            cluster.guild_name.clone(),
+            cluster.guild_prefix.clone(),
+            cluster.guild_color,
+        );
+        if guilds_with_primary_labels.contains_key(&guild_key) {
+            continue;
+        }
+        if let Some(candidate) = compact_claim_label_candidate_for_cluster(
+            cluster,
+            vp,
+            line_height_units,
+            &measure_units,
+        ) {
+            candidates.push(candidate);
         }
     }
 
@@ -397,6 +435,94 @@ where
     })
 }
 
+fn compact_claim_label_candidate_for_cluster<F>(
+    cluster: &ClaimCluster,
+    vp: &Viewport,
+    line_height_units: f32,
+    measure_units: &F,
+) -> Option<ClaimLabelCandidate>
+where
+    F: Fn(&str) -> f32,
+{
+    if cluster.territory_count > CLAIM_COMPACT_LABEL_MAX_TERRITORIES {
+        return None;
+    }
+
+    let cluster_screen_rect = cluster.bounds_world.to_screen(vp);
+    if cluster_screen_rect.width() < CLAIM_COMPACT_LABEL_MIN_SCREEN_WIDTH
+        || cluster_screen_rect.height() < CLAIM_COMPACT_LABEL_MIN_SCREEN_HEIGHT
+    {
+        return None;
+    }
+
+    let text = cluster.guild_prefix.trim();
+    let text = if text.is_empty() {
+        cluster.guild_name.trim()
+    } else {
+        text
+    };
+    if text.is_empty() {
+        return None;
+    }
+
+    let max_width_world = cluster.bounds_world.width() * CLAIM_COMPACT_LABEL_MAX_WIDTH_FRACTION;
+    if max_width_world <= 0.0 {
+        return None;
+    }
+
+    let font_height_world = compact_claim_font_height_world(cluster.bounds_world);
+    let (text_width_world, text_height_world) = fitted_text_box_world(
+        text,
+        font_height_world,
+        max_width_world,
+        line_height_units,
+        measure_units,
+    )?;
+
+    let inset_world = CLAIM_COMPACT_LABEL_BOUNDS_INSET_PX / vp.scale.max(f64::EPSILON) as f32;
+    let safe_bounds_world = cluster.bounds_world.inset(inset_world)?;
+    if text_width_world > safe_bounds_world.width()
+        || text_height_world > safe_bounds_world.height()
+    {
+        return None;
+    }
+
+    let min_center = [
+        safe_bounds_world.left + text_width_world * 0.5,
+        safe_bounds_world.top + text_height_world * 0.5,
+    ];
+    let max_center = [
+        safe_bounds_world.right - text_width_world * 0.5,
+        safe_bounds_world.bottom - text_height_world * 0.5,
+    ];
+    if min_center[0] > max_center[0] || min_center[1] > max_center[1] {
+        return None;
+    }
+
+    let center_world = [
+        cluster.centroid_world[0].clamp(min_center[0], max_center[0]),
+        cluster.centroid_world[1].clamp(min_center[1], max_center[1]),
+    ];
+    let text_bounds_world =
+        Rect::from_center_size(center_world, text_width_world, text_height_world);
+    let text_bounds_screen = text_bounds_world.to_screen(vp);
+    let safe_bounds_screen = cluster_screen_rect.inset(CLAIM_COMPACT_LABEL_BOUNDS_INSET_PX)?;
+    if !safe_bounds_screen.contains_rect(text_bounds_screen) {
+        return None;
+    }
+
+    Some(ClaimLabelCandidate {
+        text: text.to_string(),
+        guild_color: cluster.guild_color,
+        territory_count: cluster.territory_count,
+        center_world,
+        font_height_world,
+        max_width_world,
+        text_bounds_world,
+        text_bounds_screen,
+    })
+}
+
 fn build_cluster(nodes: &[TerritoryNode], component: &[usize]) -> ClaimCluster {
     let mut left = f32::INFINITY;
     let mut top = f32::INFINITY;
@@ -507,6 +633,15 @@ fn claim_font_height_world(bounds_world: Rect) -> f32 {
     (bounds_world.height() * 0.60)
         .min(bounds_world.width() * 0.24)
         .clamp(CLAIM_LABEL_FONT_MIN_WORLD, CLAIM_LABEL_FONT_MAX_WORLD)
+}
+
+fn compact_claim_font_height_world(bounds_world: Rect) -> f32 {
+    (bounds_world.height() * 0.26)
+        .min(bounds_world.width() * 0.20)
+        .clamp(
+            CLAIM_COMPACT_LABEL_FONT_MIN_WORLD,
+            CLAIM_COMPACT_LABEL_FONT_MAX_WORLD,
+        )
 }
 
 fn text_fits_without_scaling<F>(
@@ -812,6 +947,22 @@ mod tests {
         assert_eq!(labels.len(), 1);
         assert_eq!(labels[0].text, "PUN");
         assert_eq!(labels[0].territory_count, 9);
+    }
+
+    #[test]
+    fn claim_labels_show_compact_fallback_for_small_visible_enclave() {
+        let vp = Viewport {
+            offset_x: 0.0,
+            offset_y: 0.0,
+            scale: 0.16,
+        };
+        let clusters = vec![cluster("Aequitas", "Aeq", 1, [0.0, 0.0, 173.0, 153.0])];
+
+        let labels = select_claim_label_candidates(&clusters, &vp, 10.0, measure_units);
+
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].text, "Aeq");
+        assert_eq!(labels[0].territory_count, 1);
     }
 
     #[test]
