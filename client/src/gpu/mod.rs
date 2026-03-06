@@ -3180,7 +3180,7 @@ impl GpuRenderer {
                 && sh >= ORNAMENT_MIN_BOX_PX
             {
                 let ornament_sizing =
-                    compute_territory_ornament_sizing(ornament_aspect, icon_scale);
+                    compute_territory_ornament_sizing(ww, hh, ornament_aspect, icon_scale);
                 let corner_w_world = ornament_sizing.corner_w_world;
                 let corner_h_world = ornament_sizing.corner_h_world;
                 if corner_w_world * px_per_world >= 6.0 && corner_h_world * px_per_world >= 6.0 {

@@ -14,6 +14,9 @@ const DYNAMIC_TIME_STALE_SCALE: f32 = 0.96;
 const RESOURCE_ICON_SIZE_WORLD: f32 = 29.0;
 const ORNAMENT_INSET_WORLD: f32 = 3.0;
 const ORNAMENT_CORNER_SHORT_SIDE_WORLD: f32 = 42.0;
+const ORNAMENT_SIZE_RAMP_START_WORLD: f32 = 54.0;
+const ORNAMENT_SIZE_RAMP_END_WORLD: f32 = 220.0;
+const ORNAMENT_SIZE_RAMP_MAX_SCALE: f32 = 1.75;
 const ORNAMENT_TINT_ALPHA: f32 = 0.86;
 const ORNAMENT_TINT_LIGHTEN_BASE: f32 = 0.04;
 const ORNAMENT_TINT_LIGHTEN_DARK_BOOST: f32 = 0.12;
@@ -171,10 +174,21 @@ pub(crate) fn compute_resource_icon_size_world(icon_scale: f32) -> f32 {
 }
 
 pub(crate) fn compute_territory_ornament_sizing(
+    ww: f32,
+    hh: f32,
     ornament_aspect: f32,
     icon_scale: f32,
 ) -> TerritoryOrnamentSizing {
-    let short_side_world = (ORNAMENT_CORNER_SHORT_SIDE_WORLD * icon_scale.max(0.0)).max(1.0);
+    let territory_short_side = ww.min(hh).max(1.0);
+    let size_ramp = smoothstep_f32(
+        ORNAMENT_SIZE_RAMP_START_WORLD,
+        ORNAMENT_SIZE_RAMP_END_WORLD,
+        territory_short_side,
+    );
+    let short_side_world = (ORNAMENT_CORNER_SHORT_SIDE_WORLD
+        * lerp_f32(1.0, ORNAMENT_SIZE_RAMP_MAX_SCALE, size_ramp)
+        * icon_scale.max(0.0))
+    .max(1.0);
     let aspect = ornament_aspect.max(0.01);
     let (corner_w_world, corner_h_world) = if aspect >= 1.0 {
         (short_side_world * aspect, short_side_world)
@@ -278,18 +292,22 @@ mod tests {
     }
 
     #[test]
-    fn territory_ornament_size_is_fixed_in_world_space() {
-        let square = compute_territory_ornament_sizing(1.0, 1.0);
-        let wide = compute_territory_ornament_sizing(2.0, 1.0);
-        let scaled = compute_territory_ornament_sizing(1.0, 1.5);
+    fn territory_ornament_size_grows_with_territory_size() {
+        let small = compute_territory_ornament_sizing(48.0, 48.0, 1.0, 1.0);
+        let medium = compute_territory_ornament_sizing(120.0, 120.0, 1.0, 1.0);
+        let large = compute_territory_ornament_sizing(260.0, 260.0, 1.0, 1.0);
+        let wide = compute_territory_ornament_sizing(260.0, 260.0, 2.0, 1.0);
+        let scaled = compute_territory_ornament_sizing(260.0, 260.0, 1.0, 1.5);
 
-        assert_close(square.inset_world, 3.0);
-        assert_close(square.corner_w_world, 42.0);
-        assert_close(square.corner_h_world, 42.0);
-        assert_close(wide.corner_w_world, 84.0);
-        assert_close(wide.corner_h_world, 42.0);
-        assert_close(scaled.corner_w_world, 63.0);
-        assert_close(scaled.corner_h_world, 63.0);
+        assert_close(small.inset_world, 3.0);
+        assert!(medium.corner_w_world > small.corner_w_world);
+        assert!(medium.corner_h_world > small.corner_h_world);
+        assert_close(large.corner_w_world, 73.5);
+        assert_close(large.corner_h_world, 73.5);
+        assert_close(wide.corner_w_world, 147.0);
+        assert_close(wide.corner_h_world, 73.5);
+        assert_close(scaled.corner_w_world, 110.25);
+        assert_close(scaled.corner_h_world, 110.25);
     }
 
     #[test]
