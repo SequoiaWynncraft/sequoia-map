@@ -1,19 +1,19 @@
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) const STATIC_NAME_BASELINE_GAP_MULTIPLIER: f32 = 1.0;
 
-const STATIC_TAG_SIZE_WORLD: f32 = 15.0;
-const STATIC_NAME_SIZE_WORLD: f32 = 13.5;
-const DYNAMIC_TAG_SIZE_WORLD: f32 = 15.0;
-const DYNAMIC_DETAIL_SIZE_WORLD: f32 = 13.5;
-const DYNAMIC_TIME_SIZE_WORLD: f32 = 13.0;
-const DYNAMIC_COOLDOWN_SIZE_WORLD: f32 = 14.5;
-const DYNAMIC_LINE_GAP_WORLD: f32 = 4.0;
-const DYNAMIC_TIME_MIN_WIDTH_WORLD: f32 = 68.0;
-const DYNAMIC_COOLDOWN_MIN_WIDTH_WORLD: f32 = 82.0;
+const STATIC_TAG_SIZE_WORLD: f32 = 24.0;
+const STATIC_NAME_SIZE_WORLD: f32 = 21.5;
+const DYNAMIC_TAG_SIZE_WORLD: f32 = 24.0;
+const DYNAMIC_DETAIL_SIZE_WORLD: f32 = 21.5;
+const DYNAMIC_TIME_SIZE_WORLD: f32 = 20.5;
+const DYNAMIC_COOLDOWN_SIZE_WORLD: f32 = 23.0;
+const DYNAMIC_LINE_GAP_WORLD: f32 = 6.0;
+const DYNAMIC_TIME_MIN_WIDTH_WORLD: f32 = 108.0;
+const DYNAMIC_COOLDOWN_MIN_WIDTH_WORLD: f32 = 132.0;
 const DYNAMIC_TIME_STALE_SCALE: f32 = 0.96;
-const RESOURCE_ICON_SIZE_WORLD: f32 = 18.0;
-const ORNAMENT_INSET_WORLD: f32 = 2.0;
-const ORNAMENT_CORNER_SHORT_SIDE_WORLD: f32 = 26.0;
+const RESOURCE_ICON_SIZE_WORLD: f32 = 29.0;
+const ORNAMENT_INSET_WORLD: f32 = 3.0;
+const ORNAMENT_CORNER_SHORT_SIDE_WORLD: f32 = 42.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct StaticLabelSizing {
@@ -206,10 +206,10 @@ mod tests {
             compute_static_label_sizing(24.0, 16.0, 0.2).expect("small sizing should exist");
         let large =
             compute_static_label_sizing(180.0, 40.0, 1.0).expect("large sizing should exist");
-        assert_close(small.tag_size, 15.0);
-        assert_close(large.tag_size, 15.0);
-        assert_close(small.detail_size, 13.5);
-        assert_close(large.detail_size, 13.5);
+        assert_close(small.tag_size, 24.0);
+        assert_close(large.tag_size, 24.0);
+        assert_close(small.detail_size, 21.5);
+        assert_close(large.detail_size, 21.5);
     }
 
     #[test]
@@ -220,20 +220,20 @@ mod tests {
             .expect("far sizing should exist");
         let other_territory = compute_dynamic_label_sizing(44.0, 40.0, 1.0, 1.0, true)
             .expect("other territory sizing should exist");
-        assert_close(near.tag_size, 15.0);
-        assert_close(far.tag_size, 15.0);
-        assert_close(other_territory.tag_size, 15.0);
-        assert_close(near.time_size, 13.0);
-        assert_close(far.time_size, 13.0);
-        assert_close(other_territory.time_size, 13.0);
+        assert_close(near.tag_size, 24.0);
+        assert_close(far.tag_size, 24.0);
+        assert_close(other_territory.tag_size, 24.0);
+        assert_close(near.time_size, 20.5);
+        assert_close(far.time_size, 20.5);
+        assert_close(other_territory.time_size, 20.5);
     }
 
     #[test]
     fn dynamic_sizing_uses_fixed_world_widths() {
         let sizing =
             compute_dynamic_label_sizing(44.0, 40.0, 1.0, 1.0, true).expect("sizing should exist");
-        assert_close(sizing.time_max_width, 68.0);
-        assert_close(sizing.cooldown_max_width, 82.0);
+        assert_close(sizing.time_max_width, 108.0);
+        assert_close(sizing.cooldown_max_width, 132.0);
     }
 
     #[test]
@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn resource_icon_size_is_fixed_in_world_space() {
         let size = compute_resource_icon_size_world(1.0);
-        assert_close(size, 18.0);
+        assert_close(size, 29.0);
     }
 
     #[test]
@@ -263,12 +263,12 @@ mod tests {
         let wide = compute_territory_ornament_sizing(2.0, 1.0);
         let scaled = compute_territory_ornament_sizing(1.0, 1.5);
 
-        assert_close(square.inset_world, 2.0);
-        assert_close(square.corner_w_world, 26.0);
-        assert_close(square.corner_h_world, 26.0);
-        assert_close(wide.corner_w_world, 52.0);
-        assert_close(wide.corner_h_world, 26.0);
-        assert_close(scaled.corner_w_world, 39.0);
-        assert_close(scaled.corner_h_world, 39.0);
+        assert_close(square.inset_world, 3.0);
+        assert_close(square.corner_w_world, 42.0);
+        assert_close(square.corner_h_world, 42.0);
+        assert_close(wide.corner_w_world, 84.0);
+        assert_close(wide.corner_h_world, 42.0);
+        assert_close(scaled.corner_w_world, 63.0);
+        assert_close(scaled.corner_h_world, 63.0);
     }
 }
