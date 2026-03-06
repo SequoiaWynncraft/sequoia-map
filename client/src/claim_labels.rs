@@ -17,6 +17,7 @@ pub(crate) const CLAIM_LABEL_LETTER_SPACING_EM: f32 = 0.065;
 
 const CLAIM_LABEL_BOUNDS_INSET_PX: f32 = 12.0;
 const CLAIM_LABEL_COLLISION_TOLERANCE_PX: f32 = 8.0;
+const CLAIM_CLUSTER_GAP_WORLD: f32 = 12.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Rect {
@@ -434,14 +435,11 @@ where
 fn rectangles_share_claim_edge(a: Rect, b: Rect) -> bool {
     let overlap_x = (a.right.min(b.right) - a.left.max(b.left)).max(0.0);
     let overlap_y = (a.bottom.min(b.bottom) - a.top.max(b.top)).max(0.0);
-    let touch_x =
-        (a.right - b.left).abs() < f32::EPSILON || (b.right - a.left).abs() < f32::EPSILON;
-    let touch_y =
-        (a.bottom - b.top).abs() < f32::EPSILON || (b.bottom - a.top).abs() < f32::EPSILON;
+    let horizontal_gap = (b.left - a.right).max(a.left - b.right).max(0.0);
+    let vertical_gap = (b.top - a.bottom).max(a.top - b.bottom).max(0.0);
 
-    (overlap_x > 0.0 && touch_y)
-        || (overlap_y > 0.0 && touch_x)
-        || (overlap_x > 0.0 && overlap_y > 0.0)
+    (overlap_x > 0.0 && vertical_gap <= CLAIM_CLUSTER_GAP_WORLD)
+        || (overlap_y > 0.0 && horizontal_gap <= CLAIM_CLUSTER_GAP_WORLD)
 }
 
 #[cfg(test)]
@@ -529,13 +527,26 @@ mod tests {
     fn build_claim_clusters_keeps_disconnected_regions_separate() {
         let map = make_map(&[
             ("A", "Nia", "NIA", [0, 0, 10, 10]),
-            ("B", "Nia", "NIA", [30, 0, 40, 10]),
+            ("B", "Nia", "NIA", [40, 0, 50, 10]),
         ]);
 
         let clusters = build_claim_clusters(&map);
 
         assert_eq!(clusters.len(), 2);
         assert!(clusters.iter().all(|cluster| cluster.territory_count == 1));
+    }
+
+    #[test]
+    fn build_claim_clusters_merges_regions_with_small_visual_gap() {
+        let map = make_map(&[
+            ("A", "Nia", "NIA", [0, 0, 100, 100]),
+            ("B", "Nia", "NIA", [108, 0, 208, 100]),
+        ]);
+
+        let clusters = build_claim_clusters(&map);
+
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].territory_count, 2);
     }
 
     #[test]
