@@ -3,21 +3,21 @@ use std::collections::BTreeMap;
 use crate::territory::ClientTerritoryMap;
 use crate::viewport::Viewport;
 
-pub(crate) const CLAIM_LABEL_MIN_SCALE: f64 = 0.12;
-pub(crate) const CLAIM_LABEL_MAX_SCALE: f64 = 0.24;
-pub(crate) const CLAIM_LABEL_FULL_NAME_MIN_SCALE: f64 = 0.15;
-pub(crate) const CLAIM_LABEL_MIN_TERRITORIES: usize = 8;
-pub(crate) const CLAIM_LABEL_MIN_SCREEN_WIDTH: f32 = 80.0;
-pub(crate) const CLAIM_LABEL_MIN_SCREEN_HEIGHT: f32 = 40.0;
-pub(crate) const CLAIM_LABEL_MAX_WIDTH_FRACTION: f32 = 0.82;
-pub(crate) const CLAIM_LABEL_FONT_MIN_WORLD: f32 = 48.0;
+pub(crate) const CLAIM_LABEL_MIN_SCALE: f64 = 0.10;
+pub(crate) const CLAIM_LABEL_MAX_SCALE: f64 = 0.28;
+pub(crate) const CLAIM_LABEL_FULL_NAME_MIN_SCALE: f64 = 0.14;
+pub(crate) const CLAIM_LABEL_MIN_TERRITORIES: usize = 4;
+pub(crate) const CLAIM_LABEL_MIN_SCREEN_WIDTH: f32 = 56.0;
+pub(crate) const CLAIM_LABEL_MIN_SCREEN_HEIGHT: f32 = 28.0;
+pub(crate) const CLAIM_LABEL_MAX_WIDTH_FRACTION: f32 = 0.88;
+pub(crate) const CLAIM_LABEL_FONT_MIN_WORLD: f32 = 32.0;
 pub(crate) const CLAIM_LABEL_FONT_MAX_WORLD: f32 = 180.0;
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) const CLAIM_LABEL_LETTER_SPACING_EM: f32 = 0.065;
 
-const CLAIM_LABEL_BOUNDS_INSET_PX: f32 = 12.0;
-const CLAIM_LABEL_COLLISION_TOLERANCE_PX: f32 = 8.0;
-const CLAIM_CLUSTER_GAP_WORLD: f32 = 12.0;
+const CLAIM_LABEL_BOUNDS_INSET_PX: f32 = 6.0;
+const CLAIM_LABEL_COLLISION_TOLERANCE_PX: f32 = 4.0;
+const CLAIM_CLUSTER_GAP_WORLD: f32 = 24.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Rect {
@@ -571,7 +571,7 @@ mod tests {
         let clusters = vec![cluster(
             "Aurora Dominion",
             "AUR",
-            7,
+            3,
             [0.0, 0.0, 1400.0, 500.0],
         )];
 
@@ -585,7 +585,7 @@ mod tests {
         let vp = Viewport {
             offset_x: 0.0,
             offset_y: 0.0,
-            scale: 0.14,
+            scale: 0.13,
         };
         let clusters = vec![cluster("Aurora", "AUR", 12, [0.0, 0.0, 1400.0, 500.0])];
 
@@ -646,7 +646,7 @@ mod tests {
         let labels = select_claim_label_candidates(&clusters, &vp, 10.0, measure_units);
 
         assert_eq!(labels.len(), 1);
-        assert_eq!(labels[0].text, "MAGNUS");
+        assert_eq!(labels[0].text, "Magnus");
         assert_eq!(labels[0].territory_count, 12);
     }
 }
