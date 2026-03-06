@@ -5,7 +5,7 @@ use crate::viewport::Viewport;
 
 pub(crate) const CLAIM_LABEL_MIN_SCALE: f64 = 0.10;
 pub(crate) const CLAIM_LABEL_MAX_SCALE: f64 = 0.28;
-const CLAIM_LABEL_GUILD_AGGREGATE_MAX_SCALE: f64 = 0.20;
+const CLAIM_LABEL_GUILD_AGGREGATE_MAX_SCALE: f64 = CLAIM_LABEL_MAX_SCALE;
 pub(crate) const CLAIM_LABEL_FULL_NAME_MIN_SCALE: f64 = 0.14;
 pub(crate) const CLAIM_LABEL_MIN_TERRITORIES: usize = 4;
 pub(crate) const CLAIM_LABEL_MIN_SCREEN_WIDTH: f32 = 56.0;
@@ -255,13 +255,7 @@ where
             .push(cluster);
     }
 
-    let mut guilds_with_primary_labels = BTreeMap::new();
     for guild_clusters in clusters_by_guild.into_values() {
-        let guild_key = (
-            guild_clusters[0].guild_name.clone(),
-            guild_clusters[0].guild_prefix.clone(),
-            guild_clusters[0].guild_color,
-        );
         let mut emitted_primary = false;
         if vp.scale <= CLAIM_LABEL_GUILD_AGGREGATE_MAX_SCALE && guild_clusters.len() > 1 {
             let aggregate_cluster = merge_claim_cluster_group(&guild_clusters);
@@ -272,39 +266,46 @@ where
                 &measure_units,
             ) {
                 candidates.push(candidate);
-                guilds_with_primary_labels.insert(guild_key, true);
-                continue;
-            }
-        }
-
-        for cluster in guild_clusters {
-            if let Some(candidate) =
-                claim_label_candidate_for_cluster(cluster, vp, line_height_units, &measure_units)
-            {
-                candidates.push(candidate);
                 emitted_primary = true;
             }
         }
-        if emitted_primary {
-            guilds_with_primary_labels.insert(guild_key, true);
-        }
-    }
 
-    for cluster in clusters {
-        let guild_key = (
-            cluster.guild_name.clone(),
-            cluster.guild_prefix.clone(),
-            cluster.guild_color,
-        );
-        if guilds_with_primary_labels.contains_key(&guild_key) {
-            continue;
+        if !emitted_primary {
+            for cluster in &guild_clusters {
+                if let Some(candidate) = claim_label_candidate_for_cluster(
+                    cluster,
+                    vp,
+                    line_height_units,
+                    &measure_units,
+                ) {
+                    candidates.push(candidate);
+                    emitted_primary = true;
+                }
+            }
         }
-        if let Some(candidate) = compact_claim_label_candidate_for_cluster(
-            cluster,
-            vp,
-            line_height_units,
-            &measure_units,
-        ) {
+
+        if !emitted_primary
+            && let Some(candidate) = guild_clusters
+                .into_iter()
+                .filter_map(|cluster| {
+                    compact_claim_label_candidate_for_cluster(
+                        cluster,
+                        vp,
+                        line_height_units,
+                        &measure_units,
+                    )
+                })
+                .max_by(|a, b| {
+                    a.territory_count
+                        .cmp(&b.territory_count)
+                        .then_with(|| {
+                            a.text_bounds_screen
+                                .area()
+                                .total_cmp(&b.text_bounds_screen.area())
+                        })
+                        .then_with(|| a.text.cmp(&b.text))
+                })
+        {
             candidates.push(candidate);
         }
     }
@@ -962,6 +963,25 @@ mod tests {
 
         assert_eq!(labels.len(), 1);
         assert_eq!(labels[0].text, "Aeq");
+        assert_eq!(labels[0].territory_count, 1);
+    }
+
+    #[test]
+    fn claim_labels_emit_only_one_compact_fallback_per_guild() {
+        let vp = Viewport {
+            offset_x: 0.0,
+            offset_y: 0.0,
+            scale: 0.24,
+        };
+        let clusters = vec![
+            cluster("Paladins United", "PUN", 1, [0.0, 0.0, 173.0, 153.0]),
+            cluster("Paladins United", "PUN", 1, [260.0, 40.0, 433.0, 193.0]),
+        ];
+
+        let labels = select_claim_label_candidates(&clusters, &vp, 10.0, measure_units);
+
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].text, "PUN");
         assert_eq!(labels[0].territory_count, 1);
     }
 
