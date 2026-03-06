@@ -14,6 +14,9 @@ const DYNAMIC_TIME_STALE_SCALE: f32 = 0.96;
 const RESOURCE_ICON_SIZE_WORLD: f32 = 29.0;
 const ORNAMENT_INSET_WORLD: f32 = 3.0;
 const ORNAMENT_CORNER_SHORT_SIDE_WORLD: f32 = 42.0;
+const ORNAMENT_TINT_ALPHA: f32 = 0.86;
+const ORNAMENT_TINT_LIGHTEN_BASE: f32 = 0.04;
+const ORNAMENT_TINT_LIGHTEN_DARK_BOOST: f32 = 0.12;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct StaticLabelSizing {
@@ -185,11 +188,28 @@ pub(crate) fn compute_territory_ornament_sizing(
     }
 }
 
+pub(crate) fn compute_territory_ornament_tint(guild_rgb: (u8, u8, u8)) -> [f32; 4] {
+    let (r, g, b) = guild_rgb;
+    let rf = r as f32 / 255.0;
+    let gf = g as f32 / 255.0;
+    let bf = b as f32 / 255.0;
+    let luminance = 0.299 * rf + 0.587 * gf + 0.114 * bf;
+    let dark_boost = (1.0 - luminance).clamp(0.0, 1.0);
+    let lighten = ORNAMENT_TINT_LIGHTEN_BASE + dark_boost * ORNAMENT_TINT_LIGHTEN_DARK_BOOST;
+    [
+        lerp_f32(rf, 1.0, lighten),
+        lerp_f32(gf, 1.0, lighten),
+        lerp_f32(bf, 1.0, lighten),
+        ORNAMENT_TINT_ALPHA,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         compute_dynamic_label_sizing, compute_resource_icon_size_world,
         compute_static_label_sizing, compute_territory_ornament_sizing,
+        compute_territory_ornament_tint,
     };
 
     fn assert_close(actual: f32, expected: f32) {
@@ -270,5 +290,20 @@ mod tests {
         assert_close(wide.corner_h_world, 42.0);
         assert_close(scaled.corner_w_world, 63.0);
         assert_close(scaled.corner_h_world, 63.0);
+    }
+
+    #[test]
+    fn territory_ornament_tint_tracks_territory_color() {
+        let tint = compute_territory_ornament_tint((64, 128, 224));
+        let base_r = 64.0 / 255.0;
+        let base_g = 128.0 / 255.0;
+        let base_b = 224.0 / 255.0;
+
+        assert!(tint[0] > base_r);
+        assert!(tint[1] > base_g);
+        assert!(tint[2] > base_b);
+        assert!(tint[2] > tint[1]);
+        assert!(tint[1] > tint[0]);
+        assert_close(tint[3], 0.86);
     }
 }

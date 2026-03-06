@@ -20,7 +20,7 @@ use crate::label_layout::{
 use crate::overlay_sizing::{
     STATIC_NAME_BASELINE_GAP_MULTIPLIER, compute_dynamic_label_sizing,
     compute_resource_icon_size_world, compute_static_label_sizing,
-    compute_territory_ornament_sizing, static_name_bottom_bound,
+    compute_territory_ornament_sizing, compute_territory_ornament_tint, static_name_bottom_bound,
 };
 use crate::renderer::{FrameMetrics, InvalidationReason, RenderCapabilities, SceneSnapshot};
 use crate::territory::ClientTerritoryMap;
@@ -213,7 +213,6 @@ const LABEL_VISIBILITY_MIN_SCALE: f64 = 0.10;
 const HQ_CROWN_SIZE_MULTIPLIER: f32 = 1.02;
 const HQ_CROWN_MAX_BOX_FRACTION: f32 = 0.40;
 const ORNAMENT_MIN_BOX_PX: f32 = 34.0;
-const ORNAMENT_TINT_ALPHA: f32 = 0.86;
 
 #[inline]
 fn lerp_f32(a: f32, b: f32, t: f32) -> f32 {
@@ -3190,13 +3189,7 @@ impl GpuRenderer {
                     let top = loc.top() as f32 + inset_world;
                     let right = loc.left() as f32 + ww - inset_world - corner_w_world;
                     let bottom = loc.top() as f32 + hh - inset_world - corner_h_world;
-                    let (gr, gg, gb) = ct.guild_color;
-                    let tint = [
-                        (gr as f32 / 255.0) * 0.42 + 0.58,
-                        (gg as f32 / 255.0) * 0.42 + 0.58,
-                        (gb as f32 / 255.0) * 0.42 + 0.58,
-                        ORNAMENT_TINT_ALPHA,
-                    ];
+                    let tint = compute_territory_ornament_tint(ct.guild_color);
                     renderer.instances_buf.push(IconInstance {
                         rect: [left, top, corner_w_world, corner_h_world],
                         uv_rect: base_ornament_uv,
