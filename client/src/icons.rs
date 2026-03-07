@@ -15,7 +15,7 @@ pub struct ResourceAtlas {
 pub const ICON_COUNT: u32 = 6;
 pub const ATLAS_SRC: &str = "/icons/territory-resources-atlas.png";
 pub const HQ_CROWN_SRC: &str = "/icons/crown_icon.png";
-pub const TERRITORY_ORNAMENT_SRC: &str = "/icons/IMG_1643.png";
+pub const TERRITORY_ORNAMENT_SRC: &str = "/icons/territory-ornament.png";
 pub const SEQUOIA_TERRITORY_ORNAMENT_SRC: &str = "/icons/seq-border-v1.png";
 
 static ATLAS_WARNED: AtomicBool = AtomicBool::new(false);
