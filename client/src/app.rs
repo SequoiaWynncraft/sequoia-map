@@ -2343,9 +2343,17 @@ fn Tooltip() -> impl IntoView {
                             </div>
                             <span style="display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0;">
                                 {is_iris.then(|| view! {
-                                    <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.60rem; letter-spacing: 0.08em; padding: 2px 7px; border-radius: 999px; text-transform: uppercase; background: rgba(168,85,247,0.14); border: 1px solid rgba(168,85,247,0.32); color: #a855f7;">
-                                        "IRIS"
-                                    </span>
+                                    <a
+                                        href=crate::IRIS_RELEASES_URL
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        title="Open Iris releases"
+                                        style="display: inline-flex; pointer-events: auto; text-decoration: none;"
+                                    >
+                                        <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.60rem; letter-spacing: 0.08em; padding: 2px 7px; border-radius: 999px; text-transform: uppercase; background: rgba(168,85,247,0.14); border: 1px solid rgba(168,85,247,0.32); color: #a855f7; cursor: pointer;">
+                                            "IRIS"
+                                        </span>
+                                    </a>
                                 })}
                                 <span style={format!(
                                     "font-family: 'JetBrains Mono', monospace; font-size: 0.60rem; letter-spacing: 0.08em; padding: 2px 7px; border-radius: 999px; text-transform: uppercase; {}",

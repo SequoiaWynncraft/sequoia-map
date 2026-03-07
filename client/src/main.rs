@@ -114,6 +114,9 @@ thread_local! {
     static APP_MOUNT_HANDLE: RefCell<Option<Box<dyn Any>>> = RefCell::new(None);
 }
 
+pub(crate) const SEQUOIA_WEBSITE_URL: &str = "https://seqwawa.com";
+pub(crate) const IRIS_RELEASES_URL: &str = "https://github.com/OneNoted/sequoia-map/releases";
+
 fn main() {
     console_error_panic_hook::set_once();
     let Some(window) = web_sys::window() else {

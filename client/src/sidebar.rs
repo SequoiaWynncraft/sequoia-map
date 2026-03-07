@@ -38,6 +38,7 @@ use crate::sse::ConnectionStatus;
 use crate::territory::ClientTerritoryMap;
 use crate::tower::TowerCalculator;
 use crate::viewport::Viewport;
+use crate::{IRIS_RELEASES_URL, SEQUOIA_WEBSITE_URL};
 
 /// Build list of (label, formatted_value, icon_name) for non-zero resources.
 fn build_resource_items(res: &Resources) -> Vec<(&'static str, String, &'static str)> {
@@ -377,12 +378,22 @@ fn SidebarHeader() -> impl IntoView {
     view! {
         <div style=padding>
             <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;">
-                <div style="display: flex; align-items: baseline; gap: 10px; min-width: 0;">
+                <a
+                    href=SEQUOIA_WEBSITE_URL
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title="Open seqwawa.com"
+                    style="display: flex; align-items: baseline; gap: 10px; min-width: 0; text-decoration: none;"
+                >
                     <div class="text-gold-gradient" style="font-family: 'Silkscreen', monospace; font-size: 1.35rem; font-weight: 700; letter-spacing: 0.18em; text-transform: uppercase; text-shadow: 0 0 16px rgba(245,197,66,0.08);">"SEQUOIA"</div>
                     <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.673rem; color: #3a3f5c; background: #1a1d2a; padding: 1px 6px; border-radius: 3px; border: 1px solid rgba(245,197,66,0.15); letter-spacing: 0.04em;">"v0.1"</div>
-                </div>
+                </a>
                 <div style="position: relative; flex-shrink: 0;">
-                    <div
+                    <a
+                        href=IRIS_RELEASES_URL
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title="Open Iris releases"
                         style=move || {
                             let status = iris_status.get();
                             let (border, bg, fg) = if status.is_working {
@@ -399,7 +410,7 @@ fn SidebarHeader() -> impl IntoView {
                                 )
                             };
                             format!(
-                                "display: inline-flex; align-items: center; gap: 6px; font-family: 'Silkscreen', monospace; font-size: 0.66rem; letter-spacing: 0.08em; padding: 3px 7px; border-radius: 999px; border: 1px solid {border}; background: {bg}; color: {fg}; cursor: help;"
+                                "display: inline-flex; align-items: center; gap: 6px; font-family: 'Silkscreen', monospace; font-size: 0.66rem; letter-spacing: 0.08em; padding: 3px 7px; border-radius: 999px; border: 1px solid {border}; background: {bg}; color: {fg}; cursor: pointer; text-decoration: none;"
                             )
                         }
                         aria-label=move || iris_status.get().tooltip
@@ -418,7 +429,7 @@ fn SidebarHeader() -> impl IntoView {
                             )
                         } />
                         <span>"Iris"</span>
-                    </div>
+                    </a>
                     <div
                         style=move || {
                             let status = iris_status.get();
