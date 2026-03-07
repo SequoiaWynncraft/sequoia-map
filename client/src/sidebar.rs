@@ -25,10 +25,11 @@ use crate::app::{
     NameColorSetting, NeedsLiveResync, PlaybackActive, ReadableFont, ResetSettingsTrigger,
     ResourceHighlight, Selected, SelectedGuild, ShowCompoundMapTime, ShowCountdown,
     ShowGranularMapTime, ShowLeaderboardOnline, ShowLeaderboardSrGain, ShowLeaderboardSrValue,
-    ShowLeaderboardTerritoryCount, ShowMinimap, ShowNames, ShowResourceIcons, SidebarIndex,
-    SidebarItems, SidebarOpen, SidebarTransient, TagColorSetting, TerritoryGeometryStore,
-    ThickCooldownBorders, canvas_dimensions, clamp_connection_opacity_scale,
-    clamp_connection_thickness_scale, clamp_label_scale_group, clamp_label_scale_master,
+    ShowLeaderboardTerritoryCount, ShowMinimap, ShowNames, ShowResourceIcons,
+    ShowTerritoryOrnaments, SidebarIndex, SidebarItems, SidebarOpen, SidebarTransient,
+    TagColorSetting, TerritoryGeometryStore, ThickCooldownBorders, canvas_dimensions,
+    clamp_connection_opacity_scale, clamp_connection_thickness_scale, clamp_label_scale_group,
+    clamp_label_scale_master,
 };
 use crate::colors::rgba_css;
 use crate::history;
@@ -563,6 +564,7 @@ fn SettingsPanel() -> impl IntoView {
     let ConnectionThicknessScale(connection_thickness_scale) = expect_context();
     let ResourceHighlight(resource_highlight) = expect_context();
     let ShowResourceIcons(show_resource_icons) = expect_context();
+    let ShowTerritoryOrnaments(show_territory_ornaments) = expect_context();
     let ManualSrScalar(manual_sr_scalar) = expect_context();
     let AutoSrScalarEnabled(auto_sr_scalar_enabled) = expect_context();
     let ShowLeaderboardSrGain(show_leaderboard_sr_gain) = expect_context();
@@ -681,6 +683,7 @@ fn SettingsPanel() -> impl IntoView {
                 />
                 <SettingsToggleRow label="Resource Highlight" shortcut="P" active=resource_highlight />
                 <SettingsToggleRow label="Resource Icons" shortcut="" active=show_resource_icons />
+                <SettingsToggleRow label="Territory Ornaments" shortcut="" active=show_territory_ornaments />
                 <SettingsToggleRow label="Minimap" shortcut="M" active=show_minimap />
                 <SettingsToggleRow label="Heat Map" shortcut="" active=heat_mode_enabled />
                 <div style="display: flex; align-items: center; justify-content: space-between; padding: 9px 10px;">

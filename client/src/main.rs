@@ -50,6 +50,7 @@ mod gpu {
         pub dynamic_show_granular_map_time: bool,
         pub dynamic_show_compound_map_time: bool,
         pub dynamic_show_resource_icons: bool,
+        pub show_territory_ornaments: bool,
         pub label_scale_master: f32,
         pub label_scale_static_tag: f32,
         pub label_scale_static_name: f32,

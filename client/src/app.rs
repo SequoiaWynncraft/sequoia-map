@@ -121,6 +121,8 @@ pub(crate) struct ResourceHighlight(pub RwSignal<bool>);
 #[derive(Clone, Copy)]
 pub(crate) struct ShowResourceIcons(pub RwSignal<bool>);
 #[derive(Clone, Copy)]
+pub(crate) struct ShowTerritoryOrnaments(pub RwSignal<bool>);
+#[derive(Clone, Copy)]
 pub(crate) struct ManualSrScalar(pub RwSignal<f64>);
 #[derive(Clone, Copy)]
 pub(crate) struct AutoSrScalarEnabled(pub RwSignal<bool>);
@@ -319,6 +321,8 @@ struct SettingsV2 {
     sidebar_open: bool,
     resource_highlight: bool,
     show_resource_icons: bool,
+    #[serde(default = "default_true")]
+    show_territory_ornaments: bool,
     #[serde(default = "default_manual_sr_scalar")]
     manual_sr_scalar: f64,
     auto_sr_scalar_enabled: bool,
@@ -462,6 +466,7 @@ impl Default for SettingsV2 {
             sidebar_open: false,
             resource_highlight: false,
             show_resource_icons: false,
+            show_territory_ornaments: true,
             manual_sr_scalar: default_manual_sr_scalar(),
             auto_sr_scalar_enabled: false,
             show_leaderboard_sr_gain: false,
@@ -562,6 +567,7 @@ impl From<LegacySettings> for SettingsV2 {
             sidebar_open: value.sidebar_open,
             resource_highlight: value.resource_highlight,
             show_resource_icons: value.show_resource_icons,
+            show_territory_ornaments: true,
             manual_sr_scalar: value.manual_sr_scalar,
             auto_sr_scalar_enabled: value.auto_sr_scalar_enabled,
             show_leaderboard_sr_gain: value.show_leaderboard_sr_gain,
@@ -713,6 +719,7 @@ pub fn App() -> impl IntoView {
     );
     let resource_highlight: RwSignal<bool> = RwSignal::new(saved.resource_highlight);
     let show_resource_icons: RwSignal<bool> = RwSignal::new(saved.show_resource_icons);
+    let show_territory_ornaments: RwSignal<bool> = RwSignal::new(saved.show_territory_ornaments);
     let manual_sr_scalar: RwSignal<f64> =
         RwSignal::new(season_scalar::clamp_manual_scalar(saved.manual_sr_scalar));
     let auto_sr_scalar_enabled: RwSignal<bool> = RwSignal::new(saved.auto_sr_scalar_enabled);
@@ -822,6 +829,7 @@ pub fn App() -> impl IntoView {
     provide_context(ConnectionThicknessScale(connection_thickness_scale));
     provide_context(ResourceHighlight(resource_highlight));
     provide_context(ShowResourceIcons(show_resource_icons));
+    provide_context(ShowTerritoryOrnaments(show_territory_ornaments));
     provide_context(ManualSrScalar(manual_sr_scalar));
     provide_context(AutoSrScalarEnabled(auto_sr_scalar_enabled));
     provide_context(ShowLeaderboardSrGain(show_leaderboard_sr_gain));
@@ -904,6 +912,7 @@ pub fn App() -> impl IntoView {
         ));
         resource_highlight.set(defaults.resource_highlight);
         show_resource_icons.set(defaults.show_resource_icons);
+        show_territory_ornaments.set(defaults.show_territory_ornaments);
         manual_sr_scalar.set(season_scalar::clamp_manual_scalar(
             defaults.manual_sr_scalar,
         ));
@@ -1241,6 +1250,7 @@ pub fn App() -> impl IntoView {
             sidebar_open: sidebar_open.get(),
             resource_highlight: resource_highlight.get(),
             show_resource_icons: show_resource_icons.get(),
+            show_territory_ornaments: show_territory_ornaments.get(),
             manual_sr_scalar: season_scalar::clamp_manual_scalar(manual_sr_scalar.get()),
             auto_sr_scalar_enabled: auto_sr_scalar_enabled.get(),
             show_leaderboard_sr_gain: show_leaderboard_sr_gain.get(),

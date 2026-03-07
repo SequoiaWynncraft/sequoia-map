@@ -63,6 +63,8 @@ const QUAD_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 1] = [wgpu::VertexAttribut
     shader_location: 0,
     format: wgpu::VertexFormat::Float32x2,
 }];
+const STATIC_NAME_FILL_ALPHA_MULTIPLIER: f32 = 0.84;
+const STATIC_NAME_HALO_ALPHA_MULTIPLIER: f32 = 0.88;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -808,6 +810,7 @@ pub struct GpuRenderer {
     pub dynamic_show_granular_map_time: bool,
     pub dynamic_show_compound_map_time: bool,
     pub dynamic_show_resource_icons: bool,
+    pub show_territory_ornaments: bool,
     pub label_scale_master: f32,
     pub label_scale_static_tag: f32,
     pub label_scale_static_name: f32,
@@ -1516,6 +1519,7 @@ impl GpuRenderer {
             dynamic_show_granular_map_time: false,
             dynamic_show_compound_map_time: false,
             dynamic_show_resource_icons: true,
+            show_territory_ornaments: true,
             label_scale_master: 1.0,
             label_scale_static_tag: 1.0,
             label_scale_static_name: 1.0,
@@ -2912,10 +2916,12 @@ impl GpuRenderer {
                             + tag_size * 0.5
                             + detail_size * STATIC_NAME_BASELINE_GAP_MULTIPLIER;
                         let mut name_rgba = name_color_rgba(self.static_name_color, ct.guild_color);
-                        name_rgba[3] *= detail_layout_alpha.clamp(0.0, 1.0);
+                        name_rgba[3] *=
+                            STATIC_NAME_FILL_ALPHA_MULTIPLIER * detail_layout_alpha.clamp(0.0, 1.0);
                         let name_px = detail_size * px_per_world;
                         let name_halo_boost = 1.0 - smoothstep_f32(8.4, 12.2, name_px);
                         let name_halo_alpha = ((0.68 - name_halo_boost * 0.12)
+                            * STATIC_NAME_HALO_ALPHA_MULTIPLIER
                             * detail_layout_alpha.clamp(0.0, 1.0))
                         .clamp(0.0, 0.74);
                         push_text_line_dual_with_tracking(
@@ -3253,7 +3259,8 @@ impl GpuRenderer {
             let px_per_world = scale.max(0.0001);
             let cx = loc.midpoint_x() as f32;
             let cy = loc.midpoint_y() as f32;
-            if let Some(base_ornament_uv) = ornament_uv
+            if self.show_territory_ornaments
+                && let Some(base_ornament_uv) = ornament_uv
                 && sw >= ORNAMENT_MIN_BOX_PX
                 && sh >= ORNAMENT_MIN_BOX_PX
             {
