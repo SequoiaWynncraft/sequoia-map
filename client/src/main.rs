@@ -118,6 +118,13 @@ thread_local! {
 pub(crate) const SEQUOIA_WEBSITE_URL: &str = "https://seqwawa.com";
 pub(crate) const IRIS_RELEASES_URL: &str = "https://github.com/OneNoted/sequoia-map/releases";
 
+pub(crate) fn guild_stats_url(guild_name: &str) -> String {
+    let encoded = js_sys::encode_uri_component(guild_name)
+        .as_string()
+        .unwrap_or_else(|| guild_name.to_string());
+    format!("https://wynncraft.com/stats/guild/{encoded}")
+}
+
 fn main() {
     console_error_panic_hook::set_once();
     let Some(window) = web_sys::window() else {
