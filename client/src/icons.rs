@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use futures::future::join3;
 use leptos::prelude::*;
 use web_sys::HtmlImageElement;
 
@@ -95,47 +96,45 @@ pub fn load_resource_atlas(signal: RwSignal<Option<ResourceAtlas>>) {
         };
         sequoia_territory_ornament_image.set_src(SEQUOIA_TERRITORY_ORNAMENT_SRC);
 
-        match wasm_bindgen_futures::JsFuture::from(hq_crown_image.decode()).await {
-            Ok(_) => {
-                match wasm_bindgen_futures::JsFuture::from(territory_ornament_image.decode()).await
-                {
-                    Ok(_) => {
-                        let sequoia_territory_ornament_image =
-                            match wasm_bindgen_futures::JsFuture::from(
-                                sequoia_territory_ornament_image.decode(),
-                            )
-                            .await
-                            {
-                                Ok(_) => sequoia_territory_ornament_image,
-                                Err(err) => {
-                                    warn_atlas_once(&format!(
-                                        "Failed to decode Sequoia territory ornament icon: {:?}",
-                                        err
-                                    ));
-                                    territory_ornament_image.clone()
-                                }
-                            };
-                        signal.set(Some(ResourceAtlas {
-                            resource_image,
-                            hq_crown_image,
-                            territory_ornament_image,
-                            sequoia_territory_ornament_image,
-                        }))
-                    }
-                    Err(err) => {
-                        signal.set(None);
-                        warn_atlas_once(&format!(
-                            "Failed to decode territory ornament icon: {:?}",
-                            err
-                        ));
-                    }
-                }
-            }
-            Err(err) => {
-                signal.set(None);
-                warn_atlas_once(&format!("Failed to decode HQ crown icon: {:?}", err));
-            }
+        let (crown_result, ornament_result, sequoia_ornament_result) = join3(
+            wasm_bindgen_futures::JsFuture::from(hq_crown_image.decode()),
+            wasm_bindgen_futures::JsFuture::from(territory_ornament_image.decode()),
+            wasm_bindgen_futures::JsFuture::from(sequoia_territory_ornament_image.decode()),
+        )
+        .await;
+
+        if let Err(err) = crown_result {
+            signal.set(None);
+            warn_atlas_once(&format!("Failed to decode HQ crown icon: {:?}", err));
+            return;
         }
+
+        if let Err(err) = ornament_result {
+            signal.set(None);
+            warn_atlas_once(&format!(
+                "Failed to decode territory ornament icon: {:?}",
+                err
+            ));
+            return;
+        }
+
+        let sequoia_territory_ornament_image = match sequoia_ornament_result {
+            Ok(_) => sequoia_territory_ornament_image,
+            Err(err) => {
+                warn_atlas_once(&format!(
+                    "Failed to decode Sequoia territory ornament icon: {:?}",
+                    err
+                ));
+                territory_ornament_image.clone()
+            }
+        };
+
+        signal.set(Some(ResourceAtlas {
+            resource_image,
+            hq_crown_image,
+            territory_ornament_image,
+            sequoia_territory_ornament_image,
+        }));
     });
 }
 

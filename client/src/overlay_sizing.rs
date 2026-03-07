@@ -88,11 +88,7 @@ fn timer_max_width_world(ww: f32, min_width: f32) -> f32 {
     (ww - 8.0).max(min_width)
 }
 
-pub(crate) fn compute_static_label_sizing(
-    ww: f32,
-    hh: f32,
-    _scale: f32,
-) -> Option<StaticLabelSizing> {
+pub(crate) fn compute_static_label_sizing(ww: f32, hh: f32) -> Option<StaticLabelSizing> {
     if !static_label_visible(ww, hh) {
         return None;
     }
@@ -114,7 +110,6 @@ pub(crate) fn static_name_bottom_bound(
     ww: f32,
     hh: f32,
     cy: f32,
-    scale: f32,
     tag_scale: f32,
     name_scale: f32,
 ) -> Option<f32> {
@@ -122,7 +117,7 @@ pub(crate) fn static_name_bottom_bound(
         return None;
     }
 
-    let sizing = compute_static_label_sizing(ww, hh, scale)?;
+    let sizing = compute_static_label_sizing(ww, hh)?;
     let detail_layout_alpha = sizing.detail_layout_alpha;
     if detail_layout_alpha <= 0.02 {
         return None;
@@ -252,10 +247,8 @@ mod tests {
 
     #[test]
     fn static_sizing_is_fixed_in_world_space() {
-        let small =
-            compute_static_label_sizing(24.0, 16.0, 0.2).expect("small sizing should exist");
-        let large =
-            compute_static_label_sizing(180.0, 40.0, 1.0).expect("large sizing should exist");
+        let small = compute_static_label_sizing(24.0, 16.0).expect("small sizing should exist");
+        let large = compute_static_label_sizing(180.0, 40.0).expect("large sizing should exist");
         assert_close(small.tag_size, 24.0);
         assert_close(large.tag_size, 24.0);
         assert_close(small.detail_size, 21.5);

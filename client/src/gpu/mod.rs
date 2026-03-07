@@ -2888,7 +2888,7 @@ impl GpuRenderer {
                     let loc = &ct.territory.location;
                     let ww = loc.width() as f32;
                     let hh = loc.height() as f32;
-                    let Some(sizing) = compute_static_label_sizing(ww, hh, scale) else {
+                    let Some(sizing) = compute_static_label_sizing(ww, hh) else {
                         continue;
                     };
                     let cx = loc.midpoint_x() as f32;
@@ -3109,7 +3109,6 @@ impl GpuRenderer {
                     ww,
                     hh,
                     cy,
-                    scale,
                     static_tag_scale,
                     static_name_scale,
                 );
@@ -3373,7 +3372,7 @@ impl GpuRenderer {
             }
             if is_hq
                 && let Some(crown_uv) = renderer.uv_by_kind.get(&IconKind::HqCrown).copied()
-                && let Some(static_sizing) = compute_static_label_sizing(ww, hh, scale)
+                && let Some(static_sizing) = compute_static_label_sizing(ww, hh)
             {
                 let crown_tag_size = static_sizing.tag_size * static_tag_scale;
                 let crown_detail_size = static_sizing.detail_size * static_name_scale;
@@ -3443,7 +3442,6 @@ impl GpuRenderer {
                 ww,
                 hh,
                 cy,
-                scale,
                 static_tag_scale,
                 static_name_scale,
             );
