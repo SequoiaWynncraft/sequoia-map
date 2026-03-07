@@ -13,7 +13,6 @@ pub enum IconKind {
     Wood,
     Rainbow,
     HqCrown,
-    TerritoryOrnament,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

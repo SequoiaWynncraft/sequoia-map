@@ -27,7 +27,7 @@ use crate::overlay_sizing::{
     compute_territory_ornament_sizing, compute_territory_ornament_tint, static_name_bottom_bound,
 };
 use crate::renderer::{FrameMetrics, InvalidationReason, RenderCapabilities, SceneSnapshot};
-use crate::territory::ClientTerritoryMap;
+use crate::territory::{ClientTerritoryMap, is_sequoia_guild};
 use crate::tiles::{LoadedTile, TileQuality};
 use crate::time_format::write_hms;
 use crate::viewport::Viewport;
@@ -174,7 +174,10 @@ struct GpuIconRenderer {
     instance_capacity: u32,
     instances_buf: Vec<IconInstance>,
     uv_by_kind: HashMap<IconKind, [f32; 4]>,
-    ornament_aspect: f32,
+    default_ornament_uv: [f32; 4],
+    default_ornament_aspect: f32,
+    sequoia_ornament_uv: [f32; 4],
+    sequoia_ornament_aspect: f32,
 }
 
 const GLYPH_ATLAS_FONT_PX: f64 = 96.0;
@@ -1719,14 +1722,26 @@ impl GpuRenderer {
         let crown_h = icons.hq_crown_image.natural_height().max(1);
         let ornament_w = icons.territory_ornament_image.natural_width().max(1);
         let ornament_h = icons.territory_ornament_image.natural_height().max(1);
+        let sequoia_ornament_w = icons
+            .sequoia_territory_ornament_image
+            .natural_width()
+            .max(1);
+        let sequoia_ornament_h = icons
+            .sequoia_territory_ornament_image
+            .natural_height()
+            .max(1);
         let icon_cell_w = (resource_atlas_w / ICON_COUNT).max(1);
         let icon_cell_h = resource_atlas_h.max(1);
         let crown_slot_w = icon_cell_w.max(crown_w);
         let resource_x = 0u32;
         let crown_x = resource_x + resource_atlas_w;
         let ornament_x = crown_x + crown_slot_w;
-        let atlas_w = ornament_x + ornament_w;
-        let atlas_h = icon_cell_h.max(crown_h).max(ornament_h);
+        let sequoia_ornament_x = ornament_x + ornament_w;
+        let atlas_w = sequoia_ornament_x + sequoia_ornament_w;
+        let atlas_h = icon_cell_h
+            .max(crown_h)
+            .max(ornament_h)
+            .max(sequoia_ornament_h);
         canvas.set_width(atlas_w);
         canvas.set_height(atlas_h);
         ctx.clear_rect(0.0, 0.0, atlas_w as f64, atlas_h as f64);
@@ -1753,45 +1768,88 @@ impl GpuRenderer {
             0.0,
         )
         .ok()?;
+        ctx.draw_image_with_html_image_element(
+            &icons.sequoia_territory_ornament_image,
+            sequoia_ornament_x as f64,
+            0.0,
+        )
+        .ok()?;
         ctx.set_image_smoothing_enabled(true);
 
         let image_data = ctx
             .get_image_data(0.0, 0.0, atlas_w as f64, atlas_h as f64)
             .ok()?;
         let mut pixels = image_data.data().0;
-        let mut orn_min_x = ornament_w;
-        let mut orn_min_y = ornament_h;
-        let mut orn_max_x = 0u32;
-        let mut orn_max_y = 0u32;
-        let mut orn_found = false;
-        for y in 0..ornament_h {
-            for x in 0..ornament_w {
-                let atlas_px_x = ornament_x + x;
-                let idx = ((y * atlas_w + atlas_px_x) * 4) as usize;
-                let r = pixels[idx] as u16;
-                let g = pixels[idx + 1] as u16;
-                let b = pixels[idx + 2] as u16;
-                let src_a = pixels[idx + 3] as u16;
-                let lum = r.max(g).max(b);
-                let alpha = ((lum * src_a + 127) / 255) as u8;
-                pixels[idx] = 255;
-                pixels[idx + 1] = 255;
-                pixels[idx + 2] = 255;
-                pixels[idx + 3] = alpha;
-                if alpha > 6 {
-                    orn_found = true;
-                    orn_min_x = orn_min_x.min(x);
-                    orn_min_y = orn_min_y.min(y);
-                    orn_max_x = orn_max_x.max(x);
-                    orn_max_y = orn_max_y.max(y);
-                }
-            }
-        }
 
         let atlas_wf = atlas_w as f32;
         let atlas_hf = atlas_h as f32;
+        let mut extract_ornament = |slot_x: u32, slot_w: u32, slot_h: u32, preserve_color: bool| {
+            let mut orn_min_x = slot_w;
+            let mut orn_min_y = slot_h;
+            let mut orn_max_x = 0u32;
+            let mut orn_max_y = 0u32;
+            let mut orn_found = false;
+            for y in 0..slot_h {
+                for x in 0..slot_w {
+                    let atlas_px_x = slot_x + x;
+                    let idx = ((y * atlas_w + atlas_px_x) * 4) as usize;
+                    let r = pixels[idx] as u16;
+                    let g = pixels[idx + 1] as u16;
+                    let b = pixels[idx + 2] as u16;
+                    let src_a = pixels[idx + 3] as u16;
+                    let lum = r.max(g).max(b);
+                    let alpha = ((lum * src_a + 127) / 255) as u8;
+                    if preserve_color {
+                        pixels[idx + 3] = alpha;
+                    } else {
+                        pixels[idx] = 255;
+                        pixels[idx + 1] = 255;
+                        pixels[idx + 2] = 255;
+                        pixels[idx + 3] = alpha;
+                    }
+                    if alpha > 6 {
+                        orn_found = true;
+                        orn_min_x = orn_min_x.min(x);
+                        orn_min_y = orn_min_y.min(y);
+                        orn_max_x = orn_max_x.max(x);
+                        orn_max_y = orn_max_y.max(y);
+                    }
+                }
+            }
+            if orn_found {
+                let tight_w = (orn_max_x - orn_min_x + 1).max(1);
+                let tight_h = (orn_max_y - orn_min_y + 1).max(1);
+                (
+                    [
+                        ((slot_x + orn_min_x) as f32) / atlas_wf,
+                        (orn_min_y as f32) / atlas_hf,
+                        ((slot_x + orn_max_x + 1) as f32) / atlas_wf,
+                        ((orn_max_y + 1) as f32) / atlas_hf,
+                    ],
+                    (tight_w as f32 / tight_h as f32).clamp(0.2, 5.0),
+                )
+            } else {
+                (
+                    [
+                        (slot_x as f32) / atlas_wf,
+                        0.0,
+                        ((slot_x + slot_w) as f32) / atlas_wf,
+                        (slot_h as f32) / atlas_hf,
+                    ],
+                    (slot_w as f32 / slot_h as f32).clamp(0.2, 5.0),
+                )
+            }
+        };
+        let (default_ornament_uv, default_ornament_aspect) =
+            extract_ornament(ornament_x, ornament_w, ornament_h, false);
+        let (sequoia_ornament_uv, sequoia_ornament_aspect) = extract_ornament(
+            sequoia_ornament_x,
+            sequoia_ornament_w,
+            sequoia_ornament_h,
+            true,
+        );
         let icon_v1 = (icon_cell_h as f32 / atlas_hf).clamp(0.0, 1.0);
-        let mut uv_by_kind = HashMap::with_capacity((ICON_COUNT + 2) as usize);
+        let mut uv_by_kind = HashMap::with_capacity((ICON_COUNT + 1) as usize);
         let resource_icon_uv = |index: u32| {
             let x0 = resource_x + index * icon_cell_w;
             let x1 = (resource_x + (index + 1) * icon_cell_w).min(resource_x + resource_atlas_w);
@@ -1812,30 +1870,6 @@ impl GpuRenderer {
                 icon_v1,
             ],
         );
-        let (ornament_uv, ornament_aspect) = if orn_found {
-            let tight_w = (orn_max_x - orn_min_x + 1).max(1);
-            let tight_h = (orn_max_y - orn_min_y + 1).max(1);
-            (
-                [
-                    ((ornament_x + orn_min_x) as f32) / atlas_wf,
-                    (orn_min_y as f32) / atlas_hf,
-                    ((ornament_x + orn_max_x + 1) as f32) / atlas_wf,
-                    ((orn_max_y + 1) as f32) / atlas_hf,
-                ],
-                (tight_w as f32 / tight_h as f32).clamp(0.2, 5.0),
-            )
-        } else {
-            (
-                [
-                    (ornament_x as f32) / atlas_wf,
-                    0.0,
-                    ((ornament_x + ornament_w) as f32) / atlas_wf,
-                    (ornament_h as f32) / atlas_hf,
-                ],
-                (ornament_w as f32 / ornament_h as f32).clamp(0.2, 5.0),
-            )
-        };
-        uv_by_kind.insert(IconKind::TerritoryOrnament, ornament_uv);
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("icon-atlas-tex"),
@@ -1991,7 +2025,10 @@ impl GpuRenderer {
             instance_capacity: initial_capacity,
             instances_buf: Vec::new(),
             uv_by_kind,
-            ornament_aspect,
+            default_ornament_uv,
+            default_ornament_aspect,
+            sequoia_ornament_uv,
+            sequoia_ornament_aspect,
         })
     }
 
@@ -3231,11 +3268,10 @@ impl GpuRenderer {
             self.icon_dirty = false;
             return;
         };
-        let ornament_uv = renderer
-            .uv_by_kind
-            .get(&IconKind::TerritoryOrnament)
-            .copied();
-        let ornament_aspect = renderer.ornament_aspect.max(0.2);
+        let default_ornament_uv = renderer.default_ornament_uv;
+        let default_ornament_aspect = renderer.default_ornament_aspect.max(0.2);
+        let sequoia_ornament_uv = renderer.sequoia_ornament_uv;
+        let sequoia_ornament_aspect = renderer.sequoia_ornament_aspect.max(0.2);
         renderer.instances_buf.clear();
         if !self.use_full_gpu_text || vp.scale < LABEL_VISIBILITY_MIN_SCALE {
             renderer.instance_count = 0;
@@ -3260,10 +3296,24 @@ impl GpuRenderer {
             let cx = loc.midpoint_x() as f32;
             let cy = loc.midpoint_y() as f32;
             if self.show_territory_ornaments
-                && let Some(base_ornament_uv) = ornament_uv
                 && sw >= ORNAMENT_MIN_BOX_PX
                 && sh >= ORNAMENT_MIN_BOX_PX
             {
+                let use_sequoia_ornament =
+                    is_sequoia_guild(&ct.territory.guild.name, &ct.territory.guild.prefix);
+                let (base_ornament_uv, ornament_aspect, tint) = if use_sequoia_ornament {
+                    (
+                        sequoia_ornament_uv,
+                        sequoia_ornament_aspect,
+                        [1.0, 1.0, 1.0, 1.0],
+                    )
+                } else {
+                    (
+                        default_ornament_uv,
+                        default_ornament_aspect,
+                        compute_territory_ornament_tint(ct.guild_color),
+                    )
+                };
                 let ornament_sizing =
                     compute_territory_ornament_sizing(ww, hh, ornament_aspect, icon_scale);
                 let corner_w_world = ornament_sizing.corner_w_world;
@@ -3277,7 +3327,6 @@ impl GpuRenderer {
                     if right < left + corner_w_world || bottom < top + corner_h_world {
                         continue;
                     }
-                    let tint = compute_territory_ornament_tint(ct.guild_color);
                     renderer.instances_buf.push(IconInstance {
                         rect: [left, top, corner_w_world, corner_h_world],
                         uv_rect: base_ornament_uv,
