@@ -22,13 +22,13 @@ use crate::app::{
     LABEL_SCALE_MASTER_MAX, LABEL_SCALE_MASTER_MIN, LabelScaleDynamic, LabelScaleIcons,
     LabelScaleMaster, LabelScaleStatic, LabelScaleStaticName, LastLiveSeq, LeaderboardSortBySr,
     LiveHandoffResyncCount, LiveSeasonScalarSample, ManualSrScalar, MapMode, NameColor,
-    NameColorSetting, NeedsLiveResync, PlaybackActive, ReadableFont, ResourceHighlight, Selected,
-    SelectedGuild, ShowCompoundMapTime, ShowCountdown, ShowGranularMapTime, ShowLeaderboardOnline,
-    ShowLeaderboardSrGain, ShowLeaderboardSrValue, ShowLeaderboardTerritoryCount, ShowMinimap,
-    ShowNames, ShowResourceIcons, SidebarIndex, SidebarItems, SidebarOpen, SidebarTransient,
-    TagColorSetting, TerritoryGeometryStore, ThickCooldownBorders, canvas_dimensions,
-    clamp_connection_opacity_scale, clamp_connection_thickness_scale, clamp_label_scale_group,
-    clamp_label_scale_master,
+    NameColorSetting, NeedsLiveResync, PlaybackActive, ReadableFont, ResetSettingsTrigger,
+    ResourceHighlight, Selected, SelectedGuild, ShowCompoundMapTime, ShowCountdown,
+    ShowGranularMapTime, ShowLeaderboardOnline, ShowLeaderboardSrGain, ShowLeaderboardSrValue,
+    ShowLeaderboardTerritoryCount, ShowMinimap, ShowNames, ShowResourceIcons, SidebarIndex,
+    SidebarItems, SidebarOpen, SidebarTransient, TagColorSetting, TerritoryGeometryStore,
+    ThickCooldownBorders, canvas_dimensions, clamp_connection_opacity_scale,
+    clamp_connection_thickness_scale, clamp_label_scale_group, clamp_label_scale_master,
 };
 use crate::colors::rgba_css;
 use crate::history;
@@ -2520,6 +2520,7 @@ fn StatsBar() -> impl IntoView {
     let GuildColorStore(guild_color_store) = expect_context();
     let IsMobile(is_mobile) = expect_context();
     let HeatModeEnabled(heat_mode_enabled) = expect_context();
+    let ResetSettingsTrigger(reset_settings_trigger) = expect_context();
 
     let guild_count = Memo::new(move |_| {
         let map = territories.get();
@@ -2655,6 +2656,33 @@ fn StatsBar() -> impl IntoView {
             >
                 <span style=move || status_dot_style.get()></span>
             </div>
+            <button
+                style:display=move || if show_settings.get() { "flex" } else { "none" }
+                style="background: linear-gradient(180deg, rgba(245,197,66,0.12) 0%, rgba(245,197,66,0.06) 100%); border: 1px solid rgba(245,197,66,0.24); border-radius: 999px; padding: 5px 11px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: border-color 0.15s, background 0.15s, color 0.15s, box-shadow 0.15s; font-family: 'Silkscreen', monospace; font-size: 0.648rem; letter-spacing: 0.08em; text-transform: uppercase; color: #f5c542; box-shadow: 0 0 12px rgba(245,197,66,0.08);"
+                style:min-height=move || if is_mobile.get() { "44px" } else { "auto" }
+                title="Reset all settings to defaults"
+                on:click=move |_| {
+                    reset_settings_trigger.update(|value| *value = value.saturating_add(1));
+                }
+                on:mouseenter=move |e| {
+                    if let Some(el) = e.target().and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok()) {
+                        el.style().set_property("color", "#13161f").ok();
+                        el.style().set_property("background", "#f5c542").ok();
+                        el.style().set_property("border-color", "#f5c542").ok();
+                        el.style().set_property("box-shadow", "0 0 12px rgba(245,197,66,0.24)").ok();
+                    }
+                }
+                on:mouseleave=move |e| {
+                    if let Some(el) = e.target().and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok()) {
+                        el.style().set_property("color", "#f5c542").ok();
+                        el.style().set_property("background", "linear-gradient(180deg, rgba(245,197,66,0.12) 0%, rgba(245,197,66,0.06) 100%)").ok();
+                        el.style().set_property("border-color", "rgba(245,197,66,0.24)").ok();
+                        el.style().set_property("box-shadow", "0 0 12px rgba(245,197,66,0.08)").ok();
+                    }
+                }
+            >
+                "Defaults"
+            </button>
             <button
                 style="background: none; border: 1px solid #282c3e; border-radius: 999px; padding: 5px 7px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: border-color 0.15s, background 0.15s, color 0.15s;"
                 style:min-height=move || if is_mobile.get() { "44px" } else { "auto" }
