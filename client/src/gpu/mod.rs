@@ -219,8 +219,9 @@ const DYNAMIC_TIMER_VISIBILITY_MIN_SCALE: f64 = 0.31;
 /// Minimum viewport scale at which any territory labels are drawn.
 /// Below this zoom level all text (static tags, dynamic time, icons) is hidden uniformly.
 const LABEL_VISIBILITY_MIN_SCALE: f64 = 0.10;
-const HQ_CROWN_SIZE_MULTIPLIER: f32 = 2.35;
-const HQ_CROWN_MAX_BOX_FRACTION: f32 = 0.66;
+const HQ_CROWN_SIZE_MULTIPLIER: f32 = 1.75;
+const HQ_CROWN_MAX_BOX_FRACTION: f32 = 0.48;
+const ORNAMENT_MIN_RENDERED_PX: f32 = 1.0;
 
 #[inline]
 fn lerp_f32(a: f32, b: f32, t: f32) -> f32 {
@@ -3321,7 +3322,9 @@ impl GpuRenderer {
                     compute_territory_ornament_sizing(ww, hh, ornament_aspect, icon_scale);
                 let corner_w_world = ornament_sizing.corner_w_world;
                 let corner_h_world = ornament_sizing.corner_h_world;
-                if corner_w_world > 0.0 && corner_h_world > 0.0 {
+                if corner_w_world * px_per_world >= ORNAMENT_MIN_RENDERED_PX
+                    && corner_h_world * px_per_world >= ORNAMENT_MIN_RENDERED_PX
+                {
                     let inset_world = ornament_sizing.inset_world;
                     let left = loc.left() as f32 + inset_world;
                     let top = loc.top() as f32 + inset_world;
@@ -3381,9 +3384,9 @@ impl GpuRenderer {
                 let max_crown_world = (ww.min(hh) * HQ_CROWN_MAX_BOX_FRACTION).max(min_crown_world);
                 let crown_size_world = (crown_tag_size * HQ_CROWN_SIZE_MULTIPLIER)
                     .clamp(min_crown_world, max_crown_world);
-                let crown_gap_world = (2.5 + crown_tag_size * 0.08).max(0.0);
+                let crown_gap_world = (1.5 + crown_tag_size * 0.05).max(0.0);
                 let crown_center_y =
-                    crown_tag_y - crown_tag_size * 0.5 - crown_gap_world - crown_size_world * 0.5;
+                    crown_tag_y - crown_tag_size * 0.5 - crown_gap_world - crown_size_world * 0.35;
                 renderer.instances_buf.push(IconInstance {
                     rect: [
                         cx - crown_size_world * 0.5,
