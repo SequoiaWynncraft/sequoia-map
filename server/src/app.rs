@@ -6,7 +6,7 @@ use axum::{
     extract::Request,
     http::{HeaderValue, header},
     middleware::{self, Next},
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
@@ -42,8 +42,20 @@ pub(crate) fn build_app(state: AppState) -> Router {
             axum::routing::get(routes::api::get_guilds_online),
         )
         .route(
+            "/api/guilds/catalog",
+            axum::routing::get(routes::claims::get_guild_catalog),
+        )
+        .route(
             "/api/season/scalar/current",
             axum::routing::get(routes::api::get_season_scalar_current),
+        )
+        .route(
+            "/api/claims",
+            axum::routing::post(routes::claims::create_claim_layout),
+        )
+        .route(
+            "/api/claims/{id}",
+            axum::routing::get(routes::claims::get_claim_layout),
         )
         .route(
             "/api/wars/live",
@@ -86,7 +98,9 @@ pub(crate) fn build_app(state: AppState) -> Router {
         .route(
             "/api/history/heat",
             axum::routing::get(routes::history::history_heat),
-        );
+        )
+        .route("/claims", axum::routing::get(serve_claims_app))
+        .route("/claims/{*path}", axum::routing::get(serve_claims_app));
 
     app.layer(CompressionLayer::new())
         .layer(DefaultBodyLimit::max(api_body_limit))
@@ -140,6 +154,36 @@ fn is_hashed_bundle_asset(path: &str) -> bool {
         .any(|segment| segment.len() >= 8 && segment.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
+async fn serve_claims_app() -> impl IntoResponse {
+    let index_path = claims_app_index_path();
+    match tokio::fs::read(&index_path).await {
+        Ok(body) => (
+            [
+                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            body,
+        )
+            .into_response(),
+        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+fn claims_app_index_path() -> String {
+    let manifest_root = env!("CARGO_MANIFEST_DIR");
+    let candidates = [
+        "client/dist/index.html".to_string(),
+        "client/index.html".to_string(),
+        format!("{manifest_root}/../client/dist/index.html"),
+        format!("{manifest_root}/../client/index.html"),
+    ];
+
+    candidates
+        .into_iter()
+        .find(|path| Path::new(path).exists())
+        .unwrap_or_else(|| format!("{manifest_root}/../client/index.html"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,5 +216,11 @@ mod tests {
     fn no_cache_header_override_for_html() {
         assert_eq!(cache_control_for_path("/"), None);
         assert_eq!(cache_control_for_path("/index.html"), None);
+    }
+
+    #[test]
+    fn claims_app_index_path_falls_back_to_source_html() {
+        let index_path = claims_app_index_path();
+        assert!(Path::new(&index_path).exists());
     }
 }

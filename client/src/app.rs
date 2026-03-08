@@ -41,7 +41,7 @@ pub(crate) fn canvas_dimensions() -> (f64, f64) {
     (w, h)
 }
 
-fn set_loading_shell_step(step: &str) {
+pub(crate) fn set_loading_shell_step(step: &str) {
     let Some(window) = web_sys::window() else {
         return;
     };
@@ -53,7 +53,7 @@ fn set_loading_shell_step(step: &str) {
     }
 }
 
-fn remove_loading_shell() {
+pub(crate) fn remove_loading_shell() {
     let Some(window) = web_sys::window() else {
         return;
     };
@@ -606,6 +606,7 @@ fn load_settings_v2() -> SettingsV2 {
 }
 
 use crate::canvas::MapCanvas;
+use crate::claims::ClaimsPage;
 use crate::colors::rgba_css;
 use crate::heat::{self, HeatFetchInput};
 use crate::history;
@@ -690,8 +691,26 @@ fn normalize_heat_selected_season_id(meta: &HistoryHeatMeta, selected: Option<i3
     }
 }
 /// Root application component. Provides global reactive signals via context.
+fn browser_pathname() -> String {
+    web_sys::window()
+        .and_then(|window| window.location().pathname().ok())
+        .unwrap_or_else(|| "/".to_string())
+}
+
 #[component]
 pub fn App() -> impl IntoView {
+    let pathname = browser_pathname();
+    view! {
+        {if pathname == "/claims" || pathname.starts_with("/claims/") {
+            view! { <ClaimsPage initial_path=pathname /> }.into_any()
+        } else {
+            view! { <MapPage /> }.into_any()
+        }}
+    }
+}
+
+#[component]
+pub fn MapPage() -> impl IntoView {
     // Global signals
     let territories: RwSignal<ClientTerritoryMap> = RwSignal::new(Default::default());
     let viewport: RwSignal<Viewport> = RwSignal::new(Viewport::default());

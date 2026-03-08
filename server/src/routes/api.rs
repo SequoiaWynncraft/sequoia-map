@@ -29,6 +29,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "live_wars": 0,
         "guild_cache_size": state.guild_cache.len(),
         "history_available": state.db.is_some(),
+        "claims_persistence_available": state.db.is_some(),
         "seq_live_handoff_v1": state.seq_live_handoff_v1,
         "observability": {
             "live_state_requests_total": observability.live_state_requests_total,

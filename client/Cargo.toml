@@ -9,9 +9,19 @@ leptos = { version = "0.7", default-features = false, features = ["csr"] }
 web-sys = { version = "0.3", features = [
     "AbortController",
     "AbortSignal",
+    "Blob",
+    "Clipboard",
+    "Document",
     "CanvasRenderingContext2d",
     "DomRect",
+    "File",
+    "FileList",
+    "HtmlElement",
+    "HtmlInputElement",
+    "Location",
+    "Navigator",
     "TextMetrics",
+    "Window",
 ] }
 wgpu = { version = "24.0", default-features = false, features = ["wgsl", "webgl"] }
 bytemuck = { version = "1", features = ["derive"] }

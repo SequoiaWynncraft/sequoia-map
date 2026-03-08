@@ -15,6 +15,7 @@ use crate::app::{
     ShowGranularMapTime, ShowMinimap, ShowNames, ShowResourceIcons, ShowSettings,
     ShowTerritoryOrnaments, SidebarOpen, SidebarTransient, TagColorSetting, ThickCooldownBorders,
 };
+use crate::claims::ClaimCanvasController;
 use crate::gpu::{GpuRenderer, RenderFrameInput};
 use crate::icons::{self, ResourceAtlas};
 use crate::render_loop::RenderScheduler;
@@ -321,6 +322,7 @@ pub fn MapCanvas() -> impl IntoView {
     let SidebarOpen(sidebar_open) = expect_context();
     let SidebarTransient(sidebar_transient) = expect_context();
     let ShowSettings(show_settings) = expect_context();
+    let claim_canvas = use_context::<ClaimCanvasController>();
 
     let canvas_ref = NodeRef::<leptos::html::Canvas>::new();
     let icon_atlas_requested = Rc::new(Cell::new(false));
@@ -329,6 +331,9 @@ pub fn MapCanvas() -> impl IntoView {
     let is_dragging = Rc::new(Cell::new(false));
     let drag_pointer_id = Rc::new(Cell::new(None::<i32>));
     let drag_moved = Rc::new(Cell::new(false));
+    let claim_dragging = Rc::new(Cell::new(false));
+    let claim_drag_pointer_id = Rc::new(Cell::new(None::<i32>));
+    let claim_last_hit: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let last_x = Rc::new(Cell::new(0.0f64));
     let last_y = Rc::new(Cell::new(0.0f64));
 
@@ -748,9 +753,14 @@ pub fn MapCanvas() -> impl IntoView {
         let pinch_last_dist = pinch_last_dist.clone();
         let pinch_last_cx = pinch_last_cx.clone();
         let pinch_last_cy = pinch_last_cy.clone();
+        let spatial_grid = spatial_grid.clone();
+        let claim_dragging = claim_dragging.clone();
+        let claim_drag_pointer_id = claim_drag_pointer_id.clone();
+        let claim_last_hit = claim_last_hit.clone();
         let interaction_deadline = interaction_deadline.clone();
         let scheduler = scheduler.clone();
         let jump_from_minimap = jump_from_minimap.clone();
+        let claim_canvas = claim_canvas.clone();
 
         move |event: PointerEvent| {
             event.prevent_default();
@@ -784,6 +794,25 @@ pub fn MapCanvas() -> impl IntoView {
                 return;
             }
 
+            if event.button() == 0
+                && let Some(controller) = claim_canvas.as_ref()
+                && controller.tool.get_untracked().uses_canvas_edits()
+            {
+                claim_drag_pointer_id.set(Some(pointer_id));
+                claim_dragging.set(true);
+                let vp = viewport.get_untracked();
+                let (wx, wy) = vp.screen_to_world(sx, sy);
+                if let Some(hit) = spatial_grid.borrow().find_at(wx, wy) {
+                    *claim_last_hit.borrow_mut() = Some(hit.clone());
+                    (controller.handle_hit)(hit);
+                } else {
+                    *claim_last_hit.borrow_mut() = None;
+                }
+                interaction_deadline.set(js_sys::Date::now() + INTERACTION_SETTLE_MS);
+                scheduler.mark_dirty();
+                return;
+            }
+
             drag_pointer_id.set(Some(pointer_id));
             is_dragging.set(true);
             drag_moved.set(false);
@@ -811,8 +840,13 @@ pub fn MapCanvas() -> impl IntoView {
         let pinch_last_dist = pinch_last_dist.clone();
         let pinch_last_cx = pinch_last_cx.clone();
         let pinch_last_cy = pinch_last_cy.clone();
+        let spatial_grid = spatial_grid.clone();
+        let claim_dragging = claim_dragging.clone();
+        let claim_drag_pointer_id = claim_drag_pointer_id.clone();
+        let claim_last_hit = claim_last_hit.clone();
         let interaction_deadline = interaction_deadline.clone();
         let scheduler = scheduler.clone();
+        let claim_canvas = claim_canvas.clone();
 
         move |event: PointerEvent| {
             let (sx, sy) = pointer_canvas_coords(&event);
@@ -854,6 +888,23 @@ pub fn MapCanvas() -> impl IntoView {
                 return;
             }
 
+            if claim_dragging.get() && claim_drag_pointer_id.get() == Some(pointer_id) {
+                if let Some(controller) = claim_canvas.as_ref() {
+                    let vp = viewport.get_untracked();
+                    let (wx, wy) = vp.screen_to_world(sx, sy);
+                    let hit = spatial_grid.borrow().find_at(wx, wy);
+                    if hit != *claim_last_hit.borrow() {
+                        *claim_last_hit.borrow_mut() = hit.clone();
+                        if let Some(hit) = hit {
+                            (controller.handle_hit)(hit);
+                        }
+                    }
+                }
+                interaction_deadline.set(js_sys::Date::now() + INTERACTION_SETTLE_MS);
+                scheduler.mark_dirty();
+                return;
+            }
+
             if is_dragging.get() && drag_pointer_id.get() == Some(pointer_id) {
                 let dx = sx - last_x.get();
                 let dy = sy - last_y.get();
@@ -876,6 +927,9 @@ pub fn MapCanvas() -> impl IntoView {
         let active_pointers = active_pointers.clone();
         let drag_pointer_id = drag_pointer_id.clone();
         let is_dragging = is_dragging.clone();
+        let claim_dragging = claim_dragging.clone();
+        let claim_drag_pointer_id = claim_drag_pointer_id.clone();
+        let claim_last_hit = claim_last_hit.clone();
         let pinch_last_dist = pinch_last_dist.clone();
         let interaction_deadline = interaction_deadline.clone();
         let scheduler = scheduler.clone();
@@ -899,6 +953,12 @@ pub fn MapCanvas() -> impl IntoView {
                 }
             }
 
+            if claim_drag_pointer_id.get() == Some(pointer_id) {
+                claim_drag_pointer_id.set(None);
+                claim_dragging.set(false);
+                *claim_last_hit.borrow_mut() = None;
+            }
+
             interaction_deadline.set(js_sys::Date::now() + INTERACTION_SETTLE_MS);
             scheduler.mark_dirty();
         }
@@ -918,9 +978,18 @@ pub fn MapCanvas() -> impl IntoView {
         let drag_moved = drag_moved.clone();
         let scheduler = scheduler.clone();
         let jump_from_minimap = jump_from_minimap.clone();
+        let spatial_grid = spatial_grid.clone();
+        let claim_canvas = claim_canvas.clone();
         move |event: MouseEvent| {
             let (sx, sy) = mouse_canvas_coords(&event);
             let (canvas_w, canvas_h) = mouse_canvas_size(&event);
+
+            if claim_canvas
+                .as_ref()
+                .is_some_and(|controller| controller.tool.get_untracked().uses_canvas_edits())
+            {
+                return;
+            }
 
             if drag_moved.get() {
                 drag_moved.set(false);

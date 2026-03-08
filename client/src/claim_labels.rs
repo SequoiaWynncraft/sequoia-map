@@ -154,6 +154,9 @@ pub(crate) fn build_claim_clusters(territories: &ClientTerritoryMap) -> Vec<Clai
     let mut by_guild: BTreeMap<String, Vec<TerritoryNode>> = BTreeMap::new();
     for (territory_name, ct) in territories {
         let guild = &ct.territory.guild;
+        if guild.uuid == "__neutral__" {
+            continue;
+        }
         let guild_key = if guild.uuid.trim().is_empty() {
             guild.name.clone()
         } else {
