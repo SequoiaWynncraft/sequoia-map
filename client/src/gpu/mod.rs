@@ -219,8 +219,8 @@ const DYNAMIC_TIMER_VISIBILITY_MIN_SCALE: f64 = 0.31;
 /// Minimum viewport scale at which any territory labels are drawn.
 /// Below this zoom level all text (static tags, dynamic time, icons) is hidden uniformly.
 const LABEL_VISIBILITY_MIN_SCALE: f64 = 0.10;
-const HQ_CROWN_SIZE_MULTIPLIER: f32 = 1.02;
-const HQ_CROWN_MAX_BOX_FRACTION: f32 = 0.40;
+const HQ_CROWN_SIZE_MULTIPLIER: f32 = 2.35;
+const HQ_CROWN_MAX_BOX_FRACTION: f32 = 0.66;
 
 #[inline]
 fn lerp_f32(a: f32, b: f32, t: f32) -> f32 {
