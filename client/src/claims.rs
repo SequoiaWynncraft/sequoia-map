@@ -3,9 +3,11 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use gloo_storage::Storage;
+use js_sys::{Function, Reflect};
 use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 
 use sequoia_shared::{
@@ -247,7 +249,7 @@ fn neutral_guild_ref() -> GuildRef {
         uuid: NEUTRAL_GUILD_UUID.to_string(),
         name: "Neutral".to_string(),
         prefix: String::new(),
-        color: Some((88, 92, 108)),
+        color: Some((132, 144, 166)),
     }
 }
 
@@ -1130,6 +1132,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
     let tick: RwSignal<i64> = RwSignal::new(Utc::now().timestamp());
     let is_mobile: RwSignal<bool> =
         RwSignal::new(canvas_dimensions().0 < crate::app::MOBILE_BREAKPOINT);
+    let tile_fetch_scheduled: RwSignal<bool> = RwSignal::new(false);
 
     let current_mode: RwSignal<MapMode> = RwSignal::new(MapMode::Live);
     let connection: RwSignal<ConnectionStatus> = RwSignal::new(ConnectionStatus::Connecting);
@@ -1351,14 +1354,58 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
     Effect::new(move || {
         if !deferred_editor_work_ready.get()
             || session.get().is_none()
-            || !loaded_tiles.get().is_empty()
-            || live_territories.get().is_empty()
+            || tile_fetch_scheduled.get_untracked()
         {
             return;
         }
-        let (canvas_w, canvas_h) = canvas_dimensions();
-        let context = tiles::TileFetchContext::new(viewport.get_untracked(), canvas_w, canvas_h);
-        tiles::fetch_tiles(loaded_tiles, context);
+        tile_fetch_scheduled.set(true);
+
+        let Some(window) = web_sys::window() else {
+            let (canvas_w, canvas_h) = canvas_dimensions();
+            let context =
+                tiles::TileFetchContext::new(viewport.get_untracked(), canvas_w, canvas_h);
+            tiles::fetch_tiles(loaded_tiles, context);
+            return;
+        };
+
+        let run_tile_fetch = {
+            let window = window.clone();
+            wasm_bindgen::closure::Closure::once(move || {
+                let callback = wasm_bindgen::closure::Closure::once(move || {
+                    let (canvas_w, canvas_h) = canvas_dimensions();
+                    let context =
+                        tiles::TileFetchContext::new(viewport.get_untracked(), canvas_w, canvas_h);
+                    tiles::fetch_tiles(loaded_tiles, context);
+                });
+
+                let mut scheduled = false;
+                if let Ok(idle_fn) =
+                    Reflect::get(window.as_ref(), &JsValue::from_str("requestIdleCallback"))
+                    && let Ok(idle_fn) = idle_fn.dyn_into::<Function>()
+                {
+                    let _ = idle_fn.call1(window.as_ref(), callback.as_ref().unchecked_ref());
+                    scheduled = true;
+                }
+                if !scheduled {
+                    let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                        callback.as_ref().unchecked_ref(),
+                        240,
+                    );
+                }
+                callback.forget();
+            })
+        };
+
+        let first_frame = wasm_bindgen::closure::Closure::once({
+            let window = window.clone();
+            move || {
+                let _ = window.request_animation_frame(run_tile_fetch.as_ref().unchecked_ref());
+                run_tile_fetch.forget();
+            }
+        });
+
+        let _ = window.request_animation_frame(first_frame.as_ref().unchecked_ref());
+        first_frame.forget();
     });
 
     Effect::new(move || {
