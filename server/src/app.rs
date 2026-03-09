@@ -16,12 +16,15 @@ use crate::state::AppState;
 
 pub(crate) fn build_app(state: AppState) -> Router {
     let api_body_limit = crate::config::api_body_limit_bytes();
+    let claims_static_assets = ServeDir::new("claims-client/dist")
+        .precompressed_br()
+        .precompressed_gzip();
+    let main_static_assets = ServeDir::new("client/dist")
+        .precompressed_br()
+        .precompressed_gzip();
     let static_assets = Router::new()
-        .fallback_service(
-            ServeDir::new("client/dist")
-                .precompressed_br()
-                .precompressed_gzip(),
-        )
+        .nest_service("/claims-app", claims_static_assets)
+        .fallback_service(main_static_assets)
         .layer(middleware::from_fn(set_static_cache_control));
 
     let app = Router::new()
@@ -99,8 +102,8 @@ pub(crate) fn build_app(state: AppState) -> Router {
             "/api/history/heat",
             axum::routing::get(routes::history::history_heat),
         )
-        .route("/claims", axum::routing::get(serve_claims_app))
-        .route("/claims/{*path}", axum::routing::get(serve_claims_app));
+        .route("/claims", axum::routing::get(serve_claims_route))
+        .route("/claims/{*path}", axum::routing::get(serve_claims_route));
 
     app.layer(CompressionLayer::new())
         .layer(DefaultBodyLimit::max(api_body_limit))
@@ -154,9 +157,18 @@ fn is_hashed_bundle_asset(path: &str) -> bool {
         .any(|segment| segment.len() >= 8 && segment.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
-async fn serve_claims_app() -> impl IntoResponse {
-    let index_path = claims_app_index_path();
-    match tokio::fs::read(&index_path).await {
+async fn serve_claims_route(request: Request) -> impl IntoResponse {
+    let path = request.uri().path().to_owned();
+    let html_path = if is_claims_editor_path(&path) {
+        claims_editor_index_path()
+    } else {
+        claims_launcher_path()
+    };
+    serve_html_file(html_path).await
+}
+
+async fn serve_html_file(path: String) -> Response {
+    match tokio::fs::read(&path).await {
         Ok(body) => (
             [
                 (header::CONTENT_TYPE, "text/html; charset=utf-8"),
@@ -169,19 +181,40 @@ async fn serve_claims_app() -> impl IntoResponse {
     }
 }
 
-fn claims_app_index_path() -> String {
+fn is_claims_editor_path(path: &str) -> bool {
+    matches!(path, "/claims/new" | "/claims/new/")
+        || path.starts_with("/claims/new/")
+        || matches!(path, "/claims/s" | "/claims/s/")
+        || path.starts_with("/claims/s/")
+}
+
+fn claims_launcher_path() -> String {
     let manifest_root = env!("CARGO_MANIFEST_DIR");
     let candidates = [
-        "client/dist/index.html".to_string(),
-        "client/index.html".to_string(),
-        format!("{manifest_root}/../client/dist/index.html"),
-        format!("{manifest_root}/../client/index.html"),
+        "server/static/claims-launcher.html".to_string(),
+        format!("{manifest_root}/static/claims-launcher.html"),
+        format!("{manifest_root}/../server/static/claims-launcher.html"),
     ];
 
     candidates
         .into_iter()
         .find(|path| Path::new(path).exists())
-        .unwrap_or_else(|| format!("{manifest_root}/../client/index.html"))
+        .unwrap_or_else(|| format!("{manifest_root}/static/claims-launcher.html"))
+}
+
+fn claims_editor_index_path() -> String {
+    let manifest_root = env!("CARGO_MANIFEST_DIR");
+    let candidates = [
+        "claims-client/dist/index.html".to_string(),
+        "claims-client/index.html".to_string(),
+        format!("{manifest_root}/../claims-client/dist/index.html"),
+        format!("{manifest_root}/../claims-client/index.html"),
+    ];
+
+    candidates
+        .into_iter()
+        .find(|path| Path::new(path).exists())
+        .unwrap_or_else(|| format!("{manifest_root}/../claims-client/index.html"))
 }
 
 #[cfg(test)]
@@ -219,8 +252,23 @@ mod tests {
     }
 
     #[test]
-    fn claims_app_index_path_falls_back_to_source_html() {
-        let index_path = claims_app_index_path();
+    fn claims_launcher_path_resolves() {
+        let index_path = claims_launcher_path();
         assert!(Path::new(&index_path).exists());
+    }
+
+    #[test]
+    fn claims_editor_index_path_falls_back_to_source_html() {
+        let index_path = claims_editor_index_path();
+        assert!(Path::new(&index_path).exists());
+    }
+
+    #[test]
+    fn claims_editor_paths_are_detected() {
+        assert!(is_claims_editor_path("/claims/new/blank"));
+        assert!(is_claims_editor_path("/claims/new/import"));
+        assert!(is_claims_editor_path("/claims/s/example"));
+        assert!(!is_claims_editor_path("/claims"));
+        assert!(!is_claims_editor_path("/claims/unknown"));
     }
 }

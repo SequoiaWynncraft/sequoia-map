@@ -1,6 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
@@ -15,7 +16,6 @@ use crate::app::{
     ShowGranularMapTime, ShowMinimap, ShowNames, ShowResourceIcons, ShowSettings,
     ShowTerritoryOrnaments, SidebarOpen, SidebarTransient, TagColorSetting, ThickCooldownBorders,
 };
-use crate::claims::ClaimCanvasController;
 use crate::gpu::{GpuRenderer, RenderFrameInput};
 use crate::icons::{self, ResourceAtlas};
 use crate::render_loop::RenderScheduler;
@@ -50,6 +50,35 @@ const PINCH_LINE_HEIGHT_PX: f64 = 24.0;
 const PINCH_PAGE_HEIGHT_FACTOR: f64 = 1.0;
 const PINCH_ZOOM_GAIN: f64 = 4.2;
 const PINCH_ZOOM_CLAMP: f64 = 420.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ClaimTool {
+    Paint,
+    EraseToNeutral,
+    Select,
+    Eyedropper,
+}
+
+impl ClaimTool {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            ClaimTool::Paint => "Paint",
+            ClaimTool::EraseToNeutral => "Erase",
+            ClaimTool::Select => "Select",
+            ClaimTool::Eyedropper => "Pick",
+        }
+    }
+
+    pub(crate) fn uses_canvas_edits(self) -> bool {
+        true
+    }
+}
+
+#[derive(Clone)]
+pub struct ClaimCanvasController {
+    pub tool: RwSignal<ClaimTool>,
+    pub handle_hit: Arc<dyn Fn(String) + Send + Sync>,
+}
 
 #[derive(Clone, Copy, Debug)]
 struct WheelSample {

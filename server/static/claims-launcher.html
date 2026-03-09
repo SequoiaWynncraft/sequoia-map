@@ -1,0 +1,783 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sequoia Claims</title>
+    <link rel="preload" href="/fonts/minecraft-regular.otf" as="font" type="font/otf" crossorigin />
+    <style>
+      @font-face {
+        font-family: "Silkscreen";
+        src: url("/fonts/minecraft-regular.otf") format("opentype");
+        font-style: normal;
+        font-weight: 400;
+        font-display: swap;
+      }
+
+      @font-face {
+        font-family: "Silkscreen";
+        src: url("/fonts/minecraft-bold.otf") format("opentype");
+        font-style: normal;
+        font-weight: 700;
+        font-display: swap;
+      }
+
+      :root {
+        color-scheme: dark;
+        --bg: #070b13;
+        --bg-deep: #04060d;
+        --panel: rgba(15, 20, 32, 0.84);
+        --panel-strong: rgba(19, 26, 40, 0.96);
+        --panel-soft: rgba(13, 18, 29, 0.72);
+        --line: rgba(102, 127, 187, 0.28);
+        --line-strong: rgba(245, 197, 66, 0.22);
+        --text: #edf1ff;
+        --muted: #94a0bc;
+        --accent: #f5c542;
+        --accent-soft: rgba(245, 197, 66, 0.18);
+        --danger: #ff8b80;
+        --shadow: 0 28px 80px rgba(0, 0, 0, 0.4);
+        --radius-xl: 28px;
+        --radius-lg: 20px;
+        --radius-md: 14px;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        min-height: 100%;
+        background:
+          radial-gradient(circle at 12% 18%, rgba(48, 83, 157, 0.18), transparent 28%),
+          radial-gradient(circle at 88% 14%, rgba(245, 197, 66, 0.12), transparent 24%),
+          radial-gradient(circle at 50% 100%, rgba(23, 55, 105, 0.18), transparent 38%),
+          linear-gradient(180deg, var(--bg) 0%, var(--bg-deep) 100%);
+        color: var(--text);
+        font-family: "Silkscreen", ui-monospace, monospace;
+      }
+
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        background-image:
+          linear-gradient(rgba(78, 92, 125, 0.06) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(78, 92, 125, 0.06) 1px, transparent 1px);
+        background-size: 56px 56px;
+        mask-image: linear-gradient(180deg, rgba(255, 255, 255, 0.52), transparent 88%);
+        pointer-events: none;
+      }
+
+      .page {
+        position: relative;
+        width: min(1240px, calc(100vw - 32px));
+        margin: 0 auto;
+        padding: 28px 0 48px;
+      }
+
+      .masthead {
+        display: grid;
+        grid-template-columns: 1.15fr 0.85fr;
+        gap: 18px;
+        align-items: stretch;
+      }
+
+      .hero,
+      .status-panel,
+      .board,
+      .presets {
+        position: relative;
+        overflow: hidden;
+        border-radius: var(--radius-xl);
+        border: 1px solid var(--line);
+        background: linear-gradient(180deg, rgba(13, 18, 29, 0.92), rgba(8, 12, 20, 0.9));
+        box-shadow: var(--shadow);
+      }
+
+      .hero {
+        padding: 28px;
+      }
+
+      .hero::after,
+      .status-panel::after,
+      .board::after,
+      .presets::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(140deg, rgba(245, 197, 66, 0.08), transparent 32%, transparent 68%, rgba(70, 112, 212, 0.08));
+        pointer-events: none;
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 12px;
+        border-radius: 999px;
+        border: 1px solid var(--line-strong);
+        background: rgba(245, 197, 66, 0.08);
+        color: var(--accent);
+        font-size: 0.72rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .hero h1 {
+        margin: 18px 0 12px;
+        font-size: clamp(2.2rem, 6vw, 4.8rem);
+        line-height: 0.94;
+        letter-spacing: -0.06em;
+        text-transform: uppercase;
+      }
+
+      .hero p,
+      .status-line,
+      .card p,
+      .preset-copy,
+      .empty-copy,
+      .field-copy {
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.84rem;
+        line-height: 1.8;
+      }
+
+      .hero-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+        margin-top: 20px;
+      }
+
+      .hero-chip {
+        padding: 14px;
+        border-radius: var(--radius-md);
+        border: 1px solid rgba(104, 129, 184, 0.22);
+        background: var(--panel-soft);
+      }
+
+      .hero-chip strong,
+      .status-label,
+      .section-title,
+      .card h2,
+      .preset-card h3,
+      .field-card h2 {
+        display: block;
+        color: var(--text);
+        font-size: 0.82rem;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      .hero-chip span {
+        display: block;
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 0.72rem;
+        line-height: 1.7;
+      }
+
+      .status-panel {
+        display: grid;
+        grid-template-rows: auto 1fr;
+        padding: 24px;
+      }
+
+      .status-stack {
+        display: grid;
+        gap: 14px;
+        align-content: start;
+      }
+
+      .status-callout {
+        padding: 14px 16px;
+        border-radius: 16px;
+        border: 1px solid rgba(104, 129, 184, 0.24);
+        background: var(--panel-soft);
+      }
+
+      .status-callout[data-tone="warn"] {
+        border-color: rgba(245, 197, 66, 0.28);
+        background: rgba(245, 197, 66, 0.08);
+      }
+
+      .status-callout[data-tone="error"] {
+        border-color: rgba(255, 139, 128, 0.28);
+        background: rgba(255, 139, 128, 0.08);
+      }
+
+      .status-label {
+        color: var(--accent);
+        margin-bottom: 8px;
+      }
+
+      .board,
+      .presets {
+        margin-top: 18px;
+        padding: 24px;
+      }
+
+      .section-title {
+        margin-bottom: 10px;
+      }
+
+      .section-copy {
+        margin: 0 0 18px;
+        color: var(--muted);
+        font-size: 0.8rem;
+        line-height: 1.75;
+      }
+
+      .card-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .card,
+      .preset-card,
+      .field-card {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        min-height: 212px;
+        padding: 18px;
+        border-radius: var(--radius-lg);
+        border: 1px solid rgba(104, 129, 184, 0.24);
+        background: linear-gradient(180deg, rgba(19, 27, 43, 0.92), rgba(12, 18, 30, 0.94));
+        text-decoration: none;
+        color: inherit;
+        transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease, background 180ms ease;
+      }
+
+      button.card,
+      button.preset-card {
+        width: 100%;
+        text-align: left;
+        font: inherit;
+        cursor: pointer;
+      }
+
+      .card:hover,
+      .card:focus-visible,
+      .preset-card:hover,
+      .preset-card:focus-visible,
+      .field-card:focus-within {
+        transform: translateY(-2px);
+        border-color: rgba(245, 197, 66, 0.34);
+        box-shadow: 0 18px 38px rgba(0, 0, 0, 0.32);
+      }
+
+      .card[aria-disabled="true"] {
+        cursor: not-allowed;
+        opacity: 0.5;
+      }
+
+      .card-badge,
+      .preset-badge {
+        display: inline-flex;
+        align-self: flex-start;
+        padding: 7px 10px;
+        border-radius: 999px;
+        background: rgba(245, 197, 66, 0.1);
+        color: var(--accent);
+        font-size: 0.68rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .card h2,
+      .field-card h2,
+      .preset-card h3 {
+        margin: 0;
+        font-size: 1rem;
+      }
+
+      .card-footer,
+      .preset-meta {
+        margin-top: auto;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        color: #c4d2ff;
+        font-size: 0.7rem;
+      }
+
+      .card-arrow {
+        color: var(--accent);
+        font-size: 1rem;
+      }
+
+      .board-grid {
+        display: grid;
+        grid-template-columns: 1.2fr 0.8fr;
+        gap: 14px;
+      }
+
+      .fields {
+        display: grid;
+        gap: 14px;
+      }
+
+      .field-card {
+        min-height: 0;
+      }
+
+      .field-row {
+        display: flex;
+        gap: 10px;
+        align-items: stretch;
+      }
+
+      .field-row input {
+        flex: 1;
+        min-width: 0;
+        padding: 12px 14px;
+        border-radius: 12px;
+        border: 1px solid rgba(104, 129, 184, 0.24);
+        background: rgba(7, 11, 18, 0.88);
+        color: var(--text);
+        font: inherit;
+      }
+
+      .field-row input::placeholder {
+        color: #66718d;
+      }
+
+      .field-row button,
+      .ghost-button {
+        padding: 12px 16px;
+        border: 1px solid rgba(245, 197, 66, 0.26);
+        border-radius: 12px;
+        background: linear-gradient(180deg, rgba(245, 197, 66, 0.14), rgba(245, 197, 66, 0.07));
+        color: var(--text);
+        font: inherit;
+        cursor: pointer;
+      }
+
+      .ghost-button {
+        align-self: flex-start;
+      }
+
+      .field-row button:hover,
+      .field-row button:focus-visible,
+      .ghost-button:hover,
+      .ghost-button:focus-visible {
+        border-color: rgba(245, 197, 66, 0.42);
+      }
+
+      .preset-header {
+        display: flex;
+        align-items: end;
+        justify-content: space-between;
+        gap: 14px;
+        margin-bottom: 18px;
+      }
+
+      .preset-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .preset-card {
+        min-height: 164px;
+      }
+
+      .empty-state {
+        padding: 22px;
+        border-radius: var(--radius-lg);
+        border: 1px dashed rgba(104, 129, 184, 0.24);
+        background: rgba(10, 14, 22, 0.6);
+      }
+
+      .hidden-input {
+        position: absolute;
+        width: 0;
+        height: 0;
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      .status-footer {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-top: 14px;
+      }
+
+      .status-pill {
+        padding: 8px 10px;
+        border-radius: 999px;
+        border: 1px solid rgba(104, 129, 184, 0.22);
+        background: rgba(11, 15, 24, 0.72);
+        color: var(--muted);
+        font-size: 0.68rem;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      @media (max-width: 960px) {
+        .page {
+          width: min(100vw - 20px, 100%);
+          padding-top: 20px;
+        }
+
+        .masthead,
+        .board-grid,
+        .card-grid,
+        .preset-grid,
+        .hero-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (prefers-reduced-motion: no-preference) {
+        .hero,
+        .status-panel,
+        .board,
+        .presets {
+          animation: panel-rise 500ms ease both;
+        }
+
+        .board {
+          animation-delay: 60ms;
+        }
+
+        .presets {
+          animation-delay: 110ms;
+        }
+
+        @keyframes panel-rise {
+          from {
+            opacity: 0;
+            transform: translateY(18px);
+          }
+
+          to {
+            opacity: 1;
+            transform: translateY(0);
+          }
+        }
+      }
+    </style>
+</head>
+<body>
+    <main class="page">
+        <section class="masthead">
+            <article class="hero">
+                <div class="eyebrow">Sequoia Claims Suite</div>
+                <h1>Plan. Freeze. Share.</h1>
+                <p>
+                    Claims now launches from a dedicated board instead of booting the full map app first.
+                    Pick a starting state, then enter the editor only when you actually need the heavy canvas.
+                </p>
+                <div class="hero-grid">
+                    <div class="hero-chip">
+                        <strong>Instant entry</strong>
+                        <span>The launcher stays static. No wasm editor boot until you choose a session.</span>
+                    </div>
+                    <div class="hero-chip">
+                        <strong>Local recovery</strong>
+                        <span>Drafts and presets are read straight from your browser so recovery is immediate.</span>
+                    </div>
+                    <div class="hero-chip">
+                        <strong>Shareable states</strong>
+                        <span>Imports, saved snapshots, and local presets all reopen inside the same editor flow.</span>
+                    </div>
+                </div>
+            </article>
+            <aside class="status-panel">
+                <div class="status-stack">
+                    <div class="status-callout">
+                        <div class="status-label">Launcher Status</div>
+                        <p id="launcher-status" class="status-line">Reading local drafts and presets...</p>
+                    </div>
+                    <div class="status-callout" data-tone="warn">
+                        <div class="status-label">Dev Note</div>
+                        <p class="status-line">
+                            The claims editor now lives on its own route bundle. If the editor feels slow, the problem is in the editor itself, not the launcher.
+                        </p>
+                    </div>
+                </div>
+                <div class="status-footer">
+                    <span id="draft-pill" class="status-pill">Draft unknown</span>
+                    <span id="preset-pill" class="status-pill">Presets unknown</span>
+                    <span class="status-pill">Route split active</span>
+                </div>
+            </aside>
+        </section>
+
+        <section class="board">
+            <div class="section-title">Start a Session</div>
+            <p class="section-copy">
+                Choose the base state you want to edit. Blank and live boot directly into the claims editor.
+                Draft and preset recovery stay local until the editor is opened.
+            </p>
+            <div class="board-grid">
+                <div class="card-grid">
+                    <a class="card" href="/claims/new/blank">
+                        <span class="card-badge">Fastest path</span>
+                        <h2>Blank Board</h2>
+                        <p>Open a neutral territory layout and start painting immediately.</p>
+                        <div class="card-footer">
+                            <span>No live snapshot needed</span>
+                            <span class="card-arrow">-></span>
+                        </div>
+                    </a>
+
+                    <a class="card" href="/claims/new/live">
+                        <span class="card-badge">Snapshot</span>
+                        <h2>Current Live Map</h2>
+                        <p>Freeze the current live territory ownership and use that as your baseline.</p>
+                        <div class="card-footer">
+                            <span>Build from live state</span>
+                            <span class="card-arrow">-></span>
+                        </div>
+                    </a>
+
+                    <button id="import-trigger" class="card" type="button">
+                        <span class="card-badge">Handoff</span>
+                        <h2>Import JSON</h2>
+                        <p>Validate a local claims export here, then pass it into the editor in one step.</p>
+                        <div class="card-footer">
+                            <span>File stays in-browser</span>
+                            <span class="card-arrow">-></span>
+                        </div>
+                    </button>
+
+                    <a id="draft-card" class="card" href="/claims/new/draft">
+                        <span class="card-badge">Recovery</span>
+                        <h2>Continue Draft</h2>
+                        <p id="draft-copy">Resume the latest local working copy from this browser.</p>
+                        <div class="card-footer">
+                            <span id="draft-meta">Checking local storage</span>
+                            <span class="card-arrow">-></span>
+                        </div>
+                    </a>
+                </div>
+
+                <div class="fields">
+                    <div class="field-card">
+                        <h2>Open Saved Snapshot</h2>
+                        <p class="field-copy">Load an immutable snapshot from the server by id.</p>
+                        <div class="field-row">
+                            <input id="snapshot-id" type="text" placeholder="Snapshot id" autocomplete="off" />
+                            <button id="snapshot-open" type="button">Open</button>
+                        </div>
+                    </div>
+
+                    <div class="field-card">
+                        <h2>Launch Rules</h2>
+                        <p class="field-copy">
+                            Launcher actions should feel instant. If this page becomes slow again, that means editor code leaked back into the launcher path.
+                        </p>
+                        <button id="refresh-launcher" class="ghost-button" type="button">Refresh local state</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="presets">
+            <div class="preset-header">
+                <div>
+                    <div class="section-title">Local Presets</div>
+                    <p class="section-copy">
+                        Presets are staged into session storage and opened through the same import route as manual JSON imports.
+                    </p>
+                </div>
+                <span id="preset-count" class="status-pill">0 presets</span>
+            </div>
+            <div id="preset-grid" class="preset-grid"></div>
+        </section>
+    </main>
+
+    <input id="import-input" class="hidden-input" type="file" accept=".json,application/json" />
+
+    <script>
+      (() => {
+        const DRAFT_STORAGE_KEY = "sequoia_claim_draft_v1";
+        const PRESET_STORAGE_KEY = "sequoia_claim_presets_v1";
+        const IMPORT_HANDOFF_STORAGE_KEY = "sequoia_claim_import_handoff_v1";
+
+        const statusEl = document.getElementById("launcher-status");
+        const draftCard = document.getElementById("draft-card");
+        const draftCopy = document.getElementById("draft-copy");
+        const draftMeta = document.getElementById("draft-meta");
+        const draftPill = document.getElementById("draft-pill");
+        const presetPill = document.getElementById("preset-pill");
+        const presetCount = document.getElementById("preset-count");
+        const presetGrid = document.getElementById("preset-grid");
+        const importInput = document.getElementById("import-input");
+        const importTrigger = document.getElementById("import-trigger");
+        const snapshotInput = document.getElementById("snapshot-id");
+        const snapshotOpen = document.getElementById("snapshot-open");
+        const refreshLauncher = document.getElementById("refresh-launcher");
+
+        function setStatus(message, tone) {
+          statusEl.textContent = message;
+          const container = statusEl.closest(".status-callout");
+          container.dataset.tone = tone || "";
+        }
+
+        function safeParse(key, fallbackValue) {
+          try {
+            const raw = window.localStorage.getItem(key);
+            if (!raw) {
+              return fallbackValue;
+            }
+            return JSON.parse(raw);
+          } catch (error) {
+            console.warn("claims launcher storage read failed", key, error);
+            return fallbackValue;
+          }
+        }
+
+        function setDraftEnabled(enabled) {
+          draftCard.setAttribute("aria-disabled", enabled ? "false" : "true");
+          if (enabled) {
+            draftCard.removeAttribute("tabindex");
+          } else {
+            draftCard.setAttribute("tabindex", "-1");
+          }
+        }
+
+        function navigateToSnapshot() {
+          const id = snapshotInput.value.trim();
+          if (!id) {
+            setStatus("Enter a snapshot id before opening a saved snapshot.", "warn");
+            snapshotInput.focus();
+            return;
+          }
+          window.location.href = "/claims/s/" + encodeURIComponent(id);
+        }
+
+        function writeImportHandoff(document, sourceLabel) {
+          const payload = {
+            document,
+            follow_live: false,
+            selection: [],
+            source_snapshot_id: null,
+            source_label: sourceLabel || null
+          };
+          window.sessionStorage.setItem(IMPORT_HANDOFF_STORAGE_KEY, JSON.stringify(payload));
+        }
+
+        function renderPresets(presets) {
+          presetGrid.innerHTML = "";
+          presetCount.textContent = presets.length + (presets.length === 1 ? " preset" : " presets");
+          presetPill.textContent = presets.length === 0 ? "No presets" : presets.length + " presets ready";
+
+          if (!presets.length) {
+            const empty = document.createElement("div");
+            empty.className = "empty-state";
+            empty.innerHTML = '<p class="empty-copy">No local presets saved yet. Build a layout in the editor and save a preset to pin it here.</p>';
+            presetGrid.appendChild(empty);
+            return;
+          }
+
+          for (const preset of presets) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "preset-card";
+
+            const overrideCount = preset && preset.document && preset.document.overrides
+              ? Object.keys(preset.document.overrides).length
+              : 0;
+            const title = preset && preset.name ? preset.name : "Untitled preset";
+
+            button.innerHTML = `
+              <span class="preset-badge">Preset</span>
+              <h3>${title.replace(/[&<>"]/g, "")}</h3>
+              <p class="preset-copy">Open this stored local setup inside the dedicated claims editor.</p>
+              <div class="preset-meta">
+                <span>${overrideCount} override${overrideCount === 1 ? "" : "s"}</span>
+                <span class="card-arrow">-></span>
+              </div>
+            `;
+
+            button.addEventListener("click", () => {
+              try {
+                writeImportHandoff(preset.document, "preset");
+                window.location.href = "/claims/new/import";
+              } catch (error) {
+                console.error(error);
+                setStatus("Failed to stage preset for the claims editor.", "error");
+              }
+            });
+
+            presetGrid.appendChild(button);
+          }
+        }
+
+        function refreshLocalState() {
+          const draft = safeParse(DRAFT_STORAGE_KEY, null);
+          const presets = safeParse(PRESET_STORAGE_KEY, []);
+
+          const hasDraft = !!draft;
+          setDraftEnabled(hasDraft);
+          draftMeta.textContent = hasDraft ? "Local draft available" : "No local draft saved";
+          draftCopy.textContent = hasDraft
+            ? "Resume the latest local working copy from this browser."
+            : "No draft is stored in this browser yet.";
+          draftPill.textContent = hasDraft ? "Draft ready" : "No draft";
+
+          renderPresets(Array.isArray(presets) ? presets : []);
+
+          setStatus(
+            hasDraft || (Array.isArray(presets) && presets.length)
+              ? "Launcher ready. Choose a route to enter the editor."
+              : "Launcher ready. No local state found yet.",
+            ""
+          );
+        }
+
+        draftCard.addEventListener("click", (event) => {
+          if (draftCard.getAttribute("aria-disabled") === "true") {
+            event.preventDefault();
+            setStatus("No local draft is available in this browser yet.", "warn");
+          }
+        });
+
+        importTrigger.addEventListener("click", () => {
+          importInput.value = "";
+          importInput.click();
+        });
+
+        importInput.addEventListener("change", async () => {
+          const file = importInput.files && importInput.files[0];
+          if (!file) {
+            return;
+          }
+
+          try {
+            const text = await file.text();
+            const document = JSON.parse(text);
+            writeImportHandoff(document, "file");
+            window.location.href = "/claims/new/import";
+          } catch (error) {
+            console.error(error);
+            setStatus("Import failed before the editor handoff. Check that the file is valid JSON.", "error");
+          }
+        });
+
+        snapshotOpen.addEventListener("click", navigateToSnapshot);
+        snapshotInput.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            navigateToSnapshot();
+          }
+        });
+
+        refreshLauncher.addEventListener("click", refreshLocalState);
+        refreshLocalState();
+      })();
+    </script>
+</body>
+</html>

@@ -26,7 +26,7 @@ use crate::app::{
     SseSeqGapDetectedCount, TagColorSetting, ThickCooldownBorders, canvas_dimensions,
     remove_loading_shell, set_loading_shell_step,
 };
-use crate::canvas::MapCanvas;
+use crate::canvas::{ClaimCanvasController, ClaimTool, MapCanvas};
 use crate::history;
 use crate::sse::{self, ConnectionStatus};
 use crate::territory::{ClientTerritory, ClientTerritoryMap};
@@ -36,33 +36,11 @@ use crate::viewport::Viewport;
 const DRAFT_STORAGE_KEY: &str = "sequoia_claim_draft_v1";
 const PRESET_STORAGE_KEY: &str = "sequoia_claim_presets_v1";
 const MACRO_LIBRARY_STORAGE_KEY: &str = "sequoia_claim_macros_v1";
+const IMPORT_HANDOFF_STORAGE_KEY: &str = "sequoia_claim_import_handoff_v1";
 const SHARE_FRAGMENT_PREFIX: &str = "#c=";
 const MAX_SHARE_FRAGMENT_BYTES: usize = 120_000;
 
 const NEUTRAL_GUILD_UUID: &str = "__neutral__";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum ClaimTool {
-    Paint,
-    EraseToNeutral,
-    Select,
-    Eyedropper,
-}
-
-impl ClaimTool {
-    fn label(self) -> &'static str {
-        match self {
-            ClaimTool::Paint => "Paint",
-            ClaimTool::EraseToNeutral => "Erase",
-            ClaimTool::Select => "Select",
-            ClaimTool::Eyedropper => "Pick",
-        }
-    }
-
-    pub(crate) fn uses_canvas_edits(self) -> bool {
-        true
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ClaimTab {
@@ -81,12 +59,6 @@ impl ClaimTab {
             ClaimTab::Share => "Share",
         }
     }
-}
-
-#[derive(Clone)]
-pub struct ClaimCanvasController {
-    pub tool: RwSignal<ClaimTool>,
-    pub handle_hit: Arc<dyn Fn(String) + Send + Sync>,
 }
 
 #[derive(Clone)]
@@ -125,6 +97,17 @@ struct StoredClaimPreset {
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct StartupImportHandoff {
+    document: ClaimDocumentV1,
+    #[serde(default)]
+    follow_live: bool,
+    #[serde(default)]
+    selection: Vec<String>,
+    #[serde(default)]
+    source_snapshot_id: Option<String>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct SavedClaimResponse {
     id: String,
     created_at: String,
@@ -159,6 +142,7 @@ enum ClaimsRoute {
     NewBlank,
     NewLive,
     Draft,
+    Import,
     Saved(String),
 }
 
@@ -167,6 +151,7 @@ fn parse_claims_route(path: &str) -> ClaimsRoute {
         "/claims/new/blank" => return ClaimsRoute::NewBlank,
         "/claims/new/live" => return ClaimsRoute::NewLive,
         "/claims/new/draft" => return ClaimsRoute::Draft,
+        "/claims/new/import" => return ClaimsRoute::Import,
         _ => {}
     }
     if let Some(saved_id) = path.strip_prefix("/claims/s/") {
@@ -510,6 +495,12 @@ fn read_macro_library() -> Vec<ClaimMacro> {
     gloo_storage::LocalStorage::get(MACRO_LIBRARY_STORAGE_KEY).unwrap_or_default()
 }
 
+fn take_startup_import_handoff() -> Option<StartupImportHandoff> {
+    let handoff = gloo_storage::SessionStorage::get(IMPORT_HANDOFF_STORAGE_KEY).ok();
+    gloo_storage::SessionStorage::delete(IMPORT_HANDOFF_STORAGE_KEY);
+    handoff
+}
+
 fn validate_document_against_live(
     document: &ClaimDocumentV1,
     live_territories: &ClientTerritoryMap,
@@ -564,10 +555,36 @@ fn trigger_import_picker(file_input_ref: NodeRef<html::Input>) {
 #[component]
 pub fn ClaimsPage(initial_path: String) -> impl IntoView {
     let route = parse_claims_route(&initial_path);
-    let startup_route_pending = matches!(
-        &route,
-        ClaimsRoute::NewBlank | ClaimsRoute::NewLive | ClaimsRoute::Draft | ClaimsRoute::Saved(_)
-    );
+    let requires_live_bootstrap = !matches!(&route, ClaimsRoute::Root);
+    let is_root_route = matches!(&route, ClaimsRoute::Root);
+    let route_title = match &route {
+        ClaimsRoute::Root => "Claims Launcher Moved".to_string(),
+        ClaimsRoute::NewBlank => "Blank Claims Board".to_string(),
+        ClaimsRoute::NewLive => "Live Snapshot".to_string(),
+        ClaimsRoute::Draft => "Draft Recovery".to_string(),
+        ClaimsRoute::Import => "Imported Layout".to_string(),
+        ClaimsRoute::Saved(_) => "Saved Snapshot".to_string(),
+    };
+    let route_boot_message = match &route {
+        ClaimsRoute::Root => "Open the dedicated launcher to choose a claims session.".to_string(),
+        ClaimsRoute::NewBlank => {
+            "Booting the dedicated claims editor and preparing a neutral board.".to_string()
+        }
+        ClaimsRoute::NewLive => {
+            "Fetching live territory ownership before the editor mounts.".to_string()
+        }
+        ClaimsRoute::Draft => {
+            "Loading the latest local draft and reconciling it with live territory data."
+                .to_string()
+        }
+        ClaimsRoute::Import => {
+            "Reading the staged import payload and validating it against live territory data."
+                .to_string()
+        }
+        ClaimsRoute::Saved(_) => {
+            "Loading the saved server snapshot and preparing the editor.".to_string()
+        }
+    };
 
     let live_territories: RwSignal<ClientTerritoryMap> = RwSignal::new(ClientTerritoryMap::new());
     let effective_territories: RwSignal<ClientTerritoryMap> =
@@ -579,12 +596,11 @@ pub fn ClaimsPage(initial_path: String) -> impl IntoView {
     let tab: RwSignal<ClaimTab> = RwSignal::new(ClaimTab::Summary);
     let is_ready: RwSignal<bool> = RwSignal::new(false);
     let is_loading_snapshot: RwSignal<bool> = RwSignal::new(false);
-    let live_bootstrap_pending: RwSignal<bool> = RwSignal::new(true);
+    let live_bootstrap_pending: RwSignal<bool> = RwSignal::new(requires_live_bootstrap);
     let live_bootstrap_error: RwSignal<Option<String>> = RwSignal::new(None);
     let error_message: RwSignal<Option<String>> = RwSignal::new(None);
     let status_message: RwSignal<Option<String>> = RwSignal::new(None);
     let claims_persistence_available: RwSignal<bool> = RwSignal::new(false);
-    let saved_snapshot_id_input: RwSignal<String> = RwSignal::new(String::new());
     let preset_name_input: RwSignal<String> = RwSignal::new(String::new());
     let macro_name_input: RwSignal<String> = RwSignal::new(String::new());
     let guild_query: RwSignal<String> = RwSignal::new(String::new());
@@ -833,7 +849,9 @@ pub fn ClaimsPage(initial_path: String) -> impl IntoView {
     });
 
     Effect::new(move || {
-        if live_territories.get().is_empty() || is_ready.get_untracked() {
+        if is_ready.get_untracked()
+            || (requires_live_bootstrap && live_territories.get().is_empty())
+        {
             return;
         }
 
@@ -915,6 +933,40 @@ pub fn ClaimsPage(initial_path: String) -> impl IntoView {
                         error_message.set(Some("No local draft was found".to_string()));
                     }
                 }
+                ClaimsRoute::Import => {
+                    if let Some(handoff) = take_startup_import_handoff() {
+                        if let Err(error) = validate_document_against_live(
+                            &handoff.document,
+                            &live_territories.get_untracked(),
+                        ) {
+                            error_message.set(Some(format!("{error:?}")));
+                            return;
+                        }
+                        apply_document_to_session(
+                            active_owner,
+                            viewport,
+                            session,
+                            tab,
+                            status_message,
+                            error_message,
+                            handoff.document,
+                            handoff.source_snapshot_id,
+                            handoff.follow_live,
+                        );
+                        if !handoff.selection.is_empty() {
+                            session.update(|state| {
+                                if let Some(state) = state.as_mut() {
+                                    state.selection = handoff.selection.clone();
+                                }
+                            });
+                        }
+                    } else {
+                        error_message.set(Some(
+                            "No staged import was found. Start again from the claims launcher."
+                                .to_string(),
+                        ));
+                    }
+                }
                 ClaimsRoute::Saved(snapshot_id) => {
                     is_loading_snapshot.set(true);
                     let snapshot_id = snapshot_id.clone();
@@ -960,33 +1012,37 @@ pub fn ClaimsPage(initial_path: String) -> impl IntoView {
         live_seq.set(last_live_seq.get().unwrap_or(0));
     });
 
-    spawn_local(async move {
-        loop {
-            if !live_territories.get_untracked().is_empty() {
-                live_bootstrap_pending.set(false);
-                live_bootstrap_error.set(None);
-                break;
-            }
-
-            match history::fetch_live_state().await {
-                Ok(state) => {
-                    live_seq.set(state.seq);
-                    last_live_seq.set(Some(state.seq));
-                    live_territories.set(crate::territory::from_snapshot(state.territories));
+    if requires_live_bootstrap {
+        spawn_local(async move {
+            loop {
+                if !live_territories.get_untracked().is_empty() {
                     live_bootstrap_pending.set(false);
                     live_bootstrap_error.set(None);
                     break;
                 }
-                Err(error) => {
-                    live_bootstrap_pending.set(true);
-                    live_bootstrap_error
-                        .set(Some(format!("Live territory bootstrap failed: {error}")));
-                }
-            }
 
-            gloo_timers::future::sleep(std::time::Duration::from_secs(3)).await;
-        }
-    });
+                match history::fetch_live_state().await {
+                    Ok(state) => {
+                        live_seq.set(state.seq);
+                        last_live_seq.set(Some(state.seq));
+                        live_territories.set(crate::territory::from_snapshot(state.territories));
+                        live_bootstrap_pending.set(false);
+                        live_bootstrap_error.set(None);
+                        break;
+                    }
+                    Err(error) => {
+                        live_bootstrap_pending.set(true);
+                        live_bootstrap_error
+                            .set(Some(format!("Live territory bootstrap failed: {error}")));
+                    }
+                }
+
+                gloo_timers::future::sleep(std::time::Duration::from_secs(3)).await;
+            }
+        });
+    } else {
+        live_bootstrap_pending.set(false);
+    }
 
     spawn_local(async move {
         loop {
@@ -1153,8 +1209,6 @@ pub fn ClaimsPage(initial_path: String) -> impl IntoView {
             }
         });
     };
-
-    let has_local_draft = Signal::derive(move || read_local_draft().is_some());
 
     view! {
         <div style="position: relative; width: 100%; height: 100%; background: #0c0e17; color: #e6e3d9; overflow: hidden;">
@@ -1655,113 +1709,62 @@ pub fn ClaimsPage(initial_path: String) -> impl IntoView {
                         </div>
                     }.into_any()
                 } else if session.get().is_none() {
-                    let import_input_ref = file_input_ref.clone();
+                    let title = route_title.clone();
+                    let boot_message = route_boot_message.clone();
                     view! {
                         <div style="position: fixed; inset: 0; z-index: 40; display: flex; align-items: center; justify-content: center; background: rgba(10,12,19,0.90); pointer-events: auto;">
-                            <div style="position: relative; z-index: 41; width: min(880px, 92vw); padding: 24px; border-radius: 18px; background: linear-gradient(180deg, rgba(22,26,38,0.98), rgba(15,18,27,0.96)); border: 1px solid rgba(245,197,66,0.18); box-shadow: 0 24px 60px rgba(0,0,0,0.45); display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; pointer-events: auto;">
-                                <div style="grid-column: 1 / -1; display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; border-radius: 12px; border: 1px solid #2c3146; background: rgba(17,21,33,0.88);">
-                                    <div style="font-family: 'Silkscreen', monospace; color: #f5c542;">"Claims Editor"</div>
-                                    <div style="color: #d9d4c3; font-size: 0.84rem;">
-                                        {move || {
-                                            if live_bootstrap_pending.get() {
-                                                "Syncing live territory data in the background…".to_string()
-                                            } else if startup_route_pending {
-                                                "Preparing claim editor…".to_string()
-                                            } else {
-                                                "Live territory data ready.".to_string()
-                                            }
-                                        }}
+                            <div style="position: relative; z-index: 41; width: min(560px, 92vw); padding: 24px; border-radius: 22px; background: linear-gradient(180deg, rgba(16,20,31,0.98), rgba(10,14,23,0.96)); border: 1px solid rgba(245,197,66,0.18); box-shadow: 0 24px 60px rgba(0,0,0,0.45); display: grid; gap: 14px; pointer-events: auto;">
+                                <div style="display: flex; align-items: center; gap: 14px;">
+                                    <div
+                                        style:display=move || if error_message.get().is_some() { "none" } else { "block" }
+                                        style="width: 26px; height: 26px; border-radius: 999px; border: 3px solid rgba(245,197,66,0.22); border-top-color: #f5c542; animation: claims-editor-spin 0.9s linear infinite;"
+                                    ></div>
+                                    <div style="display: grid; gap: 6px;">
+                                        <div style="font-family: 'Silkscreen', monospace; color: #f5c542; font-size: 1rem;">{title}</div>
+                                        <div style="color: #cfd7ef; font-size: 0.84rem; line-height: 1.7;">
+                                            {move || {
+                                                if let Some(message) = error_message.get() {
+                                                    message
+                                                } else if let Some(message) = live_bootstrap_error.get() {
+                                                    message
+                                                } else if live_bootstrap_pending.get() {
+                                                    boot_message.clone()
+                                                } else if is_loading_snapshot.get() {
+                                                    "Loading saved snapshot payload from the server.".to_string()
+                                                } else if is_root_route {
+                                                    "Use the dedicated claims launcher to choose a session.".to_string()
+                                                } else {
+                                                    "Finalizing claims editor bootstrap.".to_string()
+                                                }
+                                            }}
+                                        </div>
                                     </div>
-                                    {move || live_bootstrap_error.get().map(|message| {
-                                        view! {
-                                            <div style="padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(190,72,72,0.4); background: rgba(190,72,72,0.12); color: #ffcfcf; font-size: 0.78rem;">
-                                                {message}
-                                            </div>
-                                        }
-                                    })}
                                 </div>
-                                <a
-                                    href="/claims/new/blank"
-                                    style="display: block; padding: 18px; border-radius: 14px; border: 1px solid #36405d; background: #131928; color: #e6e3d9; cursor: pointer; text-align: left; text-decoration: none;"
-                                >
-                                    <div style="font-family: 'Silkscreen', monospace; color: #f5c542; margin-bottom: 8px;">"Blank"</div>
-                                    <div>"Start with every territory neutral."</div>
-                                </a>
-                                <a
-                                    href="/claims/new/live"
-                                    style="display: block; padding: 18px; border-radius: 14px; border: 1px solid #36405d; background: #131928; color: #e6e3d9; cursor: pointer; text-align: left; text-decoration: none;"
-                                >
-                                    <div style="font-family: 'Silkscreen', monospace; color: #f5c542; margin-bottom: 8px;">"Current Live Map"</div>
-                                    <div>"Freeze the current live map as the starting state."</div>
-                                </a>
-                                <button
-                                    style="padding: 18px; border-radius: 14px; border: 1px solid #36405d; background: #131928; color: #e6e3d9; cursor: pointer; text-align: left;"
-                                    on:click=move |_| trigger_import_picker(import_input_ref.clone())
-                                >
-                                    <div style="font-family: 'Silkscreen', monospace; color: #f5c542; margin-bottom: 8px;">"Import File"</div>
-                                    <div>"Load a `.json` claim export."</div>
-                                </button>
-                                <a
-                                    href="/claims/new/draft"
-                                    style:opacity=move || if has_local_draft.get() { "1" } else { "0.45" }
-                                    style:filter=move || if has_local_draft.get() { "none" } else { "grayscale(0.25)" }
-                                    style="display: block; padding: 18px; border-radius: 14px; border: 1px solid #36405d; background: #131928; color: #e6e3d9; cursor: pointer; text-align: left; text-decoration: none;"
-                                >
-                                    <div style="font-family: 'Silkscreen', monospace; color: #f5c542; margin-bottom: 8px;">"Continue Draft"</div>
-                                    <div>"Resume the latest local working copy."</div>
-                                </a>
-                                <div style="padding: 18px; border-radius: 14px; border: 1px solid #36405d; background: #131928; color: #e6e3d9; display: flex; flex-direction: column; gap: 8px;">
-                                    <div style="font-family: 'Silkscreen', monospace; color: #f5c542;">"Open Saved Snapshot"</div>
-                                    <input
-                                        prop:value=move || saved_snapshot_id_input.get()
-                                        placeholder="Snapshot id"
-                                        style="padding: 8px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #111521; color: #e6e3d9;"
-                                        on:input=move |event| saved_snapshot_id_input.set(event_target_value(&event))
-                                    />
+                                <div style="padding: 14px 16px; border-radius: 16px; border: 1px solid #2c3146; background: rgba(14,18,28,0.82); color: #95a0bd; font-size: 0.75rem; line-height: 1.8;">
+                                    "Claims entry is launcher-driven now. This route is only responsible for opening the requested document inside the editor."
+                                </div>
+                                <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+                                    <a
+                                        href="/claims"
+                                        style="padding: 11px 14px; border-radius: 12px; border: 1px solid rgba(245,197,66,0.22); background: rgba(245,197,66,0.08); color: #f3ead0; text-decoration: none;"
+                                    >
+                                        "Open Claims Launcher"
+                                    </a>
                                     <button
-                                        style="padding: 10px 12px; border-radius: 8px; border: 1px solid #3a415c; background: #171b28; color: #e6e3d9; cursor: pointer;"
+                                        type="button"
+                                        style="padding: 11px 14px; border-radius: 12px; border: 1px solid #33405b; background: rgba(17,22,34,0.86); color: #dfe5f5; cursor: pointer;"
                                         on:click=move |_| {
-                                            let id = saved_snapshot_id_input.get_untracked();
-                                            if id.trim().is_empty() {
-                                                return;
-                                            }
                                             if let Some(window) = web_sys::window() {
-                                                let _ = window.location().set_href(&format!("/claims/s/{}", id.trim()));
+                                                let _ = window.location().reload();
                                             }
                                         }
                                     >
-                                        "Open"
+                                        "Retry Route"
                                     </button>
                                 </div>
-                                <div style="grid-column: 1 / -1; display: flex; flex-direction: column; gap: 8px;">
-                                    <div style="font-family: 'Silkscreen', monospace; color: #f5c542;">"Local Presets"</div>
-                                    <div style="display: flex; flex-wrap: wrap; gap: 8px;">
-                                        {move || local_presets.get().into_iter().map(|preset| {
-                                            let label = preset.name.clone();
-                                            let document = preset.document.clone();
-                                            view! {
-                                                <button
-                                                    style="padding: 10px 12px; border-radius: 10px; border: 1px solid #36405d; background: #131928; color: #e6e3d9; cursor: pointer;"
-                                                    on:click=move |_| {
-                                                        apply_document_to_session(
-                                                            active_owner,
-                                                            viewport,
-                                                            session,
-                                                            tab,
-                                                            status_message,
-                                                            error_message,
-                                                            document.clone(),
-                                                            None,
-                                                            false,
-                                                        );
-                                                    }
-                                                >
-                                                    {label}
-                                                </button>
-                                            }
-                                        }).collect_view()}
-                                    </div>
-                                </div>
+                                <style>
+                                    "@keyframes claims-editor-spin { to { transform: rotate(360deg); } }"
+                                </style>
                             </div>
                         </div>
                     }.into_any()
@@ -1780,6 +1783,10 @@ mod tests {
     #[test]
     fn parse_claims_route_handles_root_and_saved_paths() {
         assert!(matches!(parse_claims_route("/claims"), ClaimsRoute::Root));
+        assert!(matches!(
+            parse_claims_route("/claims/new/import"),
+            ClaimsRoute::Import
+        ));
         assert!(matches!(
             parse_claims_route("/claims/s/test-123"),
             ClaimsRoute::Saved(id) if id == "test-123"

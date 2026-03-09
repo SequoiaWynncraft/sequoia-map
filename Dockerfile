@@ -40,11 +40,21 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY shared/ shared/
 COPY client/ client/
+COPY claims-client/ claims-client/
 # Need a stub server crate so workspace resolves
 COPY server/Cargo.toml server/Cargo.toml
 RUN mkdir -p server/src && echo 'fn main() {}' > server/src/main.rs
 
 WORKDIR /app/client
+RUN --mount=type=cache,id=sequoia-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=sequoia-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=sequoia-client-target,target=/app/target,sharing=locked \
+    --mount=type=cache,id=sequoia-trunk-cache,target=/app/.trunk,sharing=locked \
+    trunk build --release
+RUN find dist -type f -name '*_bg.wasm' -exec wasm-opt -Oz {} -o {} \;
+RUN find dist -type f \( -name '*.wasm' -o -name '*.js' -o -name '*.css' -o -name '*.html' -o -name '*.json' -o -name '*.svg' \) -exec sh -c 'brotli -f -q 11 "$1" -o "$1.br"; gzip -f -k -9 "$1"' _ {} \;
+
+WORKDIR /app/claims-client
 RUN --mount=type=cache,id=sequoia-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=sequoia-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=sequoia-client-target,target=/app/target,sharing=locked \
@@ -63,6 +73,8 @@ COPY server/ server/
 # Need a stub client crate so workspace resolves
 COPY client/Cargo.toml client/Cargo.toml
 RUN mkdir -p client/src && echo 'fn main() {}' > client/src/main.rs
+COPY claims-client/Cargo.toml claims-client/Cargo.toml
+RUN mkdir -p claims-client/src && echo 'fn main() {}' > claims-client/src/main.rs
 
 RUN --mount=type=cache,id=sequoia-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=sequoia-cargo-git,target=/usr/local/cargo/git,sharing=locked \
@@ -82,7 +94,9 @@ WORKDIR /app
 
 COPY --from=server-build /app/sequoia-server /app/sequoia-server
 COPY --from=server-build /app/server/migrations /app/server/migrations
+COPY --from=server-build /app/server/static /app/server/static
 COPY --from=client-build /app/client/dist /app/client/dist
+COPY --from=client-build /app/claims-client/dist /app/claims-client/dist
 RUN chown -R sequoia:sequoia /app
 
 ENV RUST_LOG=info

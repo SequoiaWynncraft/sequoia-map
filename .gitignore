@@ -1,5 +1,6 @@
 target/
 client/dist
+claims-client/dist
 .env
 .env.*
 !.env.example

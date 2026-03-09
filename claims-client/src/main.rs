@@ -1,27 +1,41 @@
+#[path = "../../client/src/animation.rs"]
 mod animation;
 mod app;
+#[path = "../../client/src/canvas.rs"]
 mod canvas;
+#[path = "../../client/src/claim_labels.rs"]
 mod claim_labels;
+#[path = "../../client/src/claims.rs"]
+mod claims;
+#[path = "../../client/src/colors.rs"]
 mod colors;
 #[cfg(target_arch = "wasm32")]
+#[path = "../../client/src/gpu/mod.rs"]
 mod gpu;
+#[path = "../../client/src/heat.rs"]
 mod heat;
 mod history;
+#[path = "../../client/src/icons.rs"]
 mod icons;
+#[path = "../../client/src/label_layout.rs"]
 mod label_layout;
+#[path = "../../client/src/overlay_sizing.rs"]
 mod overlay_sizing;
-mod playback;
+#[path = "../../client/src/render_loop.rs"]
 mod render_loop;
+#[path = "../../client/src/renderer/mod.rs"]
 mod renderer;
-mod season_scalar;
-mod sidebar;
+#[path = "../../client/src/spatial.rs"]
 mod spatial;
+#[path = "../../client/src/sse.rs"]
 mod sse;
+#[path = "../../client/src/territory.rs"]
 mod territory;
+#[path = "../../client/src/tiles.rs"]
 mod tiles;
+#[path = "../../client/src/time_format.rs"]
 mod time_format;
-mod timeline;
-mod tower;
+#[path = "../../client/src/viewport.rs"]
 mod viewport;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -115,75 +129,6 @@ thread_local! {
     static APP_MOUNT_HANDLE: RefCell<Option<Box<dyn Any>>> = RefCell::new(None);
 }
 
-pub(crate) const SEQUOIA_WEBSITE_URL: &str = "https://seqwawa.com";
-pub(crate) const IRIS_RELEASES_URL: &str = "https://github.com/OneNoted/sequoia-map/releases";
-
-fn encode_uri_component_fallback(input: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-
-    let mut encoded = String::with_capacity(input.len());
-    for byte in input.bytes() {
-        let is_safe = matches!(
-            byte,
-            b'A'..=b'Z'
-                | b'a'..=b'z'
-                | b'0'..=b'9'
-                | b'-'
-                | b'_'
-                | b'.'
-                | b'!'
-                | b'~'
-                | b'*'
-                | b'\''
-                | b'('
-                | b')'
-        );
-        if is_safe {
-            encoded.push(byte as char);
-        } else {
-            encoded.push('%');
-            encoded.push(HEX[(byte >> 4) as usize] as char);
-            encoded.push(HEX[(byte & 0x0F) as usize] as char);
-        }
-    }
-    encoded
-}
-
-#[cfg(target_arch = "wasm32")]
-fn encode_guild_name_for_url(guild_name: &str) -> String {
-    js_sys::encode_uri_component(guild_name)
-        .as_string()
-        .unwrap_or_else(|| encode_uri_component_fallback(guild_name))
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn encode_guild_name_for_url(guild_name: &str) -> String {
-    encode_uri_component_fallback(guild_name)
-}
-
-pub(crate) fn guild_stats_url(guild_name: &str) -> String {
-    let encoded = encode_guild_name_for_url(guild_name);
-    format!("https://wynncraft.com/stats/guild/{encoded}")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{encode_uri_component_fallback, guild_stats_url};
-
-    #[test]
-    fn fallback_uri_encoder_escapes_reserved_characters() {
-        assert_eq!(encode_uri_component_fallback("A/B? C"), "A%2FB%3F%20C");
-    }
-
-    #[test]
-    fn guild_stats_url_uses_encoded_path_segment() {
-        assert_eq!(
-            guild_stats_url("Sequoia/Map? Guild"),
-            "https://wynncraft.com/stats/guild/Sequoia%2FMap%3F%20Guild"
-        );
-    }
-}
-
 fn main() {
     console_error_panic_hook::set_once();
     let Some(window) = web_sys::window() else {
@@ -201,8 +146,6 @@ fn main() {
     };
 
     APP_MOUNT_HANDLE.with(move |slot| {
-        // If main() is re-entered (e.g. dev/hot-reload runtime quirks), drop the old mount
-        // so stale effects/signals can't keep mutating app state.
         let _old = slot.borrow_mut().take();
         let handle = mount_to(target, app::App);
         *slot.borrow_mut() = Some(Box::new(handle));

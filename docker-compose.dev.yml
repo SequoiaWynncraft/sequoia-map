@@ -117,6 +117,48 @@ services:
     depends_on:
       server:
         condition: service_started
+    logging: *default-logging
+
+  claims-client:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    init: true
+    stop_grace_period: 10s
+    working_dir: /workspace/claims-client
+    command: ["trunk", "serve", "--config", "Trunk.dev.toml"]
+    environment:
+      CARGO_TARGET_DIR: /workspace/target/dev-wasm
+      CARGO_INCREMENTAL: "1"
+      CARGO_BUILD_JOBS: ${CARGO_BUILD_JOBS:-16}
+      CARGO_PROFILE_DEV_DEBUG: ${CARGO_PROFILE_DEV_DEBUG:-0}
+      RUSTFLAGS: "${RUSTFLAGS_WASM_DEV:--C debuginfo=0}"
+      NO_COLOR: "false"
+    volumes:
+      - ./:/workspace
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target-cache:/workspace/target
+      - trunk-cache:/workspace/.trunk
+    depends_on:
+      server:
+        condition: service_started
+    logging: *default-logging
+
+  gateway:
+    image: caddy:2-alpine
+    init: true
+    stop_grace_period: 5s
+    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+    volumes:
+      - ./dev/Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      server:
+        condition: service_started
+      client:
+        condition: service_started
+      claims-client:
+        condition: service_started
     ports:
       - "8080:8080"
     logging: *default-logging
