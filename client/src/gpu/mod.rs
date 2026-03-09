@@ -837,6 +837,7 @@ pub struct GpuRenderer {
     // Resource icon pipeline
     icon_renderer: Option<GpuIconRenderer>,
     icon_dirty: bool,
+    supports_gpu_icons: bool,
 
     // Track current dimensions
     width: u32,
@@ -936,6 +937,7 @@ impl GpuRenderer {
         backends: wgpu::Backends,
         backend_path: &str,
     ) -> Result<Self, String> {
+        let supports_gpu_icons = backends != wgpu::Backends::GL;
         let width = canvas.width().max(1);
         let height = canvas.height().max(1);
         let rect = canvas.get_bounding_client_rect();
@@ -1031,6 +1033,11 @@ impl GpuRenderer {
             .into(),
         );
         surface.configure(&device, &surface_config);
+        if !supports_gpu_icons {
+            web_sys::console::warn_1(
+                &"GPU icon overlays disabled on the WebGL renderer path".into(),
+            );
+        }
 
         // --- Shared geometry ---
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1556,6 +1563,7 @@ impl GpuRenderer {
             territory_name_cache: HashMap::new(),
             icon_renderer: None,
             icon_dirty: false,
+            supports_gpu_icons,
             width,
             height,
             dpr,
@@ -1574,7 +1582,7 @@ impl GpuRenderer {
                 webgl2: backends == wgpu::Backends::GL,
                 gpu_text_msdf: true,
                 gpu_dynamic_labels: true,
-                compatibility_fallback: false,
+                compatibility_fallback: !supports_gpu_icons,
             },
             frame_metrics: FrameMetrics::default(),
             thick_cooldown_borders: false,
@@ -3798,7 +3806,9 @@ impl GpuRenderer {
                 return false;
             }
         }
-        if self.use_full_gpu_text
+        if !self.supports_gpu_icons {
+            self.icon_dirty = false;
+        } else if self.use_full_gpu_text
             && let Some(icon_set) = icons.as_ref()
             && self.icon_renderer.is_none()
         {

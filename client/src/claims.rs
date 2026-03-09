@@ -791,8 +791,6 @@ pub fn ClaimsPage(initial_path: String) -> impl IntoView {
         loop {
             match history::fetch_live_state().await {
                 Ok(state) => {
-                    live_seq.set(state.seq);
-                    live_territories.set(crate::territory::from_snapshot(state.territories));
                     if !is_ready.get_untracked() {
                         is_ready.set(true);
                         set_loading_shell_step("Starting claim editor");
@@ -857,6 +855,8 @@ pub fn ClaimsPage(initial_path: String) -> impl IntoView {
                             }
                         }
                     }
+                    live_seq.set(state.seq);
+                    live_territories.set(crate::territory::from_snapshot(state.territories));
                 }
                 Err(error) => {
                     if !is_ready.get_untracked() {
@@ -1035,7 +1035,14 @@ pub fn ClaimsPage(initial_path: String) -> impl IntoView {
 
     view! {
         <div style="position: relative; width: 100%; height: 100%; background: #0c0e17; color: #e6e3d9; overflow: hidden;">
-            <MapCanvas />
+            {move || {
+                if is_ready.get() && session.get().is_some() {
+                    view! { <MapCanvas /> }.into_any()
+                } else {
+                    view! { <div style="position: absolute; inset: 0; background: #0c0e17;" /> }
+                        .into_any()
+                }
+            }}
             <div style="position: absolute; top: 16px; left: 16px; z-index: 12; display: flex; gap: 10px; flex-wrap: wrap; max-width: min(92vw, 780px);">
                 <div style="display: flex; gap: 6px; padding: 10px; background: rgba(19,22,31,0.94); border: 1px solid #2c3146; border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,0.35);">
                     {[
@@ -1519,7 +1526,7 @@ pub fn ClaimsPage(initial_path: String) -> impl IntoView {
                 } else if session.get().is_none() {
                     let import_input_ref = file_input_ref.clone();
                     view! {
-                        <div style="position: absolute; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center; background: rgba(10,12,19,0.76); backdrop-filter: blur(8px);">
+                        <div style="position: absolute; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center; background: rgba(10,12,19,0.90);">
                             <div style="width: min(880px, 92vw); padding: 24px; border-radius: 18px; background: linear-gradient(180deg, rgba(22,26,38,0.98), rgba(15,18,27,0.96)); border: 1px solid rgba(245,197,66,0.18); box-shadow: 0 24px 60px rgba(0,0,0,0.45); display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px;">
                                 <button
                                     style="padding: 18px; border-radius: 14px; border: 1px solid #36405d; background: #131928; color: #e6e3d9; cursor: pointer; text-align: left;"
