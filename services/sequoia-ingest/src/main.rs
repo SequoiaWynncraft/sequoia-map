@@ -1113,7 +1113,7 @@ async fn report_territory(
         }
     }
 
-    let device_identity = token_hash(&authed.device_pubkey_b64);
+    let device_identity = canonical_device_identity_hash(&authed.device_pubkey_b64);
 
     let mut accepted = 0_u64;
     let mut rejected = 0_u64;
@@ -2358,6 +2358,18 @@ fn token_hash(token: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+fn canonical_device_identity_hash(device_pubkey: &str) -> String {
+    decode_ed25519_public_key(device_pubkey)
+        .map(|public_key| {
+            let mut hasher = Sha256::new();
+            hasher.update(public_key.to_bytes());
+            hex::encode(hasher.finalize())
+        })
+        // Fall back to the textual hash in malformed-key or auth-disabled flows so local dev/test
+        // behavior stays backward-compatible.
+        .unwrap_or_else(|| token_hash(device_pubkey))
+}
+
 fn normalize_persisted_token(token: &str) -> String {
     let trimmed = token.trim();
     if is_sha256_hex(trimmed) {
@@ -3403,12 +3415,14 @@ async fn persist_raw_report(
 mod tests {
     use super::{
         AppState, Config, Metrics, ReporterFieldToggles, ReporterRecord, apply_toggle_policy,
-        check_rate_limit, evaluate_territory_claim, initialize_db, normalize_idempotency_key,
-        normalize_persisted_token, normalize_territory_name, parse_trusted_proxy_cidrs,
-        quorum_satisfied, resolve_client_ip, session_verifier_within_fail_open_grace,
-        territory_claim_hash, territory_idempotency_hash,
+        canonical_device_identity_hash, check_rate_limit, evaluate_territory_claim, initialize_db,
+        normalize_idempotency_key, normalize_persisted_token, normalize_territory_name,
+        parse_trusted_proxy_cidrs, quorum_satisfied, resolve_client_ip,
+        session_verifier_within_fail_open_grace, territory_claim_hash, territory_idempotency_hash,
+        token_hash,
     };
     use axum::http::{HeaderMap, HeaderValue};
+    use base64::Engine;
     use chrono::Utc;
     use reqwest::Client;
     use sequoia_shared::{
@@ -3772,6 +3786,20 @@ mod tests {
     fn parse_trusted_proxy_cidrs_skips_invalid_entries() {
         let parsed = parse_trusted_proxy_cidrs("10.0.0.0/8, not-a-cidr, 192.168.0.0/16");
         assert_eq!(parsed.len(), 2);
+    }
+
+    #[test]
+    fn canonical_device_identity_hash_normalizes_equivalent_base64_encodings() {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7_u8; 32]);
+        let public_key = signing_key.verifying_key().to_bytes();
+        let standard_b64 = base64::engine::general_purpose::STANDARD.encode(public_key);
+        let urlsafe_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public_key);
+
+        assert_ne!(token_hash(&standard_b64), token_hash(&urlsafe_b64));
+        assert_eq!(
+            canonical_device_identity_hash(&standard_b64),
+            canonical_device_identity_hash(&urlsafe_b64)
+        );
     }
 
     #[tokio::test]
