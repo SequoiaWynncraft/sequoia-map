@@ -156,10 +156,19 @@ struct GuildCatalogEntry {
 #[derive(Clone)]
 enum ClaimsRoute {
     Root,
+    NewBlank,
+    NewLive,
+    Draft,
     Saved(String),
 }
 
 fn parse_claims_route(path: &str) -> ClaimsRoute {
+    match path.trim_end_matches('/') {
+        "/claims/new/blank" => return ClaimsRoute::NewBlank,
+        "/claims/new/live" => return ClaimsRoute::NewLive,
+        "/claims/new/draft" => return ClaimsRoute::Draft,
+        _ => {}
+    }
     if let Some(saved_id) = path.strip_prefix("/claims/s/") {
         let saved_id = saved_id.trim_matches('/');
         if !saved_id.is_empty() {
@@ -555,6 +564,10 @@ fn trigger_import_picker(file_input_ref: NodeRef<html::Input>) {
 #[component]
 pub fn ClaimsPage(initial_path: String) -> impl IntoView {
     let route = parse_claims_route(&initial_path);
+    let startup_route_pending = matches!(
+        &route,
+        ClaimsRoute::NewBlank | ClaimsRoute::NewLive | ClaimsRoute::Draft | ClaimsRoute::Saved(_)
+    );
 
     let live_territories: RwSignal<ClientTerritoryMap> = RwSignal::new(ClientTerritoryMap::new());
     let effective_territories: RwSignal<ClientTerritoryMap> =
@@ -710,8 +723,8 @@ pub fn ClaimsPage(initial_path: String) -> impl IntoView {
     });
 
     let metrics = Memo::new(move |_| {
-        let live_map = live_territories.get();
         let session = session.get()?;
+        let live_map = live_territories.get();
         let territory_map = territory_map_from_client(&live_map);
         let document = canonical_document_for_session(&session, &live_map, live_seq.get());
         Some(compute_claim_metrics(&document, &territory_map))
@@ -727,9 +740,12 @@ pub fn ClaimsPage(initial_path: String) -> impl IntoView {
     });
 
     Effect::new(move || {
-        let live = live_territories.get();
         let session_value = session.get();
-        effective_territories.set(build_effective_client_map(session_value.as_ref(), &live));
+        let Some(session_value) = session_value else {
+            return;
+        };
+        let live = live_territories.get();
+        effective_territories.set(build_effective_client_map(Some(&session_value), &live));
     });
 
     Effect::new(move || {
@@ -783,7 +799,10 @@ pub fn ClaimsPage(initial_path: String) -> impl IntoView {
     });
 
     Effect::new(move || {
-        if !loaded_tiles.get().is_empty() || live_territories.get().is_empty() {
+        if session.get().is_none()
+            || !loaded_tiles.get().is_empty()
+            || live_territories.get().is_empty()
+        {
             return;
         }
         let (canvas_w, canvas_h) = canvas_dimensions();
@@ -797,6 +816,9 @@ pub fn ClaimsPage(initial_path: String) -> impl IntoView {
     });
 
     Effect::new(move || {
+        if session.get().is_none() {
+            return;
+        }
         sse::connect(live_territories, connection);
         on_cleanup(|| {
             sse::disconnect();
@@ -831,8 +853,69 @@ pub fn ClaimsPage(initial_path: String) -> impl IntoView {
                     false,
                 );
             }
-            Ok(None) => {
-                if let ClaimsRoute::Saved(snapshot_id) = &route {
+            Ok(None) => match &route {
+                ClaimsRoute::Root => {}
+                ClaimsRoute::NewBlank => {
+                    let mut document = ClaimDocumentV1::blank();
+                    document.view =
+                        default_view_from(&viewport.get_untracked(), &active_owner.get_untracked());
+                    apply_document_to_session(
+                        active_owner,
+                        viewport,
+                        session,
+                        tab,
+                        status_message,
+                        error_message,
+                        document,
+                        None,
+                        false,
+                    );
+                }
+                ClaimsRoute::NewLive => {
+                    let live_map = live_territories.get_untracked();
+                    let mut document = ClaimDocumentV1::frozen_live(
+                        None,
+                        live_seq.get_untracked(),
+                        current_live_owner_map(&live_map),
+                    );
+                    document.view =
+                        default_view_from(&viewport.get_untracked(), &active_owner.get_untracked());
+                    apply_document_to_session(
+                        active_owner,
+                        viewport,
+                        session,
+                        tab,
+                        status_message,
+                        error_message,
+                        document,
+                        None,
+                        false,
+                    );
+                }
+                ClaimsRoute::Draft => {
+                    if let Some(draft) = read_local_draft() {
+                        apply_document_to_session(
+                            active_owner,
+                            viewport,
+                            session,
+                            tab,
+                            status_message,
+                            error_message,
+                            draft.document,
+                            draft.source_snapshot_id,
+                            draft.follow_live,
+                        );
+                        active_owner.set(draft.active_owner.clone());
+                        session.update(|state| {
+                            if let Some(state) = state.as_mut() {
+                                state.selection = draft.selection.clone();
+                            }
+                        });
+                    } else {
+                        error_message.set(Some("No local draft was found".to_string()));
+                    }
+                }
+                ClaimsRoute::Saved(snapshot_id) => {
                     is_loading_snapshot.set(true);
                     let snapshot_id = snapshot_id.clone();
                     spawn_local(async move {
@@ -866,7 +949,7 @@ pub fn ClaimsPage(initial_path: String) -> impl IntoView {
                         is_loading_snapshot.set(false);
                     });
                 }
-            }
+            },
             Err(error) => {
                 error_message.set(Some(error));
             }
@@ -1582,6 +1665,8 @@ pub fn ClaimsPage(initial_path: String) -> impl IntoView {
                                         {move || {
                                             if live_bootstrap_pending.get() {
                                                 "Syncing live territory data in the background…".to_string()
+                                            } else if startup_route_pending {
+                                                "Preparing claim editor…".to_string()
                                             } else {
                                                 "Live territory data ready.".to_string()
                                             }
@@ -1595,63 +1680,20 @@ pub fn ClaimsPage(initial_path: String) -> impl IntoView {
                                         }
                                     })}
                                 </div>
-                                <button
-                                    style="padding: 18px; border-radius: 14px; border: 1px solid #36405d; background: #131928; color: #e6e3d9; cursor: pointer; text-align: left;"
-                                    on:click=move |_| {
-                                        let mut document = ClaimDocumentV1::blank();
-                                        document.view = default_view_from(
-                                            &viewport.get_untracked(),
-                                            &active_owner.get_untracked(),
-                                        );
-                                        apply_document_to_session(
-                                            active_owner,
-                                            viewport,
-                                            session,
-                                            tab,
-                                            status_message,
-                                            error_message,
-                                            document,
-                                            None,
-                                            false,
-                                        );
-                                    }
+                                <a
+                                    href="/claims/new/blank"
+                                    style="display: block; padding: 18px; border-radius: 14px; border: 1px solid #36405d; background: #131928; color: #e6e3d9; cursor: pointer; text-align: left; text-decoration: none;"
                                 >
                                     <div style="font-family: 'Silkscreen', monospace; color: #f5c542; margin-bottom: 8px;">"Blank"</div>
                                     <div>"Start with every territory neutral."</div>
-                                </button>
-                                <button
-                                    style="padding: 18px; border-radius: 14px; border: 1px solid #36405d; background: #131928; color: #e6e3d9; cursor: pointer; text-align: left;"
-                                    on:click=move |_| {
-                                        let live_map = live_territories.get_untracked();
-                                        if live_map.is_empty() {
-                                            return;
-                                        }
-                                        let mut document = ClaimDocumentV1::frozen_live(
-                                            None,
-                                            live_seq.get_untracked(),
-                                            current_live_owner_map(&live_map),
-                                        );
-                                        document.view = default_view_from(
-                                            &viewport.get_untracked(),
-                                            &active_owner.get_untracked(),
-                                        );
-                                        apply_document_to_session(
-                                            active_owner,
-                                            viewport,
-                                            session,
-                                            tab,
-                                            status_message,
-                                            error_message,
-                                            document,
-                                            None,
-                                            false,
-                                        );
-                                    }
-                                    disabled=move || live_bootstrap_pending.get()
+                                </a>
+                                <a
+                                    href="/claims/new/live"
+                                    style="display: block; padding: 18px; border-radius: 14px; border: 1px solid #36405d; background: #131928; color: #e6e3d9; cursor: pointer; text-align: left; text-decoration: none;"
                                 >
                                     <div style="font-family: 'Silkscreen', monospace; color: #f5c542; margin-bottom: 8px;">"Current Live Map"</div>
                                     <div>"Freeze the current live map as the starting state."</div>
-                                </button>
+                                </a>
                                 <button
                                     style="padding: 18px; border-radius: 14px; border: 1px solid #36405d; background: #131928; color: #e6e3d9; cursor: pointer; text-align: left;"
                                     on:click=move |_| trigger_import_picker(import_input_ref.clone())
@@ -1659,34 +1701,15 @@ pub fn ClaimsPage(initial_path: String) -> impl IntoView {
                                     <div style="font-family: 'Silkscreen', monospace; color: #f5c542; margin-bottom: 8px;">"Import File"</div>
                                     <div>"Load a `.json` claim export."</div>
                                 </button>
-                                <button
-                                    style="padding: 18px; border-radius: 14px; border: 1px solid #36405d; background: #131928; color: #e6e3d9; cursor: pointer; text-align: left;"
-                                    on:click=move |_| {
-                                        if let Some(draft) = read_local_draft() {
-                                            apply_document_to_session(
-                                                active_owner,
-                                                viewport,
-                                                session,
-                                                tab,
-                                                status_message,
-                                                error_message,
-                                                draft.document,
-                                                draft.source_snapshot_id,
-                                                draft.follow_live,
-                                            );
-                                            active_owner.set(draft.active_owner.clone());
-                                            session.update(|state| {
-                                                if let Some(state) = state.as_mut() {
-                                                    state.selection = draft.selection.clone();
-                                                }
-                                            });
-                                        }
-                                    }
-                                    disabled=move || !has_local_draft.get()
+                                <a
+                                    href="/claims/new/draft"
+                                    style:opacity=move || if has_local_draft.get() { "1" } else { "0.45" }
+                                    style:filter=move || if has_local_draft.get() { "none" } else { "grayscale(0.25)" }
+                                    style="display: block; padding: 18px; border-radius: 14px; border: 1px solid #36405d; background: #131928; color: #e6e3d9; cursor: pointer; text-align: left; text-decoration: none;"
                                 >
                                     <div style="font-family: 'Silkscreen', monospace; color: #f5c542; margin-bottom: 8px;">"Continue Draft"</div>
                                     <div>"Resume the latest local working copy."</div>
-                                </button>
+                                </a>
                                 <div style="padding: 18px; border-radius: 14px; border: 1px solid #36405d; background: #131928; color: #e6e3d9; display: flex; flex-direction: column; gap: 8px;">
                                     <div style="font-family: 'Silkscreen', monospace; color: #f5c542;">"Open Saved Snapshot"</div>
                                     <input
