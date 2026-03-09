@@ -11,10 +11,10 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 
 use sequoia_shared::{
-    ClaimDocumentBase, ClaimDocumentV1, ClaimMacro, ClaimOwner, ClaimValidationError,
-    ClaimViewState, ClaimsBootstrapGeometry, ClaimsTerritoryGeometry, GuildRef, LiveState,
-    Territory, TerritoryMap, compact_claim_overrides, compute_claim_metrics,
-    validate_claim_document,
+    ClaimDocumentBase, ClaimDocumentV1, ClaimMacro, ClaimOwner, ClaimTerritoryStateOverride,
+    ClaimValidationError, ClaimViewState, ClaimsBootstrapGeometry, ClaimsTerritoryGeometry,
+    GuildRef, LiveState, Resources, Territory, TerritoryMap, compact_claim_overrides,
+    compute_claim_metrics, validate_claim_document,
 };
 
 use crate::app::{
@@ -52,6 +52,7 @@ const NEUTRAL_GUILD_UUID: &str = "__neutral__";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ClaimTab {
+    Territory,
     Summary,
     Compare,
     Macros,
@@ -61,6 +62,7 @@ enum ClaimTab {
 impl ClaimTab {
     fn label(self) -> &'static str {
         match self {
+            ClaimTab::Territory => "Territory",
             ClaimTab::Summary => "Summary",
             ClaimTab::Compare => "Compare",
             ClaimTab::Macros => "Macros",
@@ -373,6 +375,185 @@ fn set_effective_owner(
     true
 }
 
+fn base_resources_for_session(live_territories: &ClientTerritoryMap, territory: &str) -> Resources {
+    live_territories
+        .get(territory)
+        .map(|territory| territory.territory.resources.clone())
+        .unwrap_or_default()
+}
+
+fn effective_resources_for_session(
+    session: &ClaimWorkingSession,
+    live_territories: &ClientTerritoryMap,
+    territory: &str,
+) -> Resources {
+    session
+        .document
+        .territory_state_overrides
+        .get(territory)
+        .and_then(|entry| entry.resources.clone())
+        .unwrap_or_else(|| base_resources_for_session(live_territories, territory))
+}
+
+fn set_effective_resources(
+    session: &mut ClaimWorkingSession,
+    territory: &str,
+    next_resources: Resources,
+    live_territories: &ClientTerritoryMap,
+) -> bool {
+    let current = effective_resources_for_session(session, live_territories, territory);
+    if current == next_resources {
+        return false;
+    }
+
+    let base_resources = base_resources_for_session(live_territories, territory);
+    if next_resources == base_resources {
+        session.document.territory_state_overrides.remove(territory);
+    } else {
+        let entry = session
+            .document
+            .territory_state_overrides
+            .entry(territory.to_string())
+            .or_insert_with(ClaimTerritoryStateOverride::default);
+        entry.resources = Some(next_resources);
+        if entry.is_empty() {
+            session.document.territory_state_overrides.remove(territory);
+        }
+    }
+    session.dirty = true;
+    true
+}
+
+fn apply_selected_owner_override(
+    selected: RwSignal<Option<String>>,
+    live_territories: RwSignal<ClientTerritoryMap>,
+    session: RwSignal<Option<ClaimWorkingSession>>,
+    active_owner: RwSignal<ClaimOwner>,
+    next_owner: ClaimOwner,
+) {
+    let Some(territory_name) = selected.get_untracked() else {
+        return;
+    };
+    let live_owners = current_live_owner_map(&live_territories.get_untracked());
+    session.update(|session_state| {
+        let Some(session_state) = session_state.as_mut() else {
+            return;
+        };
+        push_undo_state(session_state, &active_owner.get_untracked());
+        if !set_effective_owner(
+            session_state,
+            &territory_name,
+            next_owner.clone(),
+            &live_owners,
+        ) {
+            let _ = session_state.undo_stack.pop();
+        }
+    });
+}
+
+fn reset_selected_owner_override(
+    selected: RwSignal<Option<String>>,
+    live_territories: RwSignal<ClientTerritoryMap>,
+    session: RwSignal<Option<ClaimWorkingSession>>,
+    active_owner: RwSignal<ClaimOwner>,
+) {
+    let Some(territory_name) = selected.get_untracked() else {
+        return;
+    };
+    let live_snapshot = live_territories.get_untracked();
+    let live_owners = current_live_owner_map(&live_snapshot);
+    let Some(session_state) = session.get_untracked() else {
+        return;
+    };
+    let base_owner = if session_state.follow_live {
+        live_owners
+            .get(&territory_name)
+            .cloned()
+            .unwrap_or_else(neutral_owner)
+    } else {
+        document_base_owner(&session_state.document, &territory_name)
+    };
+    session.update(|session_state| {
+        let Some(session_state) = session_state.as_mut() else {
+            return;
+        };
+        push_undo_state(session_state, &active_owner.get_untracked());
+        if !set_effective_owner(
+            session_state,
+            &territory_name,
+            base_owner.clone(),
+            &live_owners,
+        ) {
+            let _ = session_state.undo_stack.pop();
+        }
+    });
+}
+
+fn apply_selected_resource_override(
+    selected: RwSignal<Option<String>>,
+    live_territories: RwSignal<ClientTerritoryMap>,
+    session: RwSignal<Option<ClaimWorkingSession>>,
+    active_owner: RwSignal<ClaimOwner>,
+    field: &'static str,
+    value: i32,
+) {
+    let Some(territory_name) = selected.get_untracked() else {
+        return;
+    };
+    let live_snapshot = live_territories.get_untracked();
+    session.update(|session_state| {
+        let Some(session_state) = session_state.as_mut() else {
+            return;
+        };
+        let mut next_resources =
+            effective_resources_for_session(session_state, &live_snapshot, &territory_name);
+        match field {
+            "emeralds" => next_resources.emeralds = value,
+            "ore" => next_resources.ore = value,
+            "crops" => next_resources.crops = value,
+            "fish" => next_resources.fish = value,
+            "wood" => next_resources.wood = value,
+            _ => return,
+        }
+        push_undo_state(session_state, &active_owner.get_untracked());
+        if !set_effective_resources(
+            session_state,
+            &territory_name,
+            next_resources,
+            &live_snapshot,
+        ) {
+            let _ = session_state.undo_stack.pop();
+        }
+    });
+}
+
+fn reset_selected_resource_override(
+    selected: RwSignal<Option<String>>,
+    live_territories: RwSignal<ClientTerritoryMap>,
+    session: RwSignal<Option<ClaimWorkingSession>>,
+    active_owner: RwSignal<ClaimOwner>,
+) {
+    let Some(territory_name) = selected.get_untracked() else {
+        return;
+    };
+    let live_snapshot = live_territories.get_untracked();
+    let base_resources = base_resources_for_session(&live_snapshot, &territory_name);
+    session.update(|session_state| {
+        let Some(session_state) = session_state.as_mut() else {
+            return;
+        };
+        push_undo_state(session_state, &active_owner.get_untracked());
+        if !set_effective_resources(
+            session_state,
+            &territory_name,
+            base_resources.clone(),
+            &live_snapshot,
+        ) {
+            let _ = session_state.undo_stack.pop();
+        }
+    });
+}
+
 fn build_effective_client_map(
     session: Option<&ClaimWorkingSession>,
     live_territories: &ClientTerritoryMap,
@@ -385,6 +566,7 @@ fn build_effective_client_map(
     for (name, client_territory) in live_territories {
         let mut territory = client_territory.territory.clone();
         territory.guild = owner_to_guild(&effective_owner_for_session(session, &live_owners, name));
+        territory.resources = effective_resources_for_session(session, live_territories, name);
         map.insert(
             name.clone(),
             ClientTerritory::from_territory(name, territory),
@@ -420,6 +602,21 @@ fn canonical_document_for_session(
     if !session.follow_live {
         document.overrides = compact_claim_overrides(&document, &territory_map);
     }
+    document
+        .territory_state_overrides
+        .retain(|territory, state| {
+            if state.is_empty() || !territory_map.contains_key(territory) {
+                return false;
+            }
+            let base_resources = territory_map
+                .get(territory)
+                .map(|territory| territory.resources.clone())
+                .unwrap_or_default();
+            state
+                .resources
+                .as_ref()
+                .is_some_and(|resources| *resources != base_resources)
+        });
     document
 }
 
@@ -1101,8 +1298,8 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
     let live_seq: RwSignal<u64> = RwSignal::new(initial_live_seq);
     let session: RwSignal<Option<ClaimWorkingSession>> = RwSignal::new(Some(initial_session));
     let active_owner: RwSignal<ClaimOwner> = RwSignal::new(initial_active_owner);
-    let tool: RwSignal<ClaimTool> = RwSignal::new(ClaimTool::Paint);
-    let tab: RwSignal<ClaimTab> = RwSignal::new(ClaimTab::Summary);
+    let tool: RwSignal<ClaimTool> = RwSignal::new(ClaimTool::View);
+    let tab: RwSignal<ClaimTab> = RwSignal::new(ClaimTab::Territory);
     let editor_canvas_ready: RwSignal<bool> = RwSignal::new(false);
     let deferred_editor_work_ready: RwSignal<bool> = RwSignal::new(false);
     let live_bootstrap_pending: RwSignal<bool> = RwSignal::new(initial_live_state.is_none());
@@ -1218,6 +1415,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                     return;
                 };
                 match tool.get_untracked() {
+                    ClaimTool::View => {}
                     ClaimTool::Paint => {
                         push_undo_state(session_state, &current_active_owner);
                         if !set_effective_owner(
@@ -1297,6 +1495,47 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
             .guilds
             .into_iter()
             .find(|entry| owner_identity(&entry.owner) == active)
+    });
+
+    let selected_territory_details = Memo::new(move |_| {
+        let territory_name = selected.get()?;
+        let session_state = session.get()?;
+        let effective_map = effective_territories.get();
+        let effective = effective_map.get(&territory_name)?.territory.clone();
+        let live_map = live_territories.get();
+        let base = live_map.get(&territory_name)?.territory.clone();
+        let live_owners = current_live_owner_map(&live_map);
+        let effective_owner =
+            effective_owner_for_session(&session_state, &live_owners, &territory_name);
+        let base_owner = if session_state.follow_live {
+            live_owners
+                .get(&territory_name)
+                .cloned()
+                .unwrap_or_else(neutral_owner)
+        } else {
+            document_base_owner(&session_state.document, &territory_name)
+        };
+        let resources_overridden = session_state
+            .document
+            .territory_state_overrides
+            .contains_key(&territory_name);
+        Some((
+            territory_name,
+            effective,
+            base,
+            effective_owner,
+            base_owner,
+            resources_overridden,
+        ))
+    });
+
+    Effect::new(move || {
+        if tool.get() == ClaimTool::View
+            && selected.get().is_some()
+            && tab.get() != ClaimTab::Territory
+        {
+            tab.set(ClaimTab::Territory);
+        }
     });
 
     Effect::new(move || {
@@ -1746,6 +1985,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                         <div style="position: absolute; top: 16px; left: 16px; z-index: 12; display: flex; gap: 10px; flex-wrap: wrap; max-width: min(92vw, 780px);">
                             <div style="display: flex; gap: 6px; padding: 10px; background: rgba(19,22,31,0.94); border: 1px solid #2c3146; border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,0.35);">
                                 {[
+                                    ClaimTool::View,
                                     ClaimTool::Paint,
                                     ClaimTool::EraseToNeutral,
                                     ClaimTool::Select,
@@ -1850,7 +2090,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
 
                         <div style="position: absolute; top: 16px; right: 16px; bottom: 16px; width: min(360px, 34vw); z-index: 12; display: flex; flex-direction: column; background: rgba(19,22,31,0.96); border: 1px solid #2c3146; border-radius: 14px; box-shadow: 0 18px 40px rgba(0,0,0,0.4); overflow: hidden;">
                             <div style="display: flex; gap: 6px; padding: 12px; border-bottom: 1px solid #2c3146; background: rgba(14,16,24,0.9);">
-                                {[ClaimTab::Summary, ClaimTab::Compare, ClaimTab::Macros, ClaimTab::Share]
+                                {[ClaimTab::Territory, ClaimTab::Summary, ClaimTab::Compare, ClaimTab::Macros, ClaimTab::Share]
                                     .into_iter()
                                     .map(|entry| {
                                         view! {
@@ -1879,6 +2119,229 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                     }
                                 }}
                                 {move || match tab.get() {
+                        ClaimTab::Territory => {
+                            view! {
+                                <div style="display: flex; flex-direction: column; gap: 12px;">
+                                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+                                        <div style="font-family: 'Silkscreen', monospace; color: #f5c542; font-size: 0.78rem;">"Territory Inspector"</div>
+                                        <div style="padding: 6px 8px; border-radius: 999px; border: 1px solid rgba(58,65,92,0.82); background: rgba(11,16,26,0.9); color: #cfd7ef; font-size: 0.68rem; letter-spacing: 0.08em;">
+                                            {move || if tool.get() == ClaimTool::View { "VIEW MODE" } else { "SWITCH TO VIEW" }}
+                                        </div>
+                                    </div>
+                                    {move || selected_territory_details.get().map(|(territory_name, effective, base, effective_owner, base_owner, resources_overridden)| {
+                                        let coords = format!(
+                                            "{}:{} -> {}:{}",
+                                            effective.location.start[0],
+                                            effective.location.start[1],
+                                            effective.location.end[0],
+                                            effective.location.end[1]
+                                        );
+                                        view! {
+                                            <div style="padding: 12px; border-radius: 12px; background: #121725; border: 1px solid #2c3146; display: flex; flex-direction: column; gap: 10px;">
+                                                <div style="display: flex; align-items: start; justify-content: space-between; gap: 10px;">
+                                                    <div>
+                                                        <div style="font-family: 'Silkscreen', monospace; color: #f4c94b; font-size: 0.88rem;">{territory_name.clone()}</div>
+                                                        <div style="margin-top: 4px; color: #8d97b3; font-size: 0.72rem;">{coords}</div>
+                                                    </div>
+                                                    <button
+                                                        style="padding: 7px 9px; border-radius: 8px; border: 1px solid #36405d; background: #171b28; color: #e6e3d9; cursor: pointer;"
+                                                        on:click=move |_| tool.set(ClaimTool::View)
+                                                    >
+                                                        "Focus View"
+                                                    </button>
+                                                </div>
+                                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                                                    <div style="padding: 10px; border-radius: 10px; background: rgba(16,20,31,0.92); border: 1px solid #2c3146;">
+                                                        <div style="color: #8d97b3; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.08em;">"Current Owner"</div>
+                                                        <div style="margin-top: 6px;">{effective_owner.display_name().to_string()}</div>
+                                                    </div>
+                                                    <div style="padding: 10px; border-radius: 10px; background: rgba(16,20,31,0.92); border: 1px solid #2c3146;">
+                                                        <div style="color: #8d97b3; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.08em;">"Base Owner"</div>
+                                                        <div style="margin-top: 6px;">{base_owner.display_name().to_string()}</div>
+                                                    </div>
+                                                </div>
+                                                <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                                                    <button
+                                                        style="padding: 9px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #171b28; color: #e6e3d9; cursor: pointer;"
+                                                        on:click=move |_| {
+                                                            apply_selected_owner_override(
+                                                                selected,
+                                                                live_territories,
+                                                                session,
+                                                                active_owner,
+                                                                active_owner.get_untracked(),
+                                                            );
+                                                        }
+                                                    >
+                                                        "Set To Active Guild"
+                                                    </button>
+                                                    <button
+                                                        style="padding: 9px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #171b28; color: #e6e3d9; cursor: pointer;"
+                                                        on:click=move |_| {
+                                                            apply_selected_owner_override(
+                                                                selected,
+                                                                live_territories,
+                                                                session,
+                                                                active_owner,
+                                                                ClaimOwner::Neutral,
+                                                            );
+                                                        }
+                                                    >
+                                                        "Set Neutral"
+                                                    </button>
+                                                    <button
+                                                        style="padding: 9px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #171b28; color: #e6e3d9; cursor: pointer;"
+                                                        on:click=move |_| {
+                                                            reset_selected_owner_override(
+                                                                selected,
+                                                                live_territories,
+                                                                session,
+                                                                active_owner,
+                                                            );
+                                                        }
+                                                    >
+                                                        "Reset Owner"
+                                                    </button>
+                                                </div>
+                                                <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 4px;">
+                                                    <div style="font-family: 'Silkscreen', monospace; color: #f5c542; font-size: 0.74rem;">"Resources"</div>
+                                                    <div style="color: #8d97b3; font-size: 0.7rem;">
+                                                        {if resources_overridden { "Custom resource stats" } else { "Using map defaults" }}
+                                                    </div>
+                                                </div>
+                                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                                                    <label style="display: grid; gap: 4px;">
+                                                        <span style="color: #8d97b3; font-size: 0.7rem;">"Emerald"</span>
+                                                        <input
+                                                            type="number"
+                                                            min="0"
+                                                            prop:value=effective.resources.emeralds.to_string()
+                                                            style="padding: 8px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #111521; color: #e6e3d9;"
+                                                            on:input=move |event| {
+                                                                let parsed = event_target_value(&event).trim().parse::<i32>().unwrap_or(0);
+                                                                apply_selected_resource_override(
+                                                                    selected,
+                                                                    live_territories,
+                                                                    session,
+                                                                    active_owner,
+                                                                    "emeralds",
+                                                                    parsed.max(0),
+                                                                );
+                                                            }
+                                                        />
+                                                    </label>
+                                                    <label style="display: grid; gap: 4px;">
+                                                        <span style="color: #8d97b3; font-size: 0.7rem;">"Ore"</span>
+                                                        <input
+                                                            type="number"
+                                                            min="0"
+                                                            prop:value=effective.resources.ore.to_string()
+                                                            style="padding: 8px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #111521; color: #e6e3d9;"
+                                                            on:input=move |event| {
+                                                                let parsed = event_target_value(&event).trim().parse::<i32>().unwrap_or(0);
+                                                                apply_selected_resource_override(
+                                                                    selected,
+                                                                    live_territories,
+                                                                    session,
+                                                                    active_owner,
+                                                                    "ore",
+                                                                    parsed.max(0),
+                                                                );
+                                                            }
+                                                        />
+                                                    </label>
+                                                    <label style="display: grid; gap: 4px;">
+                                                        <span style="color: #8d97b3; font-size: 0.7rem;">"Crops"</span>
+                                                        <input
+                                                            type="number"
+                                                            min="0"
+                                                            prop:value=effective.resources.crops.to_string()
+                                                            style="padding: 8px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #111521; color: #e6e3d9;"
+                                                            on:input=move |event| {
+                                                                let parsed = event_target_value(&event).trim().parse::<i32>().unwrap_or(0);
+                                                                apply_selected_resource_override(
+                                                                    selected,
+                                                                    live_territories,
+                                                                    session,
+                                                                    active_owner,
+                                                                    "crops",
+                                                                    parsed.max(0),
+                                                                );
+                                                            }
+                                                        />
+                                                    </label>
+                                                    <label style="display: grid; gap: 4px;">
+                                                        <span style="color: #8d97b3; font-size: 0.7rem;">"Fish"</span>
+                                                        <input
+                                                            type="number"
+                                                            min="0"
+                                                            prop:value=effective.resources.fish.to_string()
+                                                            style="padding: 8px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #111521; color: #e6e3d9;"
+                                                            on:input=move |event| {
+                                                                let parsed = event_target_value(&event).trim().parse::<i32>().unwrap_or(0);
+                                                                apply_selected_resource_override(
+                                                                    selected,
+                                                                    live_territories,
+                                                                    session,
+                                                                    active_owner,
+                                                                    "fish",
+                                                                    parsed.max(0),
+                                                                );
+                                                            }
+                                                        />
+                                                    </label>
+                                                    <label style="display: grid; gap: 4px; grid-column: 1 / -1;">
+                                                        <span style="color: #8d97b3; font-size: 0.7rem;">"Wood"</span>
+                                                        <input
+                                                            type="number"
+                                                            min="0"
+                                                            prop:value=effective.resources.wood.to_string()
+                                                            style="padding: 8px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #111521; color: #e6e3d9;"
+                                                            on:input=move |event| {
+                                                                let parsed = event_target_value(&event).trim().parse::<i32>().unwrap_or(0);
+                                                                apply_selected_resource_override(
+                                                                    selected,
+                                                                    live_territories,
+                                                                    session,
+                                                                    active_owner,
+                                                                    "wood",
+                                                                    parsed.max(0),
+                                                                );
+                                                            }
+                                                        />
+                                                    </label>
+                                                </div>
+                                                <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                                                    <button
+                                                        style="padding: 9px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #171b28; color: #e6e3d9; cursor: pointer;"
+                                                        on:click=move |_| {
+                                                            reset_selected_resource_override(
+                                                                selected,
+                                                                live_territories,
+                                                                session,
+                                                                active_owner,
+                                                            );
+                                                        }
+                                                    >
+                                                        "Reset Resources"
+                                                    </button>
+                                                    <div style="padding: 9px 10px; border-radius: 8px; border: 1px solid rgba(58,65,92,0.82); background: rgba(11,16,26,0.92); color: #cfd7ef; font-size: 0.72rem;">
+                                                        {format!("{} connections", base.connections.len())}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        }.into_any()
+                                    }).unwrap_or_else(|| view! {
+                                        <div style="padding: 14px; border-radius: 12px; background: #121725; border: 1px solid #2c3146; color: #9aa6c4; line-height: 1.7;">
+                                            "Use "
+                                            <span style="color: #f5c542; font-family: 'Silkscreen', monospace;">"View"</span>
+                                            " mode, then click a territory to inspect it and edit its resources."
+                                        </div>
+                                    }.into_any())}
+                                </div>
+                            }
+                            .into_any()
+                        }
                         ClaimTab::Summary => {
                             view! {
                                 <div style="display: flex; flex-direction: column; gap: 10px;">

@@ -53,6 +53,7 @@ const PINCH_ZOOM_CLAMP: f64 = 420.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ClaimTool {
+    View,
     Paint,
     EraseToNeutral,
     Select,
@@ -62,6 +63,7 @@ pub enum ClaimTool {
 impl ClaimTool {
     pub(crate) fn label(self) -> &'static str {
         match self {
+            ClaimTool::View => "View",
             ClaimTool::Paint => "Paint",
             ClaimTool::EraseToNeutral => "Erase",
             ClaimTool::Select => "Select",
@@ -70,7 +72,7 @@ impl ClaimTool {
     }
 
     pub(crate) fn uses_canvas_edits(self) -> bool {
-        true
+        !matches!(self, ClaimTool::View)
     }
 
     pub(crate) fn starts_stroke_on_hit(self) -> bool {

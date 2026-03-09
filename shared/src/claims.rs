@@ -83,6 +83,19 @@ pub struct ClaimMacro {
     pub territories: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ClaimTerritoryStateOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<Resources>,
+}
+
+impl ClaimTerritoryStateOverride {
+    pub fn is_empty(&self) -> bool {
+        self.resources.is_none()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ClaimViewState {
@@ -112,6 +125,8 @@ pub struct ClaimDocumentV1 {
     pub base: ClaimDocumentBase,
     #[serde(default)]
     pub overrides: HashMap<String, ClaimOwner>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub territory_state_overrides: HashMap<String, ClaimTerritoryStateOverride>,
     #[serde(default)]
     pub macros: Vec<ClaimMacro>,
     #[serde(default)]
@@ -125,6 +140,7 @@ impl Default for ClaimDocumentV1 {
             title: None,
             base: ClaimDocumentBase::Blank,
             overrides: HashMap::new(),
+            territory_state_overrides: HashMap::new(),
             macros: Vec::new(),
             view: ClaimViewState::default(),
         }
@@ -150,6 +166,7 @@ impl ClaimDocumentV1 {
                 owners,
             },
             overrides: HashMap::new(),
+            territory_state_overrides: HashMap::new(),
             macros: Vec::new(),
             view: ClaimViewState::default(),
         }
@@ -256,6 +273,10 @@ pub fn validate_claim_document<'a>(
     }
 
     for territory in document.overrides.keys() {
+        ensure_known(territory)?;
+    }
+
+    for territory in document.territory_state_overrides.keys() {
         ensure_known(territory)?;
     }
 
