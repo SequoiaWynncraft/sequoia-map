@@ -1133,6 +1133,9 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
     let is_mobile: RwSignal<bool> =
         RwSignal::new(canvas_dimensions().0 < crate::app::MOBILE_BREAKPOINT);
     let tile_fetch_scheduled: RwSignal<bool> = RwSignal::new(false);
+    let resource_highlight: RwSignal<bool> = RwSignal::new(true);
+    let show_resource_icons: RwSignal<bool> = RwSignal::new(true);
+    let show_territory_ornaments: RwSignal<bool> = RwSignal::new(true);
 
     let current_mode: RwSignal<MapMode> = RwSignal::new(MapMode::Live);
     let connection: RwSignal<ConnectionStatus> = RwSignal::new(ConnectionStatus::Connecting);
@@ -1177,9 +1180,9 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
     provide_context(BoldConnections(RwSignal::new(true)));
     provide_context(ConnectionOpacityScale(RwSignal::new(1.1)));
     provide_context(ConnectionThicknessScale(RwSignal::new(1.25)));
-    provide_context(ResourceHighlight(RwSignal::new(true)));
-    provide_context(crate::app::ShowResourceIcons(RwSignal::new(true)));
-    provide_context(ShowTerritoryOrnaments(RwSignal::new(true)));
+    provide_context(ResourceHighlight(resource_highlight));
+    provide_context(crate::app::ShowResourceIcons(show_resource_icons));
+    provide_context(ShowTerritoryOrnaments(show_territory_ornaments));
     provide_context(ReadableFont(RwSignal::new(false)));
     provide_context(NameColorSetting(RwSignal::new(NameColor::Guild)));
     provide_context(TagColorSetting(RwSignal::new(NameColor::Guild)));
@@ -1543,6 +1546,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
     };
 
     let clear_selection = move |_| {
+        selected.set(None);
         session.update(|session_state| {
             if let Some(session_state) = session_state.as_mut() {
                 session_state.selection.clear();
@@ -1566,6 +1570,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
             session_state.follow_live = previous.follow_live;
             session_state.selection = previous.selection;
             active_owner.set(previous.active_owner);
+            selected.set(session_state.selection.last().cloned());
             session_state.dirty = true;
         });
     };
@@ -1586,6 +1591,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
             session_state.follow_live = next.follow_live;
             session_state.selection = next.selection;
             active_owner.set(next.active_owner);
+            selected.set(session_state.selection.last().cloned());
             session_state.dirty = true;
         });
     };
@@ -1671,10 +1677,9 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                 style="display: none;"
                 on:change=on_file_change
             />
+            <MapCanvas />
             {move || {
-                if editor_canvas_ready.get() {
-                    view! { <MapCanvas /> }.into_any()
-                } else {
+                if !editor_canvas_ready.get() {
                     view! {
                         <div style="position: absolute; inset: 0; background:
                             radial-gradient(circle at 50% 28%, rgba(245,197,66,0.06), transparent 18%),
@@ -1686,8 +1691,43 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                             </div>
                         </div>
                     }
-                        .into_any()
+                    .into_any()
+                } else {
+                    ().into_any()
                 }
+            }}
+            {move || {
+                let Some(session_state) = session.get() else {
+                    return ().into_any();
+                };
+                let vp = viewport.get();
+                let territories = effective_territories.get();
+                session_state
+                    .selection
+                    .iter()
+                    .filter_map(|territory_name| {
+                        let territory = territories.get(territory_name)?;
+                        let region = &territory.territory.location;
+                        let left = region.left() as f64;
+                        let right = region.right() as f64;
+                        let top = region.top() as f64;
+                        let bottom = region.bottom() as f64;
+                        let (sx1, sy1) = vp.world_to_screen(left, top);
+                        let (sx2, sy2) = vp.world_to_screen(right, bottom);
+                        let left_px = sx1.min(sx2);
+                        let top_px = sy1.min(sy2);
+                        let width_px = (sx2 - sx1).abs().max(1.0);
+                        let height_px = (sy2 - sy1).abs().max(1.0);
+                        Some(view! {
+                            <div
+                                style=format!(
+                                    "position: absolute; left: {left_px}px; top: {top_px}px; width: {width_px}px; height: {height_px}px; z-index: 9; pointer-events: none; border: 1px solid rgba(245,197,66,0.95); box-shadow: 0 0 0 1px rgba(12,14,23,0.55) inset, 0 0 18px rgba(245,197,66,0.14); background: rgba(245,197,66,0.08);"
+                                )
+                            ></div>
+                        })
+                    })
+                    .collect_view()
+                    .into_any()
             }}
             {move || {
                 if live_bootstrap_pending.get() {
@@ -1786,6 +1826,25 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                     {move || if session.get().is_some_and(|session| session.follow_live) { "Live Follow" } else { "Frozen" }}
                                 </button>
                                 <button style="padding: 8px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #171b28; color: #e6e3d9; cursor: pointer;" on:click=freeze_now>"Freeze Now"</button>
+                                <button
+                                    style:background=move || if resource_highlight.get() { "#f5c542" } else { "#171b28" }
+                                    style:color=move || if resource_highlight.get() { "#161821" } else { "#e6e3d9" }
+                                    style="padding: 8px 10px; border-radius: 8px; border: 1px solid #3a415c; cursor: pointer;"
+                                    on:click=move |_| resource_highlight.update(|value| *value = !*value)
+                                >
+                                    "Resources"
+                                </button>
+                                <button
+                                    style:background=move || if show_resource_icons.get() { "#f5c542" } else { "#171b28" }
+                                    style:color=move || if show_resource_icons.get() { "#161821" } else { "#e6e3d9" }
+                                    style="padding: 8px 10px; border-radius: 8px; border: 1px solid #3a415c; cursor: pointer;"
+                                    on:click=move |_| show_resource_icons.update(|value| *value = !*value)
+                                >
+                                    "Icons"
+                                </button>
+                                <div style="display: inline-flex; align-items: center; justify-content: center; min-width: 92px; padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(58,65,92,0.88); background: rgba(11,16,26,0.92); color: #cfd7ef; font-family: 'JetBrains Mono', monospace; font-size: 0.72rem;">
+                                    {move || format!("Selected {}", session.get().map(|state| state.selection.len()).unwrap_or(0))}
+                                </div>
                             </div>
                         </div>
 
