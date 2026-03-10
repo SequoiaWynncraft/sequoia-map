@@ -132,11 +132,16 @@ async fn set_static_cache_control(request: Request, next: Next) -> Response {
 }
 
 fn cache_control_for_path(path: &str) -> Option<&'static str> {
-    if is_hashed_bundle_asset(path) {
+    let normalized_path = path.strip_prefix("/claims-app").unwrap_or(path);
+
+    if is_hashed_bundle_asset(normalized_path) {
         return Some("public, max-age=31536000, immutable");
     }
 
-    if path.starts_with("/tiles/") || path.starts_with("/fonts/") || path.starts_with("/icons/") {
+    if normalized_path.starts_with("/tiles/")
+        || normalized_path.starts_with("/fonts/")
+        || normalized_path.starts_with("/icons/")
+    {
         return Some("public, max-age=86400");
     }
 
@@ -245,6 +250,14 @@ mod tests {
         );
         assert_eq!(
             cache_control_for_path("/fonts/minecraft-regular.otf"),
+            Some("public, max-age=86400")
+        );
+        assert_eq!(
+            cache_control_for_path("/claims-app/icons/crown_icon.png"),
+            Some("public, max-age=86400")
+        );
+        assert_eq!(
+            cache_control_for_path("/claims-app/tiles/tile_0_0.webp"),
             Some("public, max-age=86400")
         );
     }

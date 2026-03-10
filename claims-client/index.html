@@ -5,44 +5,41 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <title>Sequoia Claims Editor</title>
     <link data-trunk rel="css" href="input.css" />
-    <link rel="preload" href="/fonts/minecraft-regular.otf" as="font" type="font/otf" crossorigin />
+    <link data-trunk rel="copy-dir" href="public/tiles" />
+    <link data-trunk rel="copy-dir" href="public/icons" />
+    <link data-trunk rel="copy-dir" href="public/fonts" />
+    <script>
+      (function () {
+        const stylesheet = document.querySelector('link[rel="stylesheet"]');
+        const href = stylesheet && stylesheet.href ? stylesheet.href : "";
+        const pathname = href ? new URL(href, window.location.href).pathname : "";
+        const assetBase = pathname
+          ? pathname.replace(/\/[^/]*$/, "").replace(/\/$/, "")
+          : "";
+        const fontUrl = (filename) => `${assetBase}/fonts/${filename}`;
+
+        window.__SEQUOIA_ASSET_BASE__ = assetBase;
+
+        const preload = document.createElement("link");
+        preload.rel = "preload";
+        preload.href = fontUrl("minecraft-regular.otf");
+        preload.as = "font";
+        preload.type = "font/otf";
+        preload.crossOrigin = "";
+        document.head.appendChild(preload);
+
+        const fontStyle = document.createElement("style");
+        fontStyle.textContent = [
+          '@font-face { font-family: "Silkscreen"; src: url("' + fontUrl("minecraft-regular.otf") + '") format("opentype"); font-style: normal; font-weight: 400; font-display: swap; }',
+          '@font-face { font-family: "Silkscreen"; src: url("' + fontUrl("minecraft-italic.otf") + '") format("opentype"); font-style: italic; font-weight: 400; font-display: swap; }',
+          '@font-face { font-family: "Silkscreen"; src: url("' + fontUrl("minecraft-bold.otf") + '") format("opentype"); font-style: normal; font-weight: 700; font-display: swap; }',
+          '@font-face { font-family: "Silkscreen"; src: url("' + fontUrl("minecraft-bold-italic.otf") + '") format("opentype"); font-style: italic; font-weight: 700; font-display: swap; }',
+          '@font-face { font-family: "SilkscreenLocal"; src: local("Minecraft"), url("' + fontUrl("minecraft-regular.otf") + '") format("opentype"); font-style: normal; font-weight: 400; font-display: swap; }',
+        ].join("\n");
+        document.head.appendChild(fontStyle);
+      })();
+    </script>
     <style>
-      @font-face {
-        font-family: "Silkscreen";
-        src: url("/fonts/minecraft-regular.otf") format("opentype");
-        font-style: normal;
-        font-weight: 400;
-        font-display: swap;
-      }
-      @font-face {
-        font-family: "Silkscreen";
-        src: url("/fonts/minecraft-italic.otf") format("opentype");
-        font-style: italic;
-        font-weight: 400;
-        font-display: swap;
-      }
-      @font-face {
-        font-family: "Silkscreen";
-        src: url("/fonts/minecraft-bold.otf") format("opentype");
-        font-style: normal;
-        font-weight: 700;
-        font-display: swap;
-      }
-      @font-face {
-        font-family: "Silkscreen";
-        src: url("/fonts/minecraft-bold-italic.otf") format("opentype");
-        font-style: italic;
-        font-weight: 700;
-        font-display: swap;
-      }
-      @font-face {
-        font-family: "SilkscreenLocal";
-        src: local("Minecraft"),
-             url("/fonts/minecraft-regular.otf") format("opentype");
-        font-style: normal;
-        font-weight: 400;
-        font-display: swap;
-      }
       html, body, #app { width: 100%; height: 100%; margin: 0; }
       body {
         background: #0c0e17;

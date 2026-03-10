@@ -117,6 +117,14 @@ pub(crate) struct ConnectionOpacityScale(pub RwSignal<f64>);
 #[derive(Clone, Copy)]
 pub(crate) struct ConnectionThicknessScale(pub RwSignal<f64>);
 #[derive(Clone, Copy)]
+pub(crate) struct ConnectionZoomFadeStart(pub RwSignal<f64>);
+#[derive(Clone, Copy)]
+pub(crate) struct ConnectionZoomFadeEnd(pub RwSignal<f64>);
+#[derive(Clone, Copy)]
+pub(crate) struct SuppressCooldownVisuals(pub RwSignal<bool>);
+#[derive(Clone, Copy)]
+pub(crate) struct FillAlphaBoost(pub RwSignal<f64>);
+#[derive(Clone, Copy)]
 pub(crate) struct ResourceHighlight(pub RwSignal<bool>);
 #[derive(Clone, Copy)]
 pub(crate) struct ShowResourceIcons(pub RwSignal<bool>);
@@ -834,6 +842,10 @@ pub fn MapPage() -> impl IntoView {
     provide_context(BoldConnections(bold_connections));
     provide_context(ConnectionOpacityScale(connection_opacity_scale));
     provide_context(ConnectionThicknessScale(connection_thickness_scale));
+    provide_context(ConnectionZoomFadeStart(RwSignal::new(0.15)));
+    provide_context(ConnectionZoomFadeEnd(RwSignal::new(0.45)));
+    provide_context(SuppressCooldownVisuals(RwSignal::new(false)));
+    provide_context(FillAlphaBoost(RwSignal::new(0.0)));
     provide_context(ResourceHighlight(resource_highlight));
     provide_context(ShowResourceIcons(show_resource_icons));
     provide_context(ShowTerritoryOrnaments(show_territory_ornaments));

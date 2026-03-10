@@ -116,8 +116,9 @@ html {
 
 .sidebar-tab-bar {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
-  padding: 12px;
+  padding: 10px 8px;
   border-bottom: 1px solid #2c3146;
   background: rgba(14, 16, 24, 0.9);
 }

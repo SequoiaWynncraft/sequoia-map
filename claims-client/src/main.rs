@@ -1,6 +1,8 @@
 #[path = "../../client/src/animation.rs"]
 mod animation;
 mod app;
+#[path = "../../client/src/assets.rs"]
+mod assets;
 #[path = "../../client/src/canvas.rs"]
 mod canvas;
 #[path = "../../client/src/claim_labels.rs"]
@@ -59,6 +61,10 @@ mod gpu {
         pub bold_connections: bool,
         pub connection_opacity_scale: f32,
         pub connection_thickness_scale: f32,
+        pub connection_zoom_fade_start: f32,
+        pub connection_zoom_fade_end: f32,
+        pub suppress_cooldown_visuals: bool,
+        pub fill_alpha_boost: f32,
         pub use_readable_font: bool,
         pub dynamic_show_countdown: bool,
         pub dynamic_show_granular_map_time: bool,

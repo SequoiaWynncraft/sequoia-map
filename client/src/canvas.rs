@@ -9,12 +9,13 @@ use web_sys::{HtmlCanvasElement, MouseEvent, PointerEvent, WheelEvent};
 
 use crate::app::{
     AbbreviateNames, BoldConnections, ConnectionOpacityScale, ConnectionThicknessScale,
-    CurrentMode, DetailReturnGuild, HeatEntriesByTerritory, HeatMaxTakeCount, HeatModeEnabled,
-    HeatWindowLabel, HistoryTimestamp, Hovered, IsMobile, LabelScaleDynamic, LabelScaleIcons,
-    LabelScaleMaster, LabelScaleStatic, LabelScaleStaticName, MapMode, NameColorSetting,
-    PeekTerritory, ReadableFont, ResourceHighlight, Selected, ShowCompoundMapTime, ShowCountdown,
-    ShowGranularMapTime, ShowMinimap, ShowNames, ShowResourceIcons, ShowSettings,
-    ShowTerritoryOrnaments, SidebarOpen, SidebarTransient, TagColorSetting, ThickCooldownBorders,
+    ConnectionZoomFadeEnd, ConnectionZoomFadeStart, CurrentMode, DetailReturnGuild, FillAlphaBoost,
+    HeatEntriesByTerritory, HeatMaxTakeCount, HeatModeEnabled, HeatWindowLabel, HistoryTimestamp,
+    Hovered, IsMobile, LabelScaleDynamic, LabelScaleIcons, LabelScaleMaster, LabelScaleStatic,
+    LabelScaleStaticName, MapMode, NameColorSetting, PeekTerritory, ReadableFont,
+    ResourceHighlight, Selected, ShowCompoundMapTime, ShowCountdown, ShowGranularMapTime,
+    ShowMinimap, ShowNames, ShowResourceIcons, ShowSettings, ShowTerritoryOrnaments, SidebarOpen,
+    SidebarTransient, SuppressCooldownVisuals, TagColorSetting, ThickCooldownBorders,
 };
 use crate::gpu::{GpuRenderer, RenderFrameInput};
 use crate::icons::{self, ResourceAtlas};
@@ -71,6 +72,22 @@ impl ClaimTool {
         }
     }
 
+    pub(crate) fn tooltip(self) -> &'static str {
+        match self {
+            ClaimTool::View => "View mode \u{2014} click territories to inspect them",
+            ClaimTool::Paint => {
+                "Paint mode \u{2014} click territories to claim them for the active guild"
+            }
+            ClaimTool::EraseToNeutral => {
+                "Erase mode \u{2014} click territories to reset them to neutral"
+            }
+            ClaimTool::Select => {
+                "Select mode \u{2014} drag to select, shift-click to toggle individual territories"
+            }
+            ClaimTool::Eyedropper => "Eyedropper \u{2014} click a territory to copy its guild",
+        }
+    }
+
     pub(crate) fn uses_canvas_edits(self) -> bool {
         !matches!(self, ClaimTool::View)
     }
@@ -91,8 +108,8 @@ impl ClaimTool {
 #[derive(Clone)]
 pub struct ClaimCanvasController {
     pub tool: RwSignal<ClaimTool>,
-    pub handle_hit: Arc<dyn Fn(String) + Send + Sync>,
-    pub handle_box_select: Arc<dyn Fn(Vec<String>) + Send + Sync>,
+    pub handle_hit: Arc<dyn Fn(String, bool) + Send + Sync>,
+    pub handle_box_select: Arc<dyn Fn(Vec<String>, bool) + Send + Sync>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -366,6 +383,10 @@ pub fn MapCanvas() -> impl IntoView {
     let BoldConnections(bold_connections) = expect_context();
     let ConnectionOpacityScale(connection_opacity_scale) = expect_context();
     let ConnectionThicknessScale(connection_thickness_scale) = expect_context();
+    let ConnectionZoomFadeStart(connection_zoom_fade_start) = expect_context();
+    let ConnectionZoomFadeEnd(connection_zoom_fade_end) = expect_context();
+    let SuppressCooldownVisuals(suppress_cooldown_visuals) = expect_context();
+    let FillAlphaBoost(fill_alpha_boost) = expect_context();
     let ResourceHighlight(resource_highlight) = expect_context();
     let ShowResourceIcons(show_resource_icons) = expect_context();
     let ShowTerritoryOrnaments(show_territory_ornaments) = expect_context();
@@ -490,6 +511,10 @@ pub fn MapCanvas() -> impl IntoView {
             renderer.bold_connections = bold_connections.get_untracked();
             renderer.connection_opacity_scale = connection_opacity_scale.get_untracked() as f32;
             renderer.connection_thickness_scale = connection_thickness_scale.get_untracked() as f32;
+            renderer.connection_zoom_fade_start = connection_zoom_fade_start.get_untracked() as f32;
+            renderer.connection_zoom_fade_end = connection_zoom_fade_end.get_untracked() as f32;
+            renderer.suppress_cooldown_visuals = suppress_cooldown_visuals.get_untracked();
+            renderer.fill_alpha_boost = fill_alpha_boost.get_untracked() as f32;
             let new_readable = readable_font.get_untracked();
             if renderer.use_readable_font != new_readable {
                 renderer.use_readable_font = new_readable;
@@ -676,6 +701,10 @@ pub fn MapCanvas() -> impl IntoView {
             bold_connections.track();
             connection_opacity_scale.track();
             connection_thickness_scale.track();
+            connection_zoom_fade_start.track();
+            connection_zoom_fade_end.track();
+            suppress_cooldown_visuals.track();
+            fill_alpha_boost.track();
             readable_font.track();
             name_color.track();
             tag_color.track();
@@ -890,7 +919,7 @@ pub fn MapCanvas() -> impl IntoView {
                 if tool.applies_single_hit() {
                     if let Some(hit) = hit {
                         *claim_last_hit.borrow_mut() = Some(hit.clone());
-                        (controller.handle_hit)(hit);
+                        (controller.handle_hit)(hit, event.shift_key());
                         interaction_deadline.set(js_sys::Date::now() + INTERACTION_SETTLE_MS);
                         scheduler.mark_dirty();
                         return;
@@ -902,7 +931,7 @@ pub fn MapCanvas() -> impl IntoView {
                     claim_drag_pointer_id.set(Some(pointer_id));
                     claim_dragging.set(true);
                     *claim_last_hit.borrow_mut() = Some(hit.clone());
-                    (controller.handle_hit)(hit);
+                    (controller.handle_hit)(hit, false);
                     interaction_deadline.set(js_sys::Date::now() + INTERACTION_SETTLE_MS);
                     if let Some(canvas) = event
                         .target()
@@ -1001,7 +1030,7 @@ pub fn MapCanvas() -> impl IntoView {
                     if hit != *claim_last_hit.borrow() {
                         *claim_last_hit.borrow_mut() = hit.clone();
                         if let Some(hit) = hit {
-                            (controller.handle_hit)(hit);
+                            (controller.handle_hit)(hit, false);
                         }
                     }
                 }
@@ -1107,9 +1136,9 @@ pub fn MapCanvas() -> impl IntoView {
                         let hit = spatial_grid.borrow().find_at(wx, wy);
                         selected.set(hit.clone());
                         if let Some(hit) = hit {
-                            (controller.handle_hit)(hit);
+                            (controller.handle_hit)(hit, event.shift_key());
                         } else {
-                            (controller.handle_box_select)(Vec::new());
+                            (controller.handle_box_select)(Vec::new(), false);
                         }
                     } else {
                         let vp = viewport.get_untracked();
@@ -1137,7 +1166,7 @@ pub fn MapCanvas() -> impl IntoView {
                         });
                         hits.sort();
                         selected.set(hits.last().cloned());
-                        (controller.handle_box_select)(hits);
+                        (controller.handle_box_select)(hits, event.shift_key());
                     }
                 }
             }

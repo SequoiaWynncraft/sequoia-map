@@ -19,14 +19,15 @@ use sequoia_shared::{
 
 use crate::app::{
     AbbreviateNames, BoldConnections, ConnectionOpacityScale, ConnectionThicknessScale,
-    CurrentMode, DetailReturnGuild, HeatEntriesByTerritory, HeatMaxTakeCount, HeatModeEnabled,
-    HeatWindowLabel, HistoryBufferModeActive, HistoryBufferSizeMax, HistoryBufferedUpdates,
-    HistoryFetchNonce, HistoryTimestamp, Hovered, IsMobile, LabelScaleDynamic, LabelScaleIcons,
-    LabelScaleMaster, LabelScaleStatic, LabelScaleStaticName, LastLiveSeq, LiveResyncInFlight,
-    MapMode, NameColor, NameColorSetting, NeedsLiveResync, PeekTerritory, ReadableFont,
-    ResourceHighlight, Selected, ShowCompoundMapTime, ShowCountdown, ShowGranularMapTime,
-    ShowMinimap, ShowNames, ShowSettings, ShowTerritoryOrnaments, SidebarOpen, SidebarTransient,
-    SseSeqGapDetectedCount, TagColorSetting, ThickCooldownBorders, canvas_dimensions,
+    ConnectionZoomFadeEnd, ConnectionZoomFadeStart, CurrentMode, DetailReturnGuild, FillAlphaBoost,
+    HeatEntriesByTerritory, HeatMaxTakeCount, HeatModeEnabled, HeatWindowLabel,
+    HistoryBufferModeActive, HistoryBufferSizeMax, HistoryBufferedUpdates, HistoryFetchNonce,
+    HistoryTimestamp, Hovered, IsMobile, LabelScaleDynamic, LabelScaleIcons, LabelScaleMaster,
+    LabelScaleStatic, LabelScaleStaticName, LastLiveSeq, LiveResyncInFlight, MapMode, NameColor,
+    NameColorSetting, NeedsLiveResync, PeekTerritory, ReadableFont, ResourceHighlight, Selected,
+    ShowCompoundMapTime, ShowCountdown, ShowGranularMapTime, ShowMinimap, ShowNames, ShowSettings,
+    ShowTerritoryOrnaments, SidebarOpen, SidebarTransient, SseSeqGapDetectedCount,
+    SuppressCooldownVisuals, TagColorSetting, ThickCooldownBorders, canvas_dimensions,
 };
 use crate::canvas::{ClaimCanvasController, ClaimTool, MapCanvas};
 use crate::history;
@@ -422,6 +423,13 @@ fn set_effective_resources(
     }
     session.dirty = true;
     true
+}
+
+fn selection_focus(selection: &[String], preferred: Option<&str>) -> Option<String> {
+    preferred
+        .filter(|territory| selection.iter().any(|name| name == territory))
+        .map(ToOwned::to_owned)
+        .or_else(|| selection.last().cloned())
 }
 
 fn apply_selected_owner_override(
@@ -1289,6 +1297,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
         undo_stack: Vec::new(),
         redo_stack: Vec::new(),
     };
+    let initial_selected = selection_focus(&initial_session.selection, None);
 
     let live_territories: RwSignal<ClientTerritoryMap> =
         RwSignal::new(initial_live_territories.clone());
@@ -1321,7 +1330,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
         scale: initial_document.view.scale.max(0.05),
     });
     let hovered: RwSignal<Option<String>> = RwSignal::new(None);
-    let selected: RwSignal<Option<String>> = RwSignal::new(None);
+    let selected: RwSignal<Option<String>> = RwSignal::new(initial_selected);
     let peek_territory: RwSignal<Option<String>> = RwSignal::new(None);
     let mouse_pos: RwSignal<(f64, f64)> = RwSignal::new((0.0, 0.0));
     let loaded_tiles: RwSignal<Vec<LoadedTile>> = RwSignal::new(Vec::new());
@@ -1330,8 +1339,8 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
     let is_mobile: RwSignal<bool> =
         RwSignal::new(canvas_dimensions().0 < crate::app::MOBILE_BREAKPOINT);
     let tile_fetch_scheduled: RwSignal<bool> = RwSignal::new(false);
-    let resource_highlight: RwSignal<bool> = RwSignal::new(true);
-    let show_resource_icons: RwSignal<bool> = RwSignal::new(true);
+    let resource_highlight: RwSignal<bool> = RwSignal::new(false);
+    let show_resource_icons: RwSignal<bool> = RwSignal::new(false);
     let show_territory_ornaments: RwSignal<bool> = RwSignal::new(true);
 
     let current_mode: RwSignal<MapMode> = RwSignal::new(MapMode::Live);
@@ -1371,12 +1380,16 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
     provide_context(AbbreviateNames(RwSignal::new(true)));
     provide_context(ShowCountdown(RwSignal::new(false)));
     provide_context(ShowGranularMapTime(RwSignal::new(false)));
-    provide_context(ShowCompoundMapTime(RwSignal::new(true)));
+    provide_context(ShowCompoundMapTime(RwSignal::new(false)));
     provide_context(ShowNames(RwSignal::new(false)));
-    provide_context(ThickCooldownBorders(RwSignal::new(true)));
+    provide_context(ThickCooldownBorders(RwSignal::new(false)));
     provide_context(BoldConnections(RwSignal::new(true)));
-    provide_context(ConnectionOpacityScale(RwSignal::new(1.1)));
-    provide_context(ConnectionThicknessScale(RwSignal::new(1.25)));
+    provide_context(ConnectionOpacityScale(RwSignal::new(0.35)));
+    provide_context(ConnectionThicknessScale(RwSignal::new(0.7)));
+    provide_context(ConnectionZoomFadeStart(RwSignal::new(0.10)));
+    provide_context(ConnectionZoomFadeEnd(RwSignal::new(0.30)));
+    provide_context(SuppressCooldownVisuals(RwSignal::new(true)));
+    provide_context(FillAlphaBoost(RwSignal::new(0.12)));
     provide_context(ResourceHighlight(resource_highlight));
     provide_context(crate::app::ShowResourceIcons(show_resource_icons));
     provide_context(ShowTerritoryOrnaments(show_territory_ornaments));
@@ -1406,8 +1419,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
     provide_context(SseSeqGapDetectedCount(sse_seq_gap_detected_count));
 
     let apply_hit = Arc::new({
-        move |territory_name: String| {
-            selected.set(Some(territory_name.clone()));
+        move |territory_name: String, shift_held: bool| {
             let live_owners = current_live_owner_map(&live_territories.get_untracked());
             let current_active_owner = active_owner.get_untracked();
             session.update(|session_state| {
@@ -1439,11 +1451,24 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                         }
                     }
                     ClaimTool::Select => {
-                        let next_selection = vec![territory_name.clone()];
-                        if session_state.selection != next_selection {
-                            session_state.selection = next_selection;
-                            session_state.dirty = true;
+                        if shift_held {
+                            if let Some(pos) = session_state
+                                .selection
+                                .iter()
+                                .position(|n| n == &territory_name)
+                            {
+                                session_state.selection.remove(pos);
+                            } else {
+                                session_state.selection.push(territory_name.clone());
+                            }
+                        } else {
+                            session_state.selection = vec![territory_name.clone()];
                         }
+                        selected.set(selection_focus(
+                            &session_state.selection,
+                            Some(&territory_name),
+                        ));
+                        session_state.dirty = true;
                     }
                     ClaimTool::Eyedropper => {
                         active_owner.set(effective_owner_for_session(
@@ -1454,18 +1479,34 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                     }
                 }
             });
+            if tool.get_untracked() != ClaimTool::Select {
+                selected.set(Some(territory_name));
+            }
         }
     });
     let apply_box_select = Arc::new({
-        move |territory_names: Vec<String>| {
-            let next_selection = territory_names;
-            selected.set(next_selection.last().cloned());
+        move |territory_names: Vec<String>, shift_held: bool| {
             session.update(|session_state| {
                 let Some(session_state) = session_state.as_mut() else {
                     return;
                 };
+                let next_selection = if shift_held {
+                    let mut merged = session_state.selection.clone();
+                    for name in &territory_names {
+                        if !merged.contains(name) {
+                            merged.push(name.clone());
+                        }
+                    }
+                    merged
+                } else {
+                    territory_names.clone()
+                };
+                selected.set(selection_focus(
+                    &next_selection,
+                    territory_names.last().map(String::as_str),
+                ));
                 if session_state.selection != next_selection {
-                    session_state.selection = next_selection.clone();
+                    session_state.selection = next_selection;
                     session_state.dirty = true;
                 }
             });
@@ -1529,14 +1570,21 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
         ))
     });
 
-    Effect::new(move || {
-        if tool.get() == ClaimTool::View
-            && selected.get().is_some()
-            && tab.get() != ClaimTab::Territory
-        {
-            tab.set(ClaimTab::Territory);
-        }
-    });
+    // Auto-switch to Territory tab only when a new territory is selected in View mode,
+    // not on every tab change (which would lock users out of other tabs).
+    {
+        let prev_selected: StoredValue<Option<String>> = StoredValue::new(None);
+        Effect::new(move || {
+            let sel = selected.get();
+            let prev = prev_selected.get_value();
+            if sel != prev {
+                prev_selected.set_value(sel.clone());
+                if sel.is_some() && tool.get() == ClaimTool::View {
+                    tab.set(ClaimTab::Territory);
+                }
+            }
+        });
+    }
 
     Effect::new(move || {
         let session_value = session.get();
@@ -2000,6 +2048,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                                     class="btn"
                                                     class:active=move || tool.get() == entry
                                                     style="font-family: 'Silkscreen', monospace;"
+                                                    title=entry.tooltip()
                                                     on:click=move |_| tool.set(entry)
                                                 >
                                                     {entry.label()}
@@ -2008,12 +2057,14 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                         })
                                         .collect_view()}
                                     <div class="pill-divider"></div>
-                                    <button class="btn" on:click=undo>"Undo"</button>
-                                    <button class="btn" on:click=redo>"Redo"</button>
+                                    <button class="btn" title="Undo last action" on:click=undo>"Undo"</button>
+                                    <button class="btn" title="Redo" on:click=redo>"Redo"</button>
                                 </div>
 
                                 <div class="pill-group" style="align-items: center; gap: 8px; padding: 10px 12px;">
-                                    <button class="btn btn-neutral" on:click=move |_| active_owner.set(neutral_owner())>"Neutral"</button>
+                                    <button class="btn btn-neutral" title="Set active guild to neutral (unclaimed)" on:click=move |_| active_owner.set(neutral_owner())>
+                                        "Neutral"
+                                    </button>
                                     <input
                                         class="input"
                                         prop:value=move || guild_query.get()
@@ -2066,6 +2117,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                     <button
                                         class="btn"
                                         class:active=move || session.get().is_some_and(|session| session.follow_live)
+                                        title="Toggle live territory sync"
                                         on:click=move |_| {
                                             session.update(|state| {
                                                 if let Some(state) = state.as_mut() {
@@ -2080,16 +2132,10 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                     <button
                                         class="btn"
                                         class:active=move || resource_highlight.get()
+                                        title="Toggle resource highlight overlay"
                                         on:click=move |_| resource_highlight.update(|value| *value = !*value)
                                     >
                                         "Resources"
-                                    </button>
-                                    <button
-                                        class="btn"
-                                        class:active=move || show_resource_icons.get()
-                                        on:click=move |_| show_resource_icons.update(|value| *value = !*value)
-                                    >
-                                        "Icons"
                                     </button>
                                 </div>
                                 <div class="badge">
@@ -2133,18 +2179,13 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                 <div style="display: flex; flex-direction: column; gap: 12px;">
                                     <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
                                         <div class="section-label">"Territory Inspector"</div>
-                                        <div style="display: flex; align-items: center; gap: 8px;">
-                                            {move || {
-                                                if session.get().is_some_and(|s| s.follow_live) {
-                                                    view! { <button class="btn btn-sm" on:click=freeze_now>"Freeze Now"</button> }.into_any()
-                                                } else {
-                                                    ().into_any()
-                                                }
-                                            }}
-                                            <div style="padding: 6px 8px; border-radius: 999px; border: 1px solid rgba(58,65,92,0.82); background: rgba(11,16,26,0.9); color: #cfd7ef; font-size: 0.68rem; letter-spacing: 0.08em;">
-                                                {move || if tool.get() == ClaimTool::View { "VIEW MODE" } else { "SWITCH TO VIEW" }}
-                                            </div>
-                                        </div>
+                                        {move || {
+                                            if session.get().is_some_and(|s| s.follow_live) {
+                                                view! { <button class="btn btn-sm" on:click=freeze_now>"Freeze Now"</button> }.into_any()
+                                            } else {
+                                                ().into_any()
+                                            }
+                                        }}
                                     </div>
                                     {move || selected_territory_details.get().map(|(territory_name, effective, base, effective_owner, base_owner, resources_overridden)| {
                                         let coords = format!(
@@ -2295,9 +2336,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                         }.into_any()
                                     }).unwrap_or_else(|| view! {
                                         <div class="card" style="color: #9aa6c4; line-height: 1.7;">
-                                            "Use "
-                                            <span style="color: #f5c542; font-family: 'Silkscreen', monospace;">"View"</span>
-                                            " mode, then click a territory to inspect it and edit its resources."
+                                            "Click any territory to inspect its owner, resources, and connections."
                                         </div>
                                     }.into_any())}
                                 </div>

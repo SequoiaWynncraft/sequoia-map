@@ -71,6 +71,14 @@ pub(crate) struct ConnectionOpacityScale(pub RwSignal<f64>);
 #[derive(Clone, Copy)]
 pub(crate) struct ConnectionThicknessScale(pub RwSignal<f64>);
 #[derive(Clone, Copy)]
+pub(crate) struct ConnectionZoomFadeStart(pub RwSignal<f64>);
+#[derive(Clone, Copy)]
+pub(crate) struct ConnectionZoomFadeEnd(pub RwSignal<f64>);
+#[derive(Clone, Copy)]
+pub(crate) struct SuppressCooldownVisuals(pub RwSignal<bool>);
+#[derive(Clone, Copy)]
+pub(crate) struct FillAlphaBoost(pub RwSignal<f64>);
+#[derive(Clone, Copy)]
 pub(crate) struct ResourceHighlight(pub RwSignal<bool>);
 #[derive(Clone, Copy)]
 pub(crate) struct ShowResourceIcons(pub RwSignal<bool>);

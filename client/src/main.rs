@@ -1,5 +1,6 @@
 mod animation;
 mod app;
+mod assets;
 mod canvas;
 mod claim_labels;
 mod colors;
@@ -45,6 +46,10 @@ mod gpu {
         pub bold_connections: bool,
         pub connection_opacity_scale: f32,
         pub connection_thickness_scale: f32,
+        pub connection_zoom_fade_start: f32,
+        pub connection_zoom_fade_end: f32,
+        pub suppress_cooldown_visuals: bool,
+        pub fill_alpha_boost: f32,
         pub use_readable_font: bool,
         pub dynamic_show_countdown: bool,
         pub dynamic_show_granular_map_time: bool,
