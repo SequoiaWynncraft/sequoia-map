@@ -1982,122 +1982,131 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
             }}
             {
                 view! {
-                        <div style="position: absolute; top: 16px; left: 16px; z-index: 12; display: flex; gap: 10px; flex-wrap: wrap; max-width: min(92vw, 780px);">
-                            <div style="display: flex; gap: 6px; padding: 10px; background: rgba(19,22,31,0.94); border: 1px solid #2c3146; border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,0.35);">
-                                {[
-                                    ClaimTool::View,
-                                    ClaimTool::Paint,
-                                    ClaimTool::EraseToNeutral,
-                                    ClaimTool::Select,
-                                    ClaimTool::Eyedropper,
-                                ]
-                                    .into_iter()
-                                    .map(|entry| {
-                                        view! {
-                                            <button
-                                                style:background=move || if tool.get() == entry { "#f5c542" } else { "#171b28" }
-                                                style:color=move || if tool.get() == entry { "#161821" } else { "#d9d4c3" }
-                                                style="padding: 8px 12px; border-radius: 8px; border: 1px solid #3a415c; font-family: 'Silkscreen', monospace; cursor: pointer;"
-                                                on:click=move |_| tool.set(entry)
-                                            >
-                                                {entry.label()}
-                                            </button>
-                                        }
-                                    })
-                                    .collect_view()}
-                            </div>
+                        <div class="toolbar">
+                            // Row 1: Tools + Undo/Redo | Guild picker
+                            <div class="toolbar-row">
+                                <div class="pill-group">
+                                    {[
+                                        ClaimTool::View,
+                                        ClaimTool::Paint,
+                                        ClaimTool::EraseToNeutral,
+                                        ClaimTool::Select,
+                                        ClaimTool::Eyedropper,
+                                    ]
+                                        .into_iter()
+                                        .map(|entry| {
+                                            view! {
+                                                <button
+                                                    class="btn"
+                                                    class:active=move || tool.get() == entry
+                                                    style="font-family: 'Silkscreen', monospace;"
+                                                    on:click=move |_| tool.set(entry)
+                                                >
+                                                    {entry.label()}
+                                                </button>
+                                            }
+                                        })
+                                        .collect_view()}
+                                    <div class="pill-divider"></div>
+                                    <button class="btn" on:click=undo>"Undo"</button>
+                                    <button class="btn" on:click=redo>"Redo"</button>
+                                </div>
 
-                            <div style="display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: rgba(19,22,31,0.94); border: 1px solid #2c3146; border-radius: 10px;">
-                                <button
-                                    style="padding: 8px 10px; border-radius: 8px; border: 1px solid #45506e; background: #5b5f70; color: #f1eee6; cursor: pointer;"
-                                    on:click=move |_| active_owner.set(neutral_owner())
-                                >
-                                    "Neutral"
-                                </button>
-                                <input
-                                    prop:value=move || guild_query.get()
-                                    placeholder="Search guilds"
-                                    style="width: 220px; padding: 8px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #111521; color: #e6e3d9;"
-                                    on:input=move |event| guild_query.set(event_target_value(&event))
-                                />
-                                <div style="display: flex; gap: 6px; flex-wrap: wrap; max-width: 240px;">
-                                    {move || guild_results.get().into_iter().map(|entry| {
-                                        let owner = ClaimOwner::from_guild(GuildRef {
-                                            uuid: entry.uuid.clone(),
-                                            name: entry.name.clone(),
-                                            prefix: entry.prefix.clone(),
-                                            color: entry.color,
-                                        });
-                                        let label = format!("{} [{}]", entry.name, entry.prefix);
-                                        view! {
-                                            <button
-                                                style="padding: 6px 8px; border-radius: 8px; border: 1px solid #36405d; background: #171b28; color: #e6e3d9; cursor: pointer; text-align: left;"
-                                                on:click=move |_| {
-                                                    active_owner.set(owner.clone());
-                                                    guild_query.set(String::new());
-                                                    guild_results.set(Vec::new());
-                                                }
-                                            >
-                                                {label}
-                                            </button>
-                                        }
-                                    }).collect_view()}
+                                <div class="pill-group" style="align-items: center; gap: 8px; padding: 10px 12px;">
+                                    <button class="btn btn-neutral" on:click=move |_| active_owner.set(neutral_owner())>"Neutral"</button>
+                                    <input
+                                        class="input"
+                                        prop:value=move || guild_query.get()
+                                        placeholder="Search guilds..."
+                                        style="width: 220px;"
+                                        on:input=move |event| guild_query.set(event_target_value(&event))
+                                    />
+                                    <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+                                        {move || guild_results.get().into_iter().map(|entry| {
+                                            let owner = ClaimOwner::from_guild(GuildRef {
+                                                uuid: entry.uuid.clone(),
+                                                name: entry.name.clone(),
+                                                prefix: entry.prefix.clone(),
+                                                color: entry.color,
+                                            });
+                                            let label = format!("{} [{}]", entry.name, entry.prefix);
+                                            view! {
+                                                <button
+                                                    class="btn btn-sm"
+                                                    style="text-align: left;"
+                                                    on:click=move |_| {
+                                                        active_owner.set(owner.clone());
+                                                        guild_query.set(String::new());
+                                                        guild_results.set(Vec::new());
+                                                    }
+                                                >
+                                                    {label}
+                                                </button>
+                                            }
+                                        }).collect_view()}
+                                    </div>
                                 </div>
                             </div>
 
-                            <div style="display: flex; gap: 6px; padding: 10px; background: rgba(19,22,31,0.94); border: 1px solid #2c3146; border-radius: 10px;">
-                                <button style="padding: 8px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #171b28; color: #e6e3d9; cursor: pointer;" on:click=undo>"Undo"</button>
-                                <button style="padding: 8px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #171b28; color: #e6e3d9; cursor: pointer;" on:click=redo>"Redo"</button>
-                                <button style="padding: 8px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #171b28; color: #e6e3d9; cursor: pointer;" on:click=clear_selection>"Clear Selection"</button>
-                                <button style="padding: 8px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #171b28; color: #e6e3d9; cursor: pointer;" on:click=apply_active_to_selection>"Apply To Selection"</button>
-                                <button
-                                    style:background=move || if session.get().is_some_and(|session| session.follow_live) { "#f5c542" } else { "#171b28" }
-                                    style:color=move || if session.get().is_some_and(|session| session.follow_live) { "#161821" } else { "#e6e3d9" }
-                                    style="padding: 8px 10px; border-radius: 8px; border: 1px solid #3a415c; cursor: pointer;"
-                                    on:click=move |_| {
-                                        session.update(|state| {
-                                            if let Some(state) = state.as_mut() {
-                                                state.follow_live = !state.follow_live;
-                                                state.dirty = true;
-                                            }
-                                        });
-                                    }
-                                >
-                                    {move || if session.get().is_some_and(|session| session.follow_live) { "Live Follow" } else { "Frozen" }}
-                                </button>
-                                <button style="padding: 8px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #171b28; color: #e6e3d9; cursor: pointer;" on:click=freeze_now>"Freeze Now"</button>
-                                <button
-                                    style:background=move || if resource_highlight.get() { "#f5c542" } else { "#171b28" }
-                                    style:color=move || if resource_highlight.get() { "#161821" } else { "#e6e3d9" }
-                                    style="padding: 8px 10px; border-radius: 8px; border: 1px solid #3a415c; cursor: pointer;"
-                                    on:click=move |_| resource_highlight.update(|value| *value = !*value)
-                                >
-                                    "Resources"
-                                </button>
-                                <button
-                                    style:background=move || if show_resource_icons.get() { "#f5c542" } else { "#171b28" }
-                                    style:color=move || if show_resource_icons.get() { "#161821" } else { "#e6e3d9" }
-                                    style="padding: 8px 10px; border-radius: 8px; border: 1px solid #3a415c; cursor: pointer;"
-                                    on:click=move |_| show_resource_icons.update(|value| *value = !*value)
-                                >
-                                    "Icons"
-                                </button>
-                                <div style="display: inline-flex; align-items: center; justify-content: center; min-width: 92px; padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(58,65,92,0.88); background: rgba(11,16,26,0.92); color: #cfd7ef; font-family: 'JetBrains Mono', monospace; font-size: 0.72rem;">
-                                    {move || format!("Selected {}", session.get().map(|state| state.selection.len()).unwrap_or(0))}
+                            // Row 2: Selection actions + toggles | badge
+                            <div class="toolbar-row">
+                                <div class="pill-group">
+                                    {move || {
+                                        let count = session.get().map(|state| state.selection.len()).unwrap_or(0);
+                                        if count > 0 {
+                                            view! {
+                                                <button class="btn" on:click=clear_selection>"Clear"</button>
+                                                <button class="btn" on:click=apply_active_to_selection>"Apply"</button>
+                                                <div class="pill-divider"></div>
+                                            }.into_any()
+                                        } else {
+                                            ().into_any()
+                                        }
+                                    }}
+                                    <button
+                                        class="btn"
+                                        class:active=move || session.get().is_some_and(|session| session.follow_live)
+                                        on:click=move |_| {
+                                            session.update(|state| {
+                                                if let Some(state) = state.as_mut() {
+                                                    state.follow_live = !state.follow_live;
+                                                    state.dirty = true;
+                                                }
+                                            });
+                                        }
+                                    >
+                                        {move || if session.get().is_some_and(|session| session.follow_live) { "Live" } else { "Frozen" }}
+                                    </button>
+                                    <button
+                                        class="btn"
+                                        class:active=move || resource_highlight.get()
+                                        on:click=move |_| resource_highlight.update(|value| *value = !*value)
+                                    >
+                                        "Resources"
+                                    </button>
+                                    <button
+                                        class="btn"
+                                        class:active=move || show_resource_icons.get()
+                                        on:click=move |_| show_resource_icons.update(|value| *value = !*value)
+                                    >
+                                        "Icons"
+                                    </button>
+                                </div>
+                                <div class="badge">
+                                    {move || format!("{} sel", session.get().map(|state| state.selection.len()).unwrap_or(0))}
                                 </div>
                             </div>
                         </div>
 
-                        <div style="position: absolute; top: 16px; right: 16px; bottom: 16px; width: min(360px, 34vw); z-index: 12; display: flex; flex-direction: column; background: rgba(19,22,31,0.96); border: 1px solid #2c3146; border-radius: 14px; box-shadow: 0 18px 40px rgba(0,0,0,0.4); overflow: hidden;">
-                            <div style="display: flex; gap: 6px; padding: 12px; border-bottom: 1px solid #2c3146; background: rgba(14,16,24,0.9);">
+                        <div class="sidebar-panel" style="position: absolute; top: 16px; right: 16px; bottom: 16px; width: min(360px, 34vw); z-index: 12;">
+                            <div class="sidebar-tab-bar">
                                 {[ClaimTab::Territory, ClaimTab::Summary, ClaimTab::Compare, ClaimTab::Macros, ClaimTab::Share]
                                     .into_iter()
                                     .map(|entry| {
                                         view! {
                                             <button
-                                                style:background=move || if tab.get() == entry { "#f5c542" } else { "#171b28" }
-                                                style:color=move || if tab.get() == entry { "#161821" } else { "#d9d4c3" }
-                                                style="flex: 1; padding: 8px 10px; border-radius: 8px; border: 1px solid #36405d; cursor: pointer; font-family: 'Silkscreen', monospace; font-size: 0.72rem;"
+                                                class="btn btn-tab"
+                                                class:active=move || tab.get() == entry
                                                 on:click=move |_| tab.set(entry)
                                             >
                                                 {entry.label()}
@@ -2106,7 +2115,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                     })
                                     .collect_view()}
                             </div>
-                            <div style="flex: 1; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 12px;">
+                            <div class="sidebar-scroll">
                                 {move || {
                                     if let Some(message) = error_message.get() {
                                         view! { <div style="padding: 10px; border-radius: 10px; background: rgba(190,72,72,0.16); border: 1px solid rgba(190,72,72,0.4); color: #ffcfcf;">{message}</div> }.into_any()
@@ -2123,9 +2132,18 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                             view! {
                                 <div style="display: flex; flex-direction: column; gap: 12px;">
                                     <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
-                                        <div style="font-family: 'Silkscreen', monospace; color: #f5c542; font-size: 0.78rem;">"Territory Inspector"</div>
-                                        <div style="padding: 6px 8px; border-radius: 999px; border: 1px solid rgba(58,65,92,0.82); background: rgba(11,16,26,0.9); color: #cfd7ef; font-size: 0.68rem; letter-spacing: 0.08em;">
-                                            {move || if tool.get() == ClaimTool::View { "VIEW MODE" } else { "SWITCH TO VIEW" }}
+                                        <div class="section-label">"Territory Inspector"</div>
+                                        <div style="display: flex; align-items: center; gap: 8px;">
+                                            {move || {
+                                                if session.get().is_some_and(|s| s.follow_live) {
+                                                    view! { <button class="btn btn-sm" on:click=freeze_now>"Freeze Now"</button> }.into_any()
+                                                } else {
+                                                    ().into_any()
+                                                }
+                                            }}
+                                            <div style="padding: 6px 8px; border-radius: 999px; border: 1px solid rgba(58,65,92,0.82); background: rgba(11,16,26,0.9); color: #cfd7ef; font-size: 0.68rem; letter-spacing: 0.08em;">
+                                                {move || if tool.get() == ClaimTool::View { "VIEW MODE" } else { "SWITCH TO VIEW" }}
+                                            </div>
                                         </div>
                                     </div>
                                     {move || selected_territory_details.get().map(|(territory_name, effective, base, effective_owner, base_owner, resources_overridden)| {
@@ -2137,32 +2155,27 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                             effective.location.end[1]
                                         );
                                         view! {
-                                            <div style="padding: 12px; border-radius: 12px; background: #121725; border: 1px solid #2c3146; display: flex; flex-direction: column; gap: 10px;">
+                                            <div class="card">
                                                 <div style="display: flex; align-items: start; justify-content: space-between; gap: 10px;">
                                                     <div>
                                                         <div style="font-family: 'Silkscreen', monospace; color: #f4c94b; font-size: 0.88rem;">{territory_name.clone()}</div>
                                                         <div style="margin-top: 4px; color: #8d97b3; font-size: 0.72rem;">{coords}</div>
                                                     </div>
-                                                    <button
-                                                        style="padding: 7px 9px; border-radius: 8px; border: 1px solid #36405d; background: #171b28; color: #e6e3d9; cursor: pointer;"
-                                                        on:click=move |_| tool.set(ClaimTool::View)
-                                                    >
-                                                        "Focus View"
-                                                    </button>
+                                                    <button class="btn btn-sm" on:click=move |_| tool.set(ClaimTool::View)>"Focus View"</button>
                                                 </div>
                                                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
-                                                    <div style="padding: 10px; border-radius: 10px; background: rgba(16,20,31,0.92); border: 1px solid #2c3146;">
+                                                    <div class="card-inset">
                                                         <div style="color: #8d97b3; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.08em;">"Current Owner"</div>
                                                         <div style="margin-top: 6px;">{effective_owner.display_name().to_string()}</div>
                                                     </div>
-                                                    <div style="padding: 10px; border-radius: 10px; background: rgba(16,20,31,0.92); border: 1px solid #2c3146;">
+                                                    <div class="card-inset">
                                                         <div style="color: #8d97b3; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.08em;">"Base Owner"</div>
                                                         <div style="margin-top: 6px;">{base_owner.display_name().to_string()}</div>
                                                     </div>
                                                 </div>
                                                 <div style="display: flex; gap: 8px; flex-wrap: wrap;">
                                                     <button
-                                                        style="padding: 9px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #171b28; color: #e6e3d9; cursor: pointer;"
+                                                        class="btn"
                                                         on:click=move |_| {
                                                             apply_selected_owner_override(
                                                                 selected,
@@ -2176,7 +2189,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                                         "Set To Active Guild"
                                                     </button>
                                                     <button
-                                                        style="padding: 9px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #171b28; color: #e6e3d9; cursor: pointer;"
+                                                        class="btn"
                                                         on:click=move |_| {
                                                             apply_selected_owner_override(
                                                                 selected,
@@ -2190,7 +2203,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                                         "Set Neutral"
                                                     </button>
                                                     <button
-                                                        style="padding: 9px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #171b28; color: #e6e3d9; cursor: pointer;"
+                                                        class="btn"
                                                         on:click=move |_| {
                                                             reset_selected_owner_override(
                                                                 selected,
@@ -2204,7 +2217,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                                     </button>
                                                 </div>
                                                 <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 4px;">
-                                                    <div style="font-family: 'Silkscreen', monospace; color: #f5c542; font-size: 0.74rem;">"Resources"</div>
+                                                    <div class="section-label" style="font-size: 0.74rem;">"Resources"</div>
                                                     <div style="color: #8d97b3; font-size: 0.7rem;">
                                                         {if resources_overridden { "Custom resource stats" } else { "Using map defaults" }}
                                                     </div>
@@ -2212,108 +2225,57 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
                                                     <label style="display: grid; gap: 4px;">
                                                         <span style="color: #8d97b3; font-size: 0.7rem;">"Emerald"</span>
-                                                        <input
-                                                            type="number"
-                                                            min="0"
+                                                        <input class="input" type="number" min="0"
                                                             prop:value=effective.resources.emeralds.to_string()
-                                                            style="padding: 8px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #111521; color: #e6e3d9;"
                                                             on:input=move |event| {
                                                                 let parsed = event_target_value(&event).trim().parse::<i32>().unwrap_or(0);
-                                                                apply_selected_resource_override(
-                                                                    selected,
-                                                                    live_territories,
-                                                                    session,
-                                                                    active_owner,
-                                                                    "emeralds",
-                                                                    parsed.max(0),
-                                                                );
+                                                                apply_selected_resource_override(selected, live_territories, session, active_owner, "emeralds", parsed.max(0));
                                                             }
                                                         />
                                                     </label>
                                                     <label style="display: grid; gap: 4px;">
                                                         <span style="color: #8d97b3; font-size: 0.7rem;">"Ore"</span>
-                                                        <input
-                                                            type="number"
-                                                            min="0"
+                                                        <input class="input" type="number" min="0"
                                                             prop:value=effective.resources.ore.to_string()
-                                                            style="padding: 8px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #111521; color: #e6e3d9;"
                                                             on:input=move |event| {
                                                                 let parsed = event_target_value(&event).trim().parse::<i32>().unwrap_or(0);
-                                                                apply_selected_resource_override(
-                                                                    selected,
-                                                                    live_territories,
-                                                                    session,
-                                                                    active_owner,
-                                                                    "ore",
-                                                                    parsed.max(0),
-                                                                );
+                                                                apply_selected_resource_override(selected, live_territories, session, active_owner, "ore", parsed.max(0));
                                                             }
                                                         />
                                                     </label>
                                                     <label style="display: grid; gap: 4px;">
                                                         <span style="color: #8d97b3; font-size: 0.7rem;">"Crops"</span>
-                                                        <input
-                                                            type="number"
-                                                            min="0"
+                                                        <input class="input" type="number" min="0"
                                                             prop:value=effective.resources.crops.to_string()
-                                                            style="padding: 8px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #111521; color: #e6e3d9;"
                                                             on:input=move |event| {
                                                                 let parsed = event_target_value(&event).trim().parse::<i32>().unwrap_or(0);
-                                                                apply_selected_resource_override(
-                                                                    selected,
-                                                                    live_territories,
-                                                                    session,
-                                                                    active_owner,
-                                                                    "crops",
-                                                                    parsed.max(0),
-                                                                );
+                                                                apply_selected_resource_override(selected, live_territories, session, active_owner, "crops", parsed.max(0));
                                                             }
                                                         />
                                                     </label>
                                                     <label style="display: grid; gap: 4px;">
                                                         <span style="color: #8d97b3; font-size: 0.7rem;">"Fish"</span>
-                                                        <input
-                                                            type="number"
-                                                            min="0"
+                                                        <input class="input" type="number" min="0"
                                                             prop:value=effective.resources.fish.to_string()
-                                                            style="padding: 8px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #111521; color: #e6e3d9;"
                                                             on:input=move |event| {
                                                                 let parsed = event_target_value(&event).trim().parse::<i32>().unwrap_or(0);
-                                                                apply_selected_resource_override(
-                                                                    selected,
-                                                                    live_territories,
-                                                                    session,
-                                                                    active_owner,
-                                                                    "fish",
-                                                                    parsed.max(0),
-                                                                );
+                                                                apply_selected_resource_override(selected, live_territories, session, active_owner, "fish", parsed.max(0));
                                                             }
                                                         />
                                                     </label>
                                                     <label style="display: grid; gap: 4px; grid-column: 1 / -1;">
                                                         <span style="color: #8d97b3; font-size: 0.7rem;">"Wood"</span>
-                                                        <input
-                                                            type="number"
-                                                            min="0"
+                                                        <input class="input" type="number" min="0"
                                                             prop:value=effective.resources.wood.to_string()
-                                                            style="padding: 8px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #111521; color: #e6e3d9;"
                                                             on:input=move |event| {
                                                                 let parsed = event_target_value(&event).trim().parse::<i32>().unwrap_or(0);
-                                                                apply_selected_resource_override(
-                                                                    selected,
-                                                                    live_territories,
-                                                                    session,
-                                                                    active_owner,
-                                                                    "wood",
-                                                                    parsed.max(0),
-                                                                );
+                                                                apply_selected_resource_override(selected, live_territories, session, active_owner, "wood", parsed.max(0));
                                                             }
                                                         />
                                                     </label>
                                                 </div>
                                                 <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                                                    <button
-                                                        style="padding: 9px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #171b28; color: #e6e3d9; cursor: pointer;"
+                                                    <button class="btn"
                                                         on:click=move |_| {
                                                             reset_selected_resource_override(
                                                                 selected,
@@ -2325,14 +2287,14 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                                     >
                                                         "Reset Resources"
                                                     </button>
-                                                    <div style="padding: 9px 10px; border-radius: 8px; border: 1px solid rgba(58,65,92,0.82); background: rgba(11,16,26,0.92); color: #cfd7ef; font-size: 0.72rem;">
+                                                    <div class="badge">
                                                         {format!("{} connections", base.connections.len())}
                                                     </div>
                                                 </div>
                                             </div>
                                         }.into_any()
                                     }).unwrap_or_else(|| view! {
-                                        <div style="padding: 14px; border-radius: 12px; background: #121725; border: 1px solid #2c3146; color: #9aa6c4; line-height: 1.7;">
+                                        <div class="card" style="color: #9aa6c4; line-height: 1.7;">
                                             "Use "
                                             <span style="color: #f5c542; font-family: 'Silkscreen', monospace;">"View"</span>
                                             " mode, then click a territory to inspect it and edit its resources."
@@ -2345,8 +2307,8 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                         ClaimTab::Summary => {
                             view! {
                                 <div style="display: flex; flex-direction: column; gap: 10px;">
-                                    <div style="font-family: 'Silkscreen', monospace; color: #f5c542; font-size: 0.78rem;">"Active Guild"</div>
-                                    <div style="padding: 10px 12px; border-radius: 10px; background: #121725; border: 1px solid #2c3146;">
+                                    <div class="section-label">"Active Guild"</div>
+                                    <div class="card-inset" style="padding: 10px 12px;">
                                         {move || active_owner.get().display_name().to_string()}
                                     </div>
                                     {move || active_metrics.get().map(|metrics| {
@@ -2357,7 +2319,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                             .map(|hub| format!("{} ({} ext)", hub.territory, hub.externals))
                                             .unwrap_or_else(|| "None".to_string());
                                         view! {
-                                            <div style="padding: 12px; border-radius: 12px; background: #121725; border: 1px solid #2c3146; display: flex; flex-direction: column; gap: 6px;">
+                                            <div class="card" style="gap: 6px;">
                                                 <div>{format!("Territories: {}", metrics.territory_count)}</div>
                                                 <div>{format!("Changed vs base: {}", metrics.changed_territory_count)}</div>
                                                 <div>{format!("Top connections: {top_conn}")}</div>
@@ -2376,7 +2338,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                 <div style="display: flex; flex-direction: column; gap: 8px;">
                                     {move || metrics.get().map(|metrics| {
                                         view! {
-                                            <div style="padding: 10px; border-radius: 10px; background: #121725; border: 1px solid #2c3146;">
+                                            <div class="card-inset">
                                                 {format!("Total territories: {} • Neutral: {}", metrics.total_territories, metrics.neutral_territories)}
                                             </div>
                                             {metrics.guilds.into_iter().map(|entry| {
@@ -2389,8 +2351,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                                     entry.resources.rainbow
                                                 );
                                                 view! {
-                                                    <button
-                                                        style="padding: 10px; border-radius: 10px; border: 1px solid #2c3146; background: #121725; color: #e6e3d9; cursor: pointer; text-align: left;"
+                                                    <button class="btn" style="text-align: left;"
                                                         on:click=move |_| active_owner.set(owner.clone())
                                                     >
                                                         {label}
@@ -2406,15 +2367,13 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                         ClaimTab::Macros => {
                             view! {
                                 <div style="display: flex; flex-direction: column; gap: 10px;">
-                                    <div style="font-family: 'Silkscreen', monospace; color: #f5c542;">{move || format!("Selection ({})", session.get().map(|state| state.selection.len()).unwrap_or(0))}</div>
-                                    <input
+                                    <div class="section-label">{move || format!("Selection ({})", session.get().map(|state| state.selection.len()).unwrap_or(0))}</div>
+                                    <input class="input"
                                         prop:value=move || macro_name_input.get()
                                         placeholder="Macro name"
-                                        style="padding: 8px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #111521; color: #e6e3d9;"
                                         on:input=move |event| macro_name_input.set(event_target_value(&event))
                                     />
-                                    <button
-                                        style="padding: 10px 12px; border-radius: 8px; border: 1px solid #3a415c; background: #171b28; color: #e6e3d9; cursor: pointer;"
+                                    <button class="btn"
                                         on:click=move |_| {
                                             let name = macro_name_input.get_untracked().trim().to_string();
                                             if name.is_empty() {
@@ -2448,16 +2407,15 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                     >
                                         "Save Macro From Selection"
                                     </button>
-                                    <div style="font-family: 'Silkscreen', monospace; color: #f5c542;">"Layout Macros"</div>
+                                    <div class="section-label">"Layout Macros"</div>
                                     {move || session.get().map(|state| state.document.macros).unwrap_or_default().into_iter().map(|entry| {
                                         let select_macro = entry.territories.clone();
                                         let apply_macro = entry.territories.clone();
                                         let label = entry.name.clone();
                                         view! {
-                                            <div style="display: flex; gap: 6px; align-items: center; padding: 8px; border: 1px solid #2c3146; border-radius: 8px; background: #121725;">
+                                            <div class="card" style="flex-direction: row; align-items: center; padding: 8px;">
                                                 <div style="flex: 1;">{label}</div>
-                                                <button
-                                                    style="padding: 6px 8px; border-radius: 8px; border: 1px solid #36405d; background: #171b28; color: #e6e3d9; cursor: pointer;"
+                                                <button class="btn btn-sm"
                                                     on:click=move |_| {
                                                         session.update(|state| {
                                                             if let Some(state) = state.as_mut() {
@@ -2468,8 +2426,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                                 >
                                                     "Select"
                                                 </button>
-                                                <button
-                                                    style="padding: 6px 8px; border-radius: 8px; border: 1px solid #36405d; background: #171b28; color: #e6e3d9; cursor: pointer;"
+                                                <button class="btn btn-sm"
                                                     on:click=move |_| {
                                                         let current_active_owner = active_owner.get_untracked();
                                                         let live_owners = current_live_owner_map(&live_territories.get_untracked());
@@ -2497,13 +2454,12 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                             </div>
                                         }
                                     }).collect_view()}
-                                    <div style="font-family: 'Silkscreen', monospace; color: #f5c542;">"Macro Library"</div>
+                                    <div class="section-label">"Macro Library"</div>
                                     {move || macro_library.get().into_iter().map(|entry| {
                                         let territories = entry.territories.clone();
                                         let label = entry.name.clone();
                                         view! {
-                                            <button
-                                                style="padding: 9px 10px; border-radius: 8px; border: 1px solid #36405d; background: #121725; color: #e6e3d9; cursor: pointer; text-align: left;"
+                                            <button class="btn" style="text-align: left;"
                                                 on:click=move |_| {
                                                     session.update(|state| {
                                                         if let Some(state) = state.as_mut() {
@@ -2524,8 +2480,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                             let import_input_ref = file_input_ref.clone();
                             view! {
                                 <div style="display: flex; flex-direction: column; gap: 10px;">
-                                    <button
-                                        style="padding: 10px 12px; border-radius: 8px; border: 1px solid #3a415c; background: #171b28; color: #e6e3d9; cursor: pointer;"
+                                    <button class="btn"
                                         on:click=move |_| {
                                             let Some(session_state) = session.get_untracked() else {
                                                 return;
@@ -2550,8 +2505,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                     >
                                         "Copy Share URL"
                                     </button>
-                                    <button
-                                        style="padding: 10px 12px; border-radius: 8px; border: 1px solid #3a415c; background: #171b28; color: #e6e3d9; cursor: pointer;"
+                                    <button class="btn"
                                         on:click=move |_| {
                                             let Some(session_state) = session.get_untracked() else {
                                                 return;
@@ -2590,8 +2544,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                     >
                                         "Save Immutable Snapshot"
                                     </button>
-                                    <button
-                                        style="padding: 10px 12px; border-radius: 8px; border: 1px solid #3a415c; background: #171b28; color: #e6e3d9; cursor: pointer;"
+                                    <button class="btn"
                                         on:click=move |_| {
                                             let Some(session_state) = session.get_untracked() else {
                                                 return;
@@ -2616,20 +2569,17 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                     >
                                         "Export JSON"
                                     </button>
-                                    <button
-                                        style="padding: 10px 12px; border-radius: 8px; border: 1px solid #3a415c; background: #171b28; color: #e6e3d9; cursor: pointer;"
+                                    <button class="btn"
                                         on:click=move |_| trigger_import_picker(import_input_ref.clone())
                                     >
                                         "Import JSON"
                                     </button>
-                                    <input
+                                    <input class="input"
                                         prop:value=move || preset_name_input.get()
                                         placeholder="Local preset name"
-                                        style="padding: 8px 10px; border-radius: 8px; border: 1px solid #3a415c; background: #111521; color: #e6e3d9;"
                                         on:input=move |event| preset_name_input.set(event_target_value(&event))
                                     />
-                                    <button
-                                        style="padding: 10px 12px; border-radius: 8px; border: 1px solid #3a415c; background: #171b28; color: #e6e3d9; cursor: pointer;"
+                                    <button class="btn"
                                         on:click=move |_| {
                                             let Some(session_state) = session.get_untracked() else {
                                                 return;
@@ -2657,13 +2607,12 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                         "Save Local Preset"
                                     </button>
                                     <div style="display: flex; flex-direction: column; gap: 8px;">
-                                        <div style="font-family: 'Silkscreen', monospace; color: #f5c542;">"Local Presets"</div>
+                                        <div class="section-label">"Local Presets"</div>
                                         {move || local_presets.get().into_iter().map(|preset| {
                                             let document = preset.document.clone();
                                             let label = preset.name.clone();
                                             view! {
-                                                <button
-                                                    style="padding: 9px 10px; border-radius: 8px; border: 1px solid #36405d; background: #121725; color: #e6e3d9; cursor: pointer; text-align: left;"
+                                                <button class="btn" style="text-align: left;"
                                                     on:click=move |_| {
                                                         apply_document_to_session(
                                                             active_owner,
