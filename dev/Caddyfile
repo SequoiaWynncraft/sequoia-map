@@ -15,6 +15,13 @@
         reverse_proxy claims-client:8082
     }
 
+    @sse path /api/events
+    handle @sse {
+        reverse_proxy server:3000 {
+            flush_interval -1
+        }
+    }
+
     @api path /api/*
     handle @api {
         reverse_proxy server:3000

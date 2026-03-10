@@ -29,6 +29,13 @@
             reverse_proxy ingest:3010
         }
 
+        @sse path /api/events
+        handle @sse {
+            reverse_proxy server:3000 {
+                flush_interval -1
+            }
+        }
+
         handle {
             reverse_proxy server:3000
         }
