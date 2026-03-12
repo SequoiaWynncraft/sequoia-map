@@ -43,6 +43,7 @@ const IMPORT_HANDOFF_STORAGE_KEY: &str = "sequoia_claim_import_handoff_v1";
 const LIVE_BOOTSTRAP_STORAGE_KEY: &str = "sequoia_claim_live_bootstrap_v1";
 const GEOMETRY_BOOTSTRAP_STORAGE_KEY: &str = "sequoia_claim_geometry_bootstrap_v1";
 const SHARE_FRAGMENT_PREFIX: &str = "#c=";
+#[cfg(test)]
 const MAX_SHARE_FRAGMENT_BYTES: usize = 120_000;
 const LIVE_BOOTSTRAP_MAX_AGE_MS: f64 = 120_000.0;
 const GEOMETRY_BOOTSTRAP_MAX_AGE_MS: f64 = 3_600_000.0;
@@ -662,6 +663,7 @@ fn next_macro_id(name: &str) -> String {
     }
 }
 
+#[cfg(test)]
 fn encode_claim_fragment(document: &ClaimDocumentV1) -> Result<String, String> {
     let bytes = serde_json::to_vec(document).map_err(|error| error.to_string())?;
     if bytes.len() > MAX_SHARE_FRAGMENT_BYTES {
@@ -675,6 +677,7 @@ fn decode_claim_fragment(encoded: &str) -> Result<ClaimDocumentV1, String> {
     serde_json::from_slice(&bytes).map_err(|error| error.to_string())
 }
 
+#[cfg(test)]
 fn base64_url_encode(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::new();
@@ -1053,6 +1056,81 @@ async fn fetch_saved_claim_document(
         .json::<SavedClaimDocumentResponse>()
         .await
         .map_err(|error| format!("parse error: {error}"))
+}
+
+async fn create_saved_claim(document: ClaimDocumentV1) -> Result<SavedClaimResponse, String> {
+    let request_body = serde_json::json!({
+        "title": document.title.clone(),
+        "document": document,
+    });
+    let request_body = serde_json::to_string(&request_body)
+        .map_err(|error| format!("serialize error: {error}"))?;
+    let request = gloo_net::http::Request::post("/api/claims")
+        .header("Content-Type", "application/json")
+        .body(request_body)
+        .map_err(|_| "Failed to build save request".to_string())?;
+    let response = request
+        .send()
+        .await
+        .map_err(|_| "Failed to save snapshot".to_string())?;
+
+    if !response.ok() {
+        return Err(format!(
+            "Failed to save snapshot (HTTP {})",
+            response.status()
+        ));
+    }
+
+    response
+        .json::<SavedClaimResponse>()
+        .await
+        .map_err(|error| format!("parse error: {error}"))
+}
+
+fn absolute_claim_url(url: &str) -> String {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        return url.to_string();
+    }
+
+    let origin = current_origin();
+    if origin.is_empty() {
+        url.to_string()
+    } else {
+        format!("{origin}{url}")
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn current_origin() -> String {
+    web_sys::window()
+        .and_then(|window| window.location().origin().ok())
+        .unwrap_or_default()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn current_origin() -> String {
+    String::new()
+}
+
+fn saved_claim_url(snapshot_id: &str) -> String {
+    absolute_claim_url(&format!("/claims/s/{snapshot_id}"))
+}
+
+fn reusable_share_url(session: &ClaimWorkingSession) -> Option<String> {
+    if session.dirty {
+        return None;
+    }
+
+    session.source_snapshot_id.as_deref().map(saved_claim_url)
+}
+
+fn mark_session_saved(session: RwSignal<Option<ClaimWorkingSession>>, snapshot_id: String) {
+    session.update(|state| {
+        if let Some(state) = state.as_mut() {
+            state.source_snapshot_id = Some(snapshot_id);
+            state.dirty = false;
+        }
+    });
 }
 
 async fn resolve_boot_payload(
@@ -2538,29 +2616,37 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                 <div style="display: flex; flex-direction: column; gap: 10px;">
                                     <button class="btn"
                                         on:click=move |_| {
+                                            if !claims_persistence_available.get_untracked() {
+                                                error_message.set(Some("Short share URLs require server-side claims persistence on this deployment".to_string()));
+                                                return;
+                                            }
                                             let Some(session_state) = session.get_untracked() else {
                                                 return;
                                             };
+                                            if let Some(url) = reusable_share_url(&session_state) {
+                                                copy_url_to_clipboard(&url);
+                                                status_message.set(Some("Copied short share URL".to_string()));
+                                                return;
+                                            }
                                             let document = canonical_document_for_session(
                                                 &session_state,
                                                 &live_territories.get_untracked(),
                                                 live_seq.get_untracked(),
                                                 default_view_from(&viewport.get_untracked(), &active_owner.get_untracked()),
                                             );
-                                            match encode_claim_fragment(&document) {
-                                                Ok(fragment) => {
-                                                    if let Some(window) = web_sys::window() {
-                                                        let origin = window.location().origin().unwrap_or_default();
-                                                        let url = format!("{origin}/claims/new/import{SHARE_FRAGMENT_PREFIX}{fragment}");
-                                                        copy_url_to_clipboard(&url);
-                                                        status_message.set(Some("Copied share URL".to_string()));
+                                            spawn_local(async move {
+                                                match create_saved_claim(document).await {
+                                                    Ok(payload) => {
+                                                        mark_session_saved(session, payload.id.clone());
+                                                        copy_url_to_clipboard(&absolute_claim_url(&payload.url));
+                                                        status_message.set(Some("Copied short share URL".to_string()));
                                                     }
+                                                    Err(error) => error_message.set(Some(error)),
                                                 }
-                                                Err(error) => error_message.set(Some(error)),
-                                            }
+                                            });
                                         }
                                     >
-                                        "Copy Share URL"
+                                        "Copy Short Share URL"
                                     </button>
                                     <button class="btn"
                                         on:click=move |_| {
@@ -2578,24 +2664,14 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                                 default_view_from(&viewport.get_untracked(), &active_owner.get_untracked()),
                                             );
                                             spawn_local(async move {
-                                                let request_body = serde_json::json!({
-                                                    "title": document.title.clone(),
-                                                    "document": document,
-                                                });
-                                                let request = gloo_net::http::Request::post("/api/claims")
-                                                    .header("Content-Type", "application/json")
-                                                    .body(serde_json::to_string(&request_body).unwrap_or_default());
-
-                                                match request {
-                                                    Ok(request) => match request.send().await {
-                                                        Ok(response) if response.ok() => {
-                                                            if let Ok(payload) = response.json::<SavedClaimResponse>().await {
-                                                                status_message.set(Some(format!("Saved snapshot {}", payload.id)));
-                                                            }
-                                                        }
-                                                        _ => error_message.set(Some("Failed to save snapshot".to_string())),
-                                                    },
-                                                    Err(_) => error_message.set(Some("Failed to build save request".to_string())),
+                                                match create_saved_claim(document).await {
+                                                    Ok(payload) => {
+                                                        mark_session_saved(session, payload.id.clone());
+                                                        status_message.set(Some(format!("Saved snapshot {}", payload.id)));
+                                                    }
+                                                    Err(error) => {
+                                                        error_message.set(Some(error));
+                                                    }
                                                 }
                                             });
                                         }
@@ -2766,6 +2842,29 @@ mod tests {
             let decoded = base64_url_decode(&encoded).expect("decode");
             assert_eq!(decoded, input);
         }
+    }
+
+    #[test]
+    fn reusable_share_url_requires_clean_saved_session() {
+        let session = ClaimWorkingSession {
+            document: ClaimDocumentV1::blank(),
+            follow_live: false,
+            dirty: false,
+            selection: Vec::new(),
+            source_snapshot_id: Some("snapshot-123".to_string()),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+        };
+        assert_eq!(
+            reusable_share_url(&session),
+            Some("/claims/s/snapshot-123".to_string())
+        );
+
+        let dirty_session = ClaimWorkingSession {
+            dirty: true,
+            ..session
+        };
+        assert_eq!(reusable_share_url(&dirty_session), None);
     }
 
     #[test]
