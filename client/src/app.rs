@@ -43,7 +43,7 @@ pub(crate) fn canvas_dimensions() -> (f64, f64) {
     (w, h)
 }
 
-fn set_loading_shell_step(step: &str) {
+pub(crate) fn set_loading_shell_step(step: &str) {
     let Some(window) = web_sys::window() else {
         return;
     };
@@ -55,7 +55,7 @@ fn set_loading_shell_step(step: &str) {
     }
 }
 
-fn remove_loading_shell() {
+pub(crate) fn remove_loading_shell() {
     let Some(window) = web_sys::window() else {
         return;
     };
@@ -118,6 +118,14 @@ pub(crate) struct BoldConnections(pub RwSignal<bool>);
 pub(crate) struct ConnectionOpacityScale(pub RwSignal<f64>);
 #[derive(Clone, Copy)]
 pub(crate) struct ConnectionThicknessScale(pub RwSignal<f64>);
+#[derive(Clone, Copy)]
+pub(crate) struct ConnectionZoomFadeStart(pub RwSignal<f64>);
+#[derive(Clone, Copy)]
+pub(crate) struct ConnectionZoomFadeEnd(pub RwSignal<f64>);
+#[derive(Clone, Copy)]
+pub(crate) struct SuppressCooldownVisuals(pub RwSignal<bool>);
+#[derive(Clone, Copy)]
+pub(crate) struct FillAlphaBoost(pub RwSignal<f64>);
 #[derive(Clone, Copy)]
 pub(crate) struct ResourceHighlight(pub RwSignal<bool>);
 #[derive(Clone, Copy)]
@@ -710,12 +718,15 @@ fn normalize_heat_selected_season_id(meta: &HistoryHeatMeta, selected: Option<i3
         _ => latest_valid,
     }
 }
-/// Root application component. Provides global reactive signals via context.
 #[component]
 pub fn App() -> impl IntoView {
+    view! { <MapPage /> }
+}
+
+#[component]
+pub fn MapPage() -> impl IntoView {
     let location = use_location();
     let navigate = use_navigate();
-
     // Global signals
     let territories: RwSignal<ClientTerritoryMap> = RwSignal::new(Default::default());
     let viewport: RwSignal<Viewport> = RwSignal::new(Viewport::default());
@@ -856,6 +867,10 @@ pub fn App() -> impl IntoView {
     provide_context(BoldConnections(bold_connections));
     provide_context(ConnectionOpacityScale(connection_opacity_scale));
     provide_context(ConnectionThicknessScale(connection_thickness_scale));
+    provide_context(ConnectionZoomFadeStart(RwSignal::new(0.15)));
+    provide_context(ConnectionZoomFadeEnd(RwSignal::new(0.45)));
+    provide_context(SuppressCooldownVisuals(RwSignal::new(false)));
+    provide_context(FillAlphaBoost(RwSignal::new(0.0)));
     provide_context(ResourceHighlight(resource_highlight));
     provide_context(ShowResourceIcons(show_resource_icons));
     provide_context(ShowTerritoryOrnaments(show_territory_ornaments));

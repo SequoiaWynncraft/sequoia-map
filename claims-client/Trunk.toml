@@ -1,0 +1,8 @@
+[build]
+target = "index.html"
+dist = "dist"
+public_url = "/claims-app/"
+release = true
+
+[watch]
+watch = ["src", "../client/src", "../shared/src", "index.html", "input.css"]

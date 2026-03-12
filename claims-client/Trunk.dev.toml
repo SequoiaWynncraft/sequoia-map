@@ -1,14 +1,12 @@
 [build]
 target = "index.html"
 dist = "dist"
+public_url = "/claims-app/"
 release = true
-
-[tools]
-tailwindcss = "4.2.0"
 
 [serve]
 addresses = ["0.0.0.0"]
-port = 8081
+port = 8082
 
 [watch]
 watch = ["src", "index.html", "input.css"]

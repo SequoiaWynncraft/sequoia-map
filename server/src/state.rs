@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use sequoia_shared::{
-    GuildRef, LiveState, Resources, SeasonScalarSample, TerritoryMap, TerritoryRuntimeData,
+    ClaimDocumentV1, GuildRef, LiveState, Resources, SeasonScalarSample, TerritoryMap,
+    TerritoryRuntimeData,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -14,14 +16,23 @@ use tokio::sync::{RwLock, broadcast};
 use tracing::warn;
 
 use crate::config::{
-    internal_ingest_token, max_history_replay_events, max_history_sr_sample_rows,
-    max_ingest_updates_per_request, seq_live_handoff_v1_enabled, sse_broadcast_buffer,
-    upstream_connect_timeout, upstream_http_timeout,
+    WYNNCRAFT_GUILD_LIST_URL, internal_ingest_token, max_history_replay_events,
+    max_history_sr_sample_rows, max_ingest_updates_per_request, seq_live_handoff_v1_enabled,
+    sse_broadcast_buffer, upstream_connect_timeout, upstream_http_timeout,
 };
 
 pub type GuildColor = (u8, u8, u8);
 pub type GuildColorMap = HashMap<String, GuildColor>;
 pub type CachedScalarSample = (SeasonScalarSample, Arc<Bytes>);
+
+fn initial_claim_id_seed() -> u64 {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    let pid = u64::from(std::process::id());
+    (now ^ (now >> 32) ^ pid) & u64::from(u32::MAX)
+}
 
 /// Normalize guild names for resilient color cache lookups.
 /// - trims leading/trailing whitespace
@@ -148,6 +159,7 @@ pub struct AppState {
     pub next_seq_reserved: Arc<AtomicU64>,
     pub event_tx: broadcast::Sender<PreSerializedEvent>,
     pub guild_cache: Arc<DashMap<String, CachedGuild>>,
+    pub guild_catalog_cache: Arc<RwLock<Option<CachedGuildCatalog>>>,
     /// Extra territory data (resources, connections) from supplemental gist.
     pub extra_terr: Arc<RwLock<HashMap<String, ExtraTerrInfo>>>,
     pub extra_data_dirty: Arc<AtomicBool>,
@@ -166,6 +178,8 @@ pub struct AppState {
     pub max_ingest_updates_per_request: usize,
     pub max_history_replay_events: i64,
     pub max_history_sr_sample_rows: i64,
+    pub next_claim_id: Arc<AtomicU64>,
+    pub guild_catalog_url: Arc<String>,
     pub observability: Arc<ObservabilityCounters>,
 }
 
@@ -173,6 +187,27 @@ pub struct AppState {
 pub struct CachedGuild {
     pub data: String,
     pub fetched_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CachedGuildCatalogEntry {
+    pub uuid: String,
+    pub name: String,
+    pub prefix: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedGuildCatalog {
+    pub entries: Vec<CachedGuildCatalogEntry>,
+    pub fetched_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredClaimLayout {
+    pub id: String,
+    pub created_at: DateTime<Utc>,
+    pub title: Option<String>,
+    pub document: ClaimDocumentV1,
 }
 
 #[derive(Debug, Default)]
@@ -336,6 +371,7 @@ impl AppState {
             next_seq_reserved: Arc::new(AtomicU64::new(0)),
             event_tx,
             guild_cache: Arc::new(DashMap::new()),
+            guild_catalog_cache: Arc::new(RwLock::new(None)),
             extra_terr: Arc::new(RwLock::new(HashMap::new())),
             extra_data_dirty: Arc::new(AtomicBool::new(true)),
             guild_colors: Arc::new(RwLock::new(HashMap::new())),
@@ -349,6 +385,8 @@ impl AppState {
             max_ingest_updates_per_request: max_ingest_updates_per_request(),
             max_history_replay_events: max_history_replay_events(),
             max_history_sr_sample_rows: max_history_sr_sample_rows(),
+            next_claim_id: Arc::new(AtomicU64::new(initial_claim_id_seed())),
+            guild_catalog_url: Arc::new(WYNNCRAFT_GUILD_LIST_URL.to_string()),
             observability: Arc::new(ObservabilityCounters::default()),
         }
     }

@@ -64,6 +64,7 @@ Run the full dev stack (Postgres + server hot reload + ingest hot reload + clien
 - Postgres (optional host access): `localhost:55432` (override with `POSTGRES_PORT`)
 - `./dev.sh` creates `.env.dev.local` on first run with stable `POSTGRES_PASSWORD`, `INTERNAL_INGEST_TOKEN`, and a free `POSTGRES_PORT`, then reuses them on later runs.
 - `./dev.sh` also pins the Docker Compose project name to `sequoia-map-mod-ingest`, so this repo always reuses the same local containers and volumes instead of creating a second stack under a different checkout name.
+- `./dev.sh` aligns dev Postgres with the Postgres 18 `PGDATA` layout, so existing `18/docker` volumes get reused and stale volume roots do not wedge `initdb`.
 - Pass normal Compose args through the script when needed: `./dev.sh down`, `./dev.sh logs -f server`, `./dev.sh ps`
 - Server reload: `cargo watch` (watches `server/` and `shared/`)
 - Ingest reload: `cargo watch` (watches `services/sequoia-ingest/` and `shared/`)
@@ -308,7 +309,7 @@ Coolify/VPS monitoring notes:
 ## CI And Integration Tests
 
 - GitHub Actions workflow: `.github/workflows/ci.yml`
-- CI provisions PostgreSQL (`postgres:18.3-alpine`) and runs server/client checks plus server tests.
+- CI provisions PostgreSQL (`postgres:18.3-alpine`) and runs server, client, and `claims-client` checks plus server tests.
 - Included a -Postgres integration test that verifies:
   - poller update persistence into `territory_events`
   - `/api/history/bounds`

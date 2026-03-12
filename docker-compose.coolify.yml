@@ -14,7 +14,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-sequoia}
       POSTGRES_USER: ${POSTGRES_USER:-sequoia}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
-      PGDATA: /var/lib/postgresql/18/docker
+      PGDATA: ${POSTGRES_PGDATA:-/var/lib/postgresql/18/docker}
     mem_limit: 768m
     mem_reservation: 256m
     volumes:

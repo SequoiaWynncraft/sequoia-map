@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::OnceLock;
 
 use axum::{
     Router,
@@ -16,7 +17,9 @@ use crate::state::AppState;
 
 pub(crate) fn build_app(state: AppState) -> Router {
     let api_body_limit = crate::config::api_body_limit_bytes();
-    let static_assets = static_assets_router("client/dist");
+    let static_assets = Router::new()
+        .nest("/claims-app", static_assets_router("claims-client/dist"))
+        .merge(static_assets_router("client/dist"));
 
     let app = Router::new()
         .route(
@@ -36,8 +39,24 @@ pub(crate) fn build_app(state: AppState) -> Router {
             axum::routing::get(routes::api::get_guilds_online),
         )
         .route(
+            "/api/guilds/catalog",
+            axum::routing::get(routes::claims::get_guild_catalog),
+        )
+        .route(
+            "/api/claims/bootstrap/geometry",
+            axum::routing::get(routes::claims::get_claims_bootstrap_geometry),
+        )
+        .route(
             "/api/season/scalar/current",
             axum::routing::get(routes::api::get_season_scalar_current),
+        )
+        .route(
+            "/api/claims",
+            axum::routing::post(routes::claims::create_claim_layout),
+        )
+        .route(
+            "/api/claims/{id}",
+            axum::routing::get(routes::claims::get_claim_layout),
         )
         .route(
             "/api/wars/live",
@@ -82,7 +101,9 @@ pub(crate) fn build_app(state: AppState) -> Router {
             axum::routing::get(routes::history::history_heat),
         )
         .route("/api", axum::routing::any(api_not_found))
-        .route("/api/{*path}", axum::routing::any(api_not_found));
+        .route("/api/{*path}", axum::routing::any(api_not_found))
+        .route("/claims", axum::routing::get(serve_claims_route))
+        .route("/claims/{*path}", axum::routing::get(serve_claims_route));
 
     app.layer(CompressionLayer::new())
         .layer(DefaultBodyLimit::max(api_body_limit))
@@ -125,11 +146,16 @@ async fn set_static_cache_control(request: Request, next: Next) -> Response {
 }
 
 fn cache_control_for_path(path: &str) -> Option<&'static str> {
-    if is_hashed_bundle_asset(path) {
+    let normalized_path = path.strip_prefix("/claims-app").unwrap_or(path);
+
+    if is_hashed_bundle_asset(normalized_path) {
         return Some("public, max-age=31536000, immutable");
     }
 
-    if path.starts_with("/tiles/") || path.starts_with("/fonts/") || path.starts_with("/icons/") {
+    if normalized_path.starts_with("/tiles/")
+        || normalized_path.starts_with("/fonts/")
+        || normalized_path.starts_with("/icons/")
+    {
         return Some("public, max-age=86400");
     }
 
@@ -152,6 +178,87 @@ fn is_hashed_bundle_asset(path: &str) -> bool {
     filename
         .split(['-', '_', '.'])
         .any(|segment| segment.len() >= 8 && segment.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+async fn serve_claims_route(request: Request) -> impl IntoResponse {
+    let path = request.uri().path().to_owned();
+    let html_path = if is_claims_editor_path(&path) {
+        claims_editor_index_path()
+    } else {
+        claims_launcher_path()
+    };
+    serve_html_file(html_path).await
+}
+
+async fn serve_html_file(path: &str) -> Response {
+    match tokio::fs::read(path).await {
+        Ok(body) => (
+            [
+                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            body,
+        )
+            .into_response(),
+        Err(err) => {
+            tracing::error!(path = %path, error = %err, "failed to read HTML file");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+fn is_claims_editor_path(path: &str) -> bool {
+    matches!(path, "/claims/new" | "/claims/new/")
+        || path.starts_with("/claims/new/")
+        || matches!(path, "/claims/s" | "/claims/s/")
+        || path.starts_with("/claims/s/")
+}
+
+fn resolve_first_existing_path<I>(candidates: I, fallback: String) -> String
+where
+    I: IntoIterator<Item = String>,
+{
+    candidates
+        .into_iter()
+        .find(|path| Path::new(path).exists())
+        .unwrap_or(fallback)
+}
+
+fn claims_launcher_path() -> &'static str {
+    static CLAIMS_LAUNCHER_HTML_PATH: OnceLock<String> = OnceLock::new();
+
+    let manifest_root = env!("CARGO_MANIFEST_DIR");
+    CLAIMS_LAUNCHER_HTML_PATH
+        .get_or_init(|| {
+            resolve_first_existing_path(
+                [
+                    "server/static/claims-launcher.html".to_string(),
+                    format!("{manifest_root}/static/claims-launcher.html"),
+                    format!("{manifest_root}/../server/static/claims-launcher.html"),
+                ],
+                format!("{manifest_root}/static/claims-launcher.html"),
+            )
+        })
+        .as_str()
+}
+
+fn claims_editor_index_path() -> &'static str {
+    static CLAIMS_EDITOR_INDEX_PATH: OnceLock<String> = OnceLock::new();
+
+    let manifest_root = env!("CARGO_MANIFEST_DIR");
+    CLAIMS_EDITOR_INDEX_PATH
+        .get_or_init(|| {
+            resolve_first_existing_path(
+                [
+                    "claims-client/dist/index.html".to_string(),
+                    "claims-client/index.html".to_string(),
+                    format!("{manifest_root}/../claims-client/dist/index.html"),
+                    format!("{manifest_root}/../claims-client/index.html"),
+                ],
+                format!("{manifest_root}/../claims-client/index.html"),
+            )
+        })
+        .as_str()
 }
 
 #[cfg(test)]
@@ -184,12 +291,41 @@ mod tests {
             cache_control_for_path("/fonts/minecraft-regular.otf"),
             Some("public, max-age=86400")
         );
+        assert_eq!(
+            cache_control_for_path("/claims-app/icons/crown_icon.png"),
+            Some("public, max-age=86400")
+        );
+        assert_eq!(
+            cache_control_for_path("/claims-app/tiles/tile_0_0.webp"),
+            Some("public, max-age=86400")
+        );
     }
 
     #[test]
     fn no_cache_header_override_for_html() {
         assert_eq!(cache_control_for_path("/"), None);
         assert_eq!(cache_control_for_path("/index.html"), None);
+    }
+
+    #[test]
+    fn claims_launcher_path_resolves() {
+        let index_path = claims_launcher_path();
+        assert!(Path::new(&index_path).exists());
+    }
+
+    #[test]
+    fn claims_editor_index_path_falls_back_to_source_html() {
+        let index_path = claims_editor_index_path();
+        assert!(Path::new(&index_path).exists());
+    }
+
+    #[test]
+    fn claims_editor_paths_are_detected() {
+        assert!(is_claims_editor_path("/claims/new/blank"));
+        assert!(is_claims_editor_path("/claims/new/import"));
+        assert!(is_claims_editor_path("/claims/s/example"));
+        assert!(!is_claims_editor_path("/claims"));
+        assert!(!is_claims_editor_path("/claims/unknown"));
     }
 
     #[tokio::test]

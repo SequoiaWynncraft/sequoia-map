@@ -2,6 +2,7 @@ use std::time::Duration;
 
 pub const WYNNCRAFT_TERRITORY_URL: &str = "https://api.wynncraft.com/v3/guild/list/territory";
 pub const WYNNCRAFT_GUILD_URL: &str = "https://api.wynncraft.com/v3/guild";
+pub const WYNNCRAFT_GUILD_LIST_URL: &str = "https://api.wynncraft.com/v3/guild/list/guild";
 
 pub const TERREXTRA_URL: &str = "https://gist.githubusercontent.com/Zatzou/14c82f2df0eb4093dfa1d543b78a73a8/raw/d03273fce33c031498c07e21b94f17644c8aae98/terrextra.json";
 pub const TERREXTRA_REFRESH_SECS: u64 = 3600; // re-fetch hourly

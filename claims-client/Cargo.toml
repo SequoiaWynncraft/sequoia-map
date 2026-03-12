@@ -1,12 +1,11 @@
 [package]
-name = "sequoia-client"
+name = "sequoia-claims-client"
 edition.workspace = true
 version.workspace = true
 
 [dependencies]
 sequoia-shared = { path = "../shared" }
-leptos = { version = "0.8.17", default-features = false, features = ["csr"] }
-leptos_router = { version = "0.8.12", default-features = false }
+leptos = { version = "0.7", default-features = false, features = ["csr"] }
 web-sys = { version = "0.3", features = [
     "AbortController",
     "AbortSignal",
@@ -18,8 +17,10 @@ web-sys = { version = "0.3", features = [
     "File",
     "FileList",
     "HtmlElement",
+    "HtmlImageElement",
     "HtmlInputElement",
     "Location",
+    "MessageEvent",
     "Navigator",
     "TextMetrics",
     "Window",

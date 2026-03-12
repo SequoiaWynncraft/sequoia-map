@@ -1,0 +1,782 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sequoia Claims</title>
+    <link rel="preload" href="/fonts/minecraft-regular.otf" as="font" type="font/otf" crossorigin />
+    <link rel="preconnect" href="https://fonts.bunny.net" />
+    <link href="https://fonts.bunny.net/css?family=inter:400,500" rel="stylesheet" />
+    <style>
+      @font-face {
+        font-family: "Silkscreen";
+        src: url("/fonts/minecraft-regular.otf") format("opentype");
+        font-style: normal;
+        font-weight: 400;
+        font-display: swap;
+      }
+
+      @font-face {
+        font-family: "Silkscreen";
+        src: url("/fonts/minecraft-bold.otf") format("opentype");
+        font-style: normal;
+        font-weight: 700;
+        font-display: swap;
+      }
+
+      :root {
+        color-scheme: dark;
+        --color-abyss: #0c0e17;
+        --color-deep: #13161f;
+        --color-surface: #1a1d2a;
+        --color-surface-hover: #232738;
+        --color-border-subtle: #282c3e;
+        --color-border-accent: #3a3f5c;
+        --color-gold: #f5c542;
+        --color-gold-dark: #c49a2a;
+        --color-danger: #e05252;
+        --color-text-primary: #e2e0d8;
+        --color-text-secondary: #9a9590;
+        --color-text-dim: #5a5860;
+      }
+
+      * { box-sizing: border-box; }
+
+      html, body {
+        margin: 0;
+        min-height: 100%;
+        background: var(--color-abyss);
+        color: var(--color-text-primary);
+        font-family: "Inter", system-ui, sans-serif;
+        font-size: 14px;
+        line-height: 1.5;
+      }
+
+      .page {
+        width: min(720px, calc(100vw - 32px));
+        margin: 0 auto;
+        padding: 48px 0 64px;
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+      }
+
+      /* ── Header ── */
+      .header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+      }
+
+      .header h1 {
+        margin: 0;
+        font-family: "Silkscreen", monospace;
+        font-size: 1.1rem;
+        color: var(--color-gold);
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      .status-callout {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 0.82rem;
+        color: var(--color-text-secondary);
+      }
+
+      .status-callout::before {
+        content: "";
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--color-gold);
+        flex-shrink: 0;
+      }
+
+      .status-callout[data-tone="warn"]::before { background: var(--color-gold); }
+      .status-callout[data-tone="error"]::before { background: var(--color-danger); }
+      .status-callout[data-tone="warn"] { color: var(--color-gold); }
+      .status-callout[data-tone="error"] { color: var(--color-danger); }
+
+      /* ── Session Grid (2×2) ── */
+      .session-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+
+      .card {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 16px;
+        border-radius: 10px;
+        border: 1px solid var(--color-border-subtle);
+        background: var(--color-surface);
+        text-decoration: none;
+        color: inherit;
+        transition: border-color 150ms ease, background 150ms ease;
+        cursor: pointer;
+      }
+
+      a.card, button.card {
+        font: inherit;
+        text-align: left;
+        width: 100%;
+      }
+
+      .card:hover, .card:focus-visible {
+        border-color: var(--color-border-accent);
+        background: var(--color-surface-hover);
+      }
+
+      .card[aria-disabled="true"] {
+        cursor: not-allowed;
+        opacity: 0.4;
+      }
+
+      .card[aria-disabled="true"]:hover {
+        border-color: var(--color-border-subtle);
+        background: var(--color-surface);
+      }
+
+      .card h2 {
+        margin: 0;
+        font-family: "Silkscreen", monospace;
+        font-size: 0.85rem;
+        color: var(--color-text-primary);
+        letter-spacing: 0.02em;
+      }
+
+      .card p {
+        margin: 0;
+        font-size: 0.82rem;
+        color: var(--color-text-secondary);
+        line-height: 1.5;
+      }
+
+      .card-footer {
+        margin-top: auto;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        font-size: 0.75rem;
+        color: var(--color-text-dim);
+      }
+
+      .card-arrow {
+        color: var(--color-gold);
+        font-family: "Silkscreen", monospace;
+        font-size: 0.85rem;
+      }
+
+      /* ── Snapshot Row ── */
+      .snapshot-row {
+        display: flex;
+        gap: 8px;
+        align-items: stretch;
+      }
+
+      .snapshot-row input {
+        flex: 1;
+        min-width: 0;
+        padding: 10px 14px;
+        border-radius: 8px;
+        border: 1px solid var(--color-border-subtle);
+        background: var(--color-deep);
+        color: var(--color-text-primary);
+        font: inherit;
+        font-size: 0.85rem;
+      }
+
+      .snapshot-row input::placeholder {
+        color: var(--color-text-dim);
+      }
+
+      .snapshot-row input:focus {
+        outline: none;
+        border-color: var(--color-border-accent);
+      }
+
+      .snapshot-row button {
+        padding: 10px 18px;
+        border-radius: 8px;
+        border: 1px solid var(--color-border-accent);
+        background: var(--color-surface);
+        color: var(--color-text-primary);
+        font: inherit;
+        font-size: 0.85rem;
+        cursor: pointer;
+        transition: border-color 150ms ease, background 150ms ease;
+      }
+
+      .snapshot-row button:hover, .snapshot-row button:focus-visible {
+        border-color: var(--color-gold-dark);
+        background: var(--color-surface-hover);
+      }
+
+      /* ── Presets Section ── */
+      .presets-section {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .presets-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .presets-header h2 {
+        margin: 0;
+        font-family: "Silkscreen", monospace;
+        font-size: 0.85rem;
+        color: var(--color-text-primary);
+        letter-spacing: 0.02em;
+      }
+
+      .pill {
+        padding: 4px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--color-border-subtle);
+        background: var(--color-deep);
+        color: var(--color-text-secondary);
+        font-size: 0.72rem;
+        letter-spacing: 0.04em;
+      }
+
+      .preset-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+        gap: 12px;
+      }
+
+      .preset-card {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 14px;
+        border-radius: 10px;
+        border: 1px solid var(--color-border-subtle);
+        background: var(--color-surface);
+        text-align: left;
+        font: inherit;
+        color: inherit;
+        cursor: pointer;
+        width: 100%;
+        transition: border-color 150ms ease, background 150ms ease;
+      }
+
+      .preset-card:hover, .preset-card:focus-visible {
+        border-color: var(--color-border-accent);
+        background: var(--color-surface-hover);
+      }
+
+      .preset-badge {
+        display: inline-flex;
+        align-self: flex-start;
+        padding: 3px 8px;
+        border-radius: 999px;
+        background: rgba(245, 197, 66, 0.1);
+        color: var(--color-gold);
+        font-size: 0.68rem;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      .preset-card h3 {
+        margin: 0;
+        font-family: "Silkscreen", monospace;
+        font-size: 0.8rem;
+        color: var(--color-text-primary);
+      }
+
+      .preset-copy {
+        margin: 0;
+        font-size: 0.78rem;
+        color: var(--color-text-secondary);
+        line-height: 1.5;
+      }
+
+      .preset-meta {
+        margin-top: auto;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        font-size: 0.72rem;
+        color: var(--color-text-dim);
+      }
+
+      .empty-state {
+        padding: 20px;
+        border-radius: 10px;
+        border: 1px dashed var(--color-border-subtle);
+        background: var(--color-deep);
+      }
+
+      .empty-copy {
+        margin: 0;
+        font-size: 0.82rem;
+        color: var(--color-text-dim);
+        line-height: 1.5;
+      }
+
+      /* ── Refresh Button ── */
+      .refresh-btn {
+        align-self: center;
+        padding: 6px 16px;
+        border-radius: 999px;
+        border: 1px solid var(--color-border-subtle);
+        background: var(--color-deep);
+        color: var(--color-text-secondary);
+        font: inherit;
+        font-size: 0.75rem;
+        cursor: pointer;
+        transition: border-color 150ms ease, color 150ms ease;
+      }
+
+      .refresh-btn:hover, .refresh-btn:focus-visible {
+        border-color: var(--color-border-accent);
+        color: var(--color-text-primary);
+      }
+
+      /* ── Utility ── */
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        border: 0;
+      }
+
+      [hidden] { display: none !important; }
+
+      @media (max-width: 640px) {
+        .page { padding: 28px 0 48px; }
+        .session-grid { grid-template-columns: 1fr; }
+        .preset-grid { grid-template-columns: 1fr; }
+        .header { flex-direction: column; align-items: flex-start; }
+      }
+    </style>
+</head>
+<body>
+    <main class="page">
+        <div class="header">
+            <h1>Claims Editor</h1>
+            <div class="status-callout">
+                <span id="launcher-status">Reading local drafts and presets...</span>
+            </div>
+        </div>
+
+        <div class="session-grid">
+            <a id="blank-card" class="card" href="/claims/new/blank">
+                <h2>Blank Board</h2>
+                <p>Open a neutral territory layout and start painting.</p>
+                <div class="card-footer">
+                    <span>Geometry staged ahead</span>
+                    <span class="card-arrow">-></span>
+                </div>
+            </a>
+
+            <a id="live-card" class="card" href="/claims/new/live">
+                <h2>Current Live Map</h2>
+                <p>Freeze the live territory ownership as your baseline.</p>
+                <div class="card-footer">
+                    <span>Build from live state</span>
+                    <span class="card-arrow">-></span>
+                </div>
+            </a>
+
+            <button id="import-trigger" class="card" type="button">
+                <h2>Import JSON</h2>
+                <p>Load a local claims export into the editor.</p>
+                <div class="card-footer">
+                    <span>File stays in-browser</span>
+                    <span class="card-arrow">-></span>
+                </div>
+            </button>
+
+            <a id="draft-card" class="card" href="/claims/new/draft">
+                <h2>Continue Draft</h2>
+                <p id="draft-copy">Resume the latest local working copy from this browser.</p>
+                <div class="card-footer">
+                    <span id="draft-meta">Checking local storage</span>
+                    <span class="card-arrow">-></span>
+                </div>
+            </a>
+        </div>
+
+        <div class="snapshot-row">
+            <input id="snapshot-id" type="text" placeholder="Snapshot id" autocomplete="off" />
+            <button id="snapshot-open" type="button">Open</button>
+        </div>
+
+        <div class="presets-section">
+            <div class="presets-header">
+                <h2>Presets</h2>
+                <span id="preset-count" class="pill">0 presets</span>
+            </div>
+            <div id="preset-grid" class="preset-grid"></div>
+        </div>
+
+        <button id="refresh-launcher" class="refresh-btn" type="button">Refresh local state</button>
+
+        <span id="draft-pill" hidden>Draft unknown</span>
+        <span id="preset-pill" hidden>Presets unknown</span>
+    </main>
+
+    <input id="import-input" class="sr-only" type="file" accept=".json,application/json" />
+
+    <script>
+      (() => {
+        const DRAFT_STORAGE_KEY = "sequoia_claim_draft_v1";
+        const PRESET_STORAGE_KEY = "sequoia_claim_presets_v1";
+        const IMPORT_HANDOFF_STORAGE_KEY = "sequoia_claim_import_handoff_v1";
+        const LIVE_BOOTSTRAP_STORAGE_KEY = "sequoia_claim_live_bootstrap_v1";
+        const GEOMETRY_BOOTSTRAP_STORAGE_KEY = "sequoia_claim_geometry_bootstrap_v1";
+        const BOOTSTRAP_STORAGE_VERSION = 1;
+        const LIVE_BOOTSTRAP_MAX_AGE_MS = 120000;
+        const GEOMETRY_BOOTSTRAP_MAX_AGE_MS = 3600000;
+
+        const statusEl = document.getElementById("launcher-status");
+        const blankCard = document.getElementById("blank-card");
+        const liveCard = document.getElementById("live-card");
+        const draftCard = document.getElementById("draft-card");
+        const draftCopy = document.getElementById("draft-copy");
+        const draftMeta = document.getElementById("draft-meta");
+        const draftPill = document.getElementById("draft-pill");
+        const presetPill = document.getElementById("preset-pill");
+        const presetCount = document.getElementById("preset-count");
+        const presetGrid = document.getElementById("preset-grid");
+        const importInput = document.getElementById("import-input");
+        const importTrigger = document.getElementById("import-trigger");
+        const snapshotInput = document.getElementById("snapshot-id");
+        const snapshotOpen = document.getElementById("snapshot-open");
+        const refreshLauncher = document.getElementById("refresh-launcher");
+        let liveBootstrapPromise = null;
+        let geometryBootstrapPromise = null;
+
+        if (window.location.hash && window.location.hash.startsWith("#c=")) {
+          window.location.replace("/claims/new/import" + window.location.hash);
+          return;
+        }
+
+        function setStatus(message, tone) {
+          statusEl.textContent = message;
+          const container = statusEl.closest(".status-callout");
+          container.dataset.tone = tone || "";
+        }
+
+        function safeParse(key, fallbackValue) {
+          try {
+            const raw = window.localStorage.getItem(key);
+            if (!raw) {
+              return fallbackValue;
+            }
+            return JSON.parse(raw);
+          } catch (error) {
+            console.warn("claims launcher storage read failed", key, error);
+            return fallbackValue;
+          }
+        }
+
+        function safeSessionParse(key, fallbackValue) {
+          try {
+            const raw = window.sessionStorage.getItem(key);
+            if (!raw) {
+              return fallbackValue;
+            }
+            return JSON.parse(raw);
+          } catch (error) {
+            console.warn("claims launcher session storage read failed", key, error);
+            return fallbackValue;
+          }
+        }
+
+        function readFreshLiveBootstrap() {
+          const payload = safeSessionParse(LIVE_BOOTSTRAP_STORAGE_KEY, null);
+          if (!payload || payload.version !== BOOTSTRAP_STORAGE_VERSION || typeof payload.cached_at_ms !== "number" || !payload.state) {
+            return null;
+          }
+          if (Date.now() - payload.cached_at_ms > LIVE_BOOTSTRAP_MAX_AGE_MS) {
+            return null;
+          }
+          return payload;
+        }
+
+        function readFreshGeometryBootstrap() {
+          const payload = safeSessionParse(GEOMETRY_BOOTSTRAP_STORAGE_KEY, null);
+          if (!payload || payload.version !== BOOTSTRAP_STORAGE_VERSION || typeof payload.cached_at_ms !== "number" || !payload.geometry) {
+            return null;
+          }
+          if (Date.now() - payload.cached_at_ms > GEOMETRY_BOOTSTRAP_MAX_AGE_MS) {
+            return null;
+          }
+          return payload;
+        }
+
+        async function stageGeometryBootstrap(force) {
+          if (!force) {
+            const cached = readFreshGeometryBootstrap();
+            if (cached) {
+              return cached;
+            }
+            if (geometryBootstrapPromise) {
+              return geometryBootstrapPromise;
+            }
+          }
+
+          geometryBootstrapPromise = fetch("/api/claims/bootstrap/geometry", {
+            credentials: "same-origin",
+            cache: "default"
+          })
+            .then(async (response) => {
+              if (!response.ok) {
+                throw new Error("HTTP " + response.status);
+              }
+              const geometry = await response.json();
+              const payload = {
+                version: BOOTSTRAP_STORAGE_VERSION,
+                cached_at_ms: Date.now(),
+                geometry
+              };
+              window.sessionStorage.setItem(GEOMETRY_BOOTSTRAP_STORAGE_KEY, JSON.stringify(payload));
+              return payload;
+            })
+            .finally(() => {
+              geometryBootstrapPromise = null;
+            });
+
+          return geometryBootstrapPromise;
+        }
+
+        async function stageLiveBootstrap(force) {
+          if (!force) {
+            const cached = readFreshLiveBootstrap();
+            if (cached) {
+              return cached;
+            }
+            if (liveBootstrapPromise) {
+              return liveBootstrapPromise;
+            }
+          }
+
+          setStatus("Syncing live territory data in the background...", "");
+          liveBootstrapPromise = fetch("/api/live/state", {
+            credentials: "same-origin",
+            cache: "no-store"
+          })
+            .then(async (response) => {
+              if (!response.ok) {
+                throw new Error("HTTP " + response.status);
+              }
+              const state = await response.json();
+              const payload = {
+                version: BOOTSTRAP_STORAGE_VERSION,
+                cached_at_ms: Date.now(),
+                state
+              };
+              window.sessionStorage.setItem(LIVE_BOOTSTRAP_STORAGE_KEY, JSON.stringify(payload));
+              return payload;
+            })
+            .then((payload) => {
+              setStatus("Launcher ready. Live territory data is staged for instant editor entry.", "");
+              return payload;
+            })
+            .catch((error) => {
+              console.error("claims launcher live bootstrap failed", error);
+              setStatus("Launcher ready. Live territory prefetch failed, so the editor will fetch on entry.", "warn");
+              throw error;
+            })
+            .finally(() => {
+              liveBootstrapPromise = null;
+            });
+
+          return liveBootstrapPromise;
+        }
+
+        async function navigateWithWarmBootstrap(event, href, label, options) {
+          event.preventDefault();
+          const warmLive = !!(options && options.live);
+          setStatus("Preparing " + label + "...", "");
+          try {
+            const warmers = [stageGeometryBootstrap(false)];
+            if (warmLive) {
+              warmers.push(stageLiveBootstrap(false));
+            }
+            await Promise.race([
+              Promise.all(warmers),
+              new Promise((resolve) => window.setTimeout(resolve, 900))
+            ]);
+          } catch (_) {
+            // The editor route still has its own bootstrap fallback.
+          }
+          window.location.href = href;
+        }
+
+        function setDraftEnabled(enabled) {
+          draftCard.setAttribute("aria-disabled", enabled ? "false" : "true");
+          if (enabled) {
+            draftCard.removeAttribute("tabindex");
+          } else {
+            draftCard.setAttribute("tabindex", "-1");
+          }
+        }
+
+        function navigateToSnapshot() {
+          const id = snapshotInput.value.trim();
+          if (!id) {
+            setStatus("Enter a snapshot id before opening a saved snapshot.", "warn");
+            snapshotInput.focus();
+            return;
+          }
+          window.location.href = "/claims/s/" + encodeURIComponent(id);
+        }
+
+        function writeImportHandoff(document, sourceLabel) {
+          const payload = {
+            document,
+            follow_live: false,
+            selection: [],
+            source_snapshot_id: null,
+            source_label: sourceLabel || null
+          };
+          window.sessionStorage.setItem(IMPORT_HANDOFF_STORAGE_KEY, JSON.stringify(payload));
+        }
+
+        function renderPresets(presets) {
+          presetGrid.innerHTML = "";
+          presetCount.textContent = presets.length + (presets.length === 1 ? " preset" : " presets");
+          presetPill.textContent = presets.length === 0 ? "No presets" : presets.length + " presets ready";
+
+          if (!presets.length) {
+            const empty = document.createElement("div");
+            empty.className = "empty-state";
+            empty.innerHTML = '<p class="empty-copy">No local presets saved yet. Build a layout in the editor and save a preset to pin it here.</p>';
+            presetGrid.appendChild(empty);
+            return;
+          }
+
+          for (const preset of presets) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "preset-card";
+
+            const overrideCount = preset && preset.document && preset.document.overrides
+              ? Object.keys(preset.document.overrides).length
+              : 0;
+            const title = preset && preset.name ? preset.name : "Untitled preset";
+
+            button.innerHTML = `
+              <span class="preset-badge">Preset</span>
+              <h3>${title.replace(/[&<>"]/g, "")}</h3>
+              <p class="preset-copy">Open this stored local setup inside the dedicated claims editor.</p>
+              <div class="preset-meta">
+                <span>${overrideCount} override${overrideCount === 1 ? "" : "s"}</span>
+                <span class="card-arrow">-></span>
+              </div>
+            `;
+
+            button.addEventListener("click", () => {
+              try {
+                writeImportHandoff(preset.document, "preset");
+                stageGeometryBootstrap(false).catch(() => {});
+                window.location.href = "/claims/new/import";
+              } catch (error) {
+                console.error(error);
+                setStatus("Failed to stage preset for the claims editor.", "error");
+              }
+            });
+
+            presetGrid.appendChild(button);
+          }
+        }
+
+        function refreshLocalState() {
+          const draft = safeParse(DRAFT_STORAGE_KEY, null);
+          const presets = safeParse(PRESET_STORAGE_KEY, []);
+
+          const hasDraft = !!draft;
+          setDraftEnabled(hasDraft);
+          draftMeta.textContent = hasDraft ? "Local draft available" : "No local draft saved";
+          draftCopy.textContent = hasDraft
+            ? "Resume the latest local working copy from this browser."
+            : "No draft is stored in this browser yet.";
+          draftPill.textContent = hasDraft ? "Draft ready" : "No draft";
+
+          renderPresets(Array.isArray(presets) ? presets : []);
+
+          setStatus(
+            hasDraft || (Array.isArray(presets) && presets.length)
+              ? "Launcher ready. Choose a route to enter the editor."
+              : "Launcher ready. No local state found yet.",
+            ""
+          );
+        }
+
+        draftCard.addEventListener("click", (event) => {
+          if (draftCard.getAttribute("aria-disabled") === "true") {
+            event.preventDefault();
+            setStatus("No local draft is available in this browser yet.", "warn");
+          }
+        });
+
+        blankCard.addEventListener("click", (event) => {
+          navigateWithWarmBootstrap(event, blankCard.href, "blank board", { live: false });
+        });
+
+        liveCard.addEventListener("click", (event) => {
+          navigateWithWarmBootstrap(event, liveCard.href, "live snapshot", { live: true });
+        });
+
+        importTrigger.addEventListener("click", () => {
+          importInput.value = "";
+          importInput.click();
+        });
+
+        importInput.addEventListener("change", async () => {
+          const file = importInput.files && importInput.files[0];
+          if (!file) {
+            return;
+          }
+
+          try {
+            const text = await file.text();
+            const document = JSON.parse(text);
+            writeImportHandoff(document, "file");
+            stageGeometryBootstrap(false).catch(() => {});
+            window.location.href = "/claims/new/import";
+          } catch (error) {
+            console.error(error);
+            setStatus("Import failed before the editor handoff. Check that the file is valid JSON.", "error");
+          }
+        });
+
+        snapshotOpen.addEventListener("click", navigateToSnapshot);
+        snapshotInput.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            navigateToSnapshot();
+          }
+        });
+
+        refreshLauncher.addEventListener("click", refreshLocalState);
+        refreshLocalState();
+        stageGeometryBootstrap(false)
+          .then(() => {
+            setStatus("Launcher ready. Territory geometry is staged for fast editor entry.", "");
+          })
+          .catch(() => {
+            setStatus("Launcher ready. Geometry prefetch failed, so the editor will fetch on entry.", "warn");
+          });
+      })();
+    </script>
+</body>
+</html>

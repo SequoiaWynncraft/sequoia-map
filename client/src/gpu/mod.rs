@@ -837,6 +837,7 @@ pub struct GpuRenderer {
     // Resource icon pipeline
     icon_renderer: Option<GpuIconRenderer>,
     icon_dirty: bool,
+    supports_gpu_icons: bool,
 
     // Track current dimensions
     width: u32,
@@ -879,6 +880,10 @@ pub struct GpuRenderer {
     pub bold_connections: bool,
     pub connection_opacity_scale: f32,
     pub connection_thickness_scale: f32,
+    pub connection_zoom_fade_start: f32,
+    pub connection_zoom_fade_end: f32,
+    pub suppress_cooldown_visuals: bool,
+    pub fill_alpha_boost: f32,
     pub static_tag_color: NameColor,
     pub use_readable_font: bool,
     pub dynamic_show_countdown: bool,
@@ -936,6 +941,7 @@ impl GpuRenderer {
         backends: wgpu::Backends,
         backend_path: &str,
     ) -> Result<Self, String> {
+        let supports_gpu_icons = backends != wgpu::Backends::GL;
         let width = canvas.width().max(1);
         let height = canvas.height().max(1);
         let rect = canvas.get_bounding_client_rect();
@@ -1031,6 +1037,11 @@ impl GpuRenderer {
             .into(),
         );
         surface.configure(&device, &surface_config);
+        if !supports_gpu_icons {
+            web_sys::console::warn_1(
+                &"GPU icon overlays disabled on the WebGL renderer path".into(),
+            );
+        }
 
         // --- Shared geometry ---
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1556,6 +1567,7 @@ impl GpuRenderer {
             territory_name_cache: HashMap::new(),
             icon_renderer: None,
             icon_dirty: false,
+            supports_gpu_icons,
             width,
             height,
             dpr,
@@ -1574,7 +1586,7 @@ impl GpuRenderer {
                 webgl2: backends == wgpu::Backends::GL,
                 gpu_text_msdf: true,
                 gpu_dynamic_labels: true,
-                compatibility_fallback: false,
+                compatibility_fallback: !supports_gpu_icons,
             },
             frame_metrics: FrameMetrics::default(),
             thick_cooldown_borders: false,
@@ -1588,6 +1600,10 @@ impl GpuRenderer {
             bold_connections: false,
             connection_opacity_scale: 1.0,
             connection_thickness_scale: 1.0,
+            connection_zoom_fade_start: 0.15,
+            connection_zoom_fade_end: 0.45,
+            suppress_cooldown_visuals: false,
+            fill_alpha_boost: 0.0,
             static_tag_color: NameColor::Guild,
             use_readable_font: false,
             dynamic_show_countdown: false,
@@ -2736,8 +2752,11 @@ impl GpuRenderer {
                 let flags =
                     (is_hovered as u32) + (is_selected as u32) * 2 + (is_headquarters as u32) * 4;
 
-                let acquired_rel_secs =
-                    (ct.territory.acquired.timestamp() as f64 - start_secs) as f32;
+                let acquired_rel_secs = if self.suppress_cooldown_visuals {
+                    -1_000_000.0_f32
+                } else {
+                    (ct.territory.acquired.timestamp() as f64 - start_secs) as f32
+                };
 
                 // Encode animation params for GPU-side interpolation
                 let (anim_color, anim_time) = if heat_mode_enabled {
@@ -2767,10 +2786,16 @@ impl GpuRenderer {
                     ],
                     color: [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0],
                     state: [
-                        fill_alpha,
+                        fill_alpha + self.fill_alpha_boost,
                         0.72,
                         flags as f32,
-                        if thick_cooldown_borders { 2.0 } else { 1.0 },
+                        if self.suppress_cooldown_visuals {
+                            1.0
+                        } else if thick_cooldown_borders {
+                            2.0
+                        } else {
+                            1.0
+                        },
                     ],
                     cooldown: [acquired_rel_secs, 0.0, 0.0, 0.0],
                     anim_color,
@@ -3198,7 +3223,11 @@ impl GpuRenderer {
                 let timer_visible_at_zoom = vp.scale >= DYNAMIC_TIMER_VISIBILITY_MIN_SCALE;
                 let show_dynamic_cooldown =
                     timer_visible_at_zoom && self.dynamic_show_countdown && state.is_fresh;
-                let show_dynamic_time = timer_visible_at_zoom && !show_dynamic_cooldown;
+                let any_time_format = self.dynamic_show_countdown
+                    || self.dynamic_show_granular_map_time
+                    || self.dynamic_show_compound_map_time;
+                let show_dynamic_time =
+                    timer_visible_at_zoom && any_time_format && !show_dynamic_cooldown;
                 let has_timer_line = show_dynamic_time || show_dynamic_cooldown;
                 let static_name_bottom = static_name_bottom_bound(
                     self.use_static_gpu_labels,
@@ -3529,7 +3558,11 @@ impl GpuRenderer {
             let timer_visible_at_zoom = vp.scale >= DYNAMIC_TIMER_VISIBILITY_MIN_SCALE;
             let cooldown_timer_visible =
                 timer_visible_at_zoom && state.is_fresh && self.dynamic_show_countdown;
-            let show_dynamic_time = timer_visible_at_zoom && !cooldown_timer_visible;
+            let any_time_format = self.dynamic_show_countdown
+                || self.dynamic_show_granular_map_time
+                || self.dynamic_show_compound_map_time;
+            let show_dynamic_time =
+                timer_visible_at_zoom && any_time_format && !cooldown_timer_visible;
             let has_timer_line = cooldown_timer_visible || show_dynamic_time;
 
             let static_name_bottom = static_name_bottom_bound(
@@ -3612,7 +3645,11 @@ impl GpuRenderer {
             return;
         }
 
-        let zoom_fade = smoothstep_f32(0.15, 0.45, scale as f32);
+        let zoom_fade = smoothstep_f32(
+            self.connection_zoom_fade_start,
+            self.connection_zoom_fade_end,
+            scale as f32,
+        );
         if zoom_fade < 0.001 {
             self.connection_count = 0;
             self.connection_dirty = false;
@@ -3798,7 +3835,9 @@ impl GpuRenderer {
                 return false;
             }
         }
-        if self.use_full_gpu_text
+        if !self.supports_gpu_icons {
+            self.icon_dirty = false;
+        } else if self.use_full_gpu_text
             && let Some(icon_set) = icons.as_ref()
             && self.icon_renderer.is_none()
         {

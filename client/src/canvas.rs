@@ -1,6 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
@@ -8,12 +9,13 @@ use web_sys::{HtmlCanvasElement, MouseEvent, PointerEvent, WheelEvent};
 
 use crate::app::{
     AbbreviateNames, BoldConnections, ConnectionOpacityScale, ConnectionThicknessScale,
-    CurrentMode, DetailReturnGuild, HeatEntriesByTerritory, HeatMaxTakeCount, HeatModeEnabled,
-    HeatWindowLabel, HistoryTimestamp, Hovered, IsMobile, LabelScaleDynamic, LabelScaleIcons,
-    LabelScaleMaster, LabelScaleStatic, LabelScaleStaticName, MapMode, NameColorSetting,
-    PeekTerritory, ReadableFont, ResourceHighlight, Selected, ShowCompoundMapTime, ShowCountdown,
-    ShowGranularMapTime, ShowMinimap, ShowNames, ShowResourceIcons, ShowSettings,
-    ShowTerritoryOrnaments, SidebarOpen, SidebarTransient, TagColorSetting, ThickCooldownBorders,
+    ConnectionZoomFadeEnd, ConnectionZoomFadeStart, CurrentMode, DetailReturnGuild, FillAlphaBoost,
+    HeatEntriesByTerritory, HeatMaxTakeCount, HeatModeEnabled, HeatWindowLabel, HistoryTimestamp,
+    Hovered, IsMobile, LabelScaleDynamic, LabelScaleIcons, LabelScaleMaster, LabelScaleStatic,
+    LabelScaleStaticName, MapMode, NameColorSetting, PeekTerritory, ReadableFont,
+    ResourceHighlight, Selected, ShowCompoundMapTime, ShowCountdown, ShowGranularMapTime,
+    ShowMinimap, ShowNames, ShowResourceIcons, ShowSettings, ShowTerritoryOrnaments, SidebarOpen,
+    SidebarTransient, SuppressCooldownVisuals, TagColorSetting, ThickCooldownBorders,
 };
 use crate::gpu::{GpuRenderer, RenderFrameInput};
 use crate::icons::{self, ResourceAtlas};
@@ -22,7 +24,7 @@ use crate::renderer::{
     FrameMetrics, InvalidationReason, RenderCapabilities, SceneBuilder, SceneSummary,
 };
 use crate::spatial::SpatialGrid;
-use crate::territory::ClientTerritoryMap;
+use crate::territory::{ClientTerritory, ClientTerritoryMap};
 use crate::tiles::{LoadedTile, TileQuality};
 use crate::viewport::Viewport;
 
@@ -49,6 +51,66 @@ const PINCH_LINE_HEIGHT_PX: f64 = 24.0;
 const PINCH_PAGE_HEIGHT_FACTOR: f64 = 1.0;
 const PINCH_ZOOM_GAIN: f64 = 4.2;
 const PINCH_ZOOM_CLAMP: f64 = 420.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ClaimTool {
+    View,
+    Paint,
+    EraseToNeutral,
+    Select,
+    Eyedropper,
+}
+
+impl ClaimTool {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            ClaimTool::View => "View",
+            ClaimTool::Paint => "Paint",
+            ClaimTool::EraseToNeutral => "Erase",
+            ClaimTool::Select => "Select",
+            ClaimTool::Eyedropper => "Pick",
+        }
+    }
+
+    pub(crate) fn tooltip(self) -> &'static str {
+        match self {
+            ClaimTool::View => "View mode \u{2014} click territories to inspect them",
+            ClaimTool::Paint => {
+                "Paint mode \u{2014} click territories to claim them for the active guild"
+            }
+            ClaimTool::EraseToNeutral => {
+                "Erase mode \u{2014} click territories to reset them to neutral"
+            }
+            ClaimTool::Select => {
+                "Select mode \u{2014} drag to select, shift-click to toggle individual territories"
+            }
+            ClaimTool::Eyedropper => "Eyedropper \u{2014} click a territory to copy its guild",
+        }
+    }
+
+    pub(crate) fn uses_canvas_edits(self) -> bool {
+        !matches!(self, ClaimTool::View)
+    }
+
+    pub(crate) fn starts_stroke_on_hit(self) -> bool {
+        matches!(self, ClaimTool::Paint | ClaimTool::EraseToNeutral)
+    }
+
+    pub(crate) fn starts_selection_box(self) -> bool {
+        matches!(self, ClaimTool::Select)
+    }
+
+    pub(crate) fn applies_single_hit(self) -> bool {
+        matches!(self, ClaimTool::Eyedropper)
+    }
+}
+
+#[derive(Clone)]
+pub struct ClaimCanvasController {
+    pub tool: RwSignal<ClaimTool>,
+    pub handle_hit: Arc<dyn Fn(String, bool) + Send + Sync>,
+    pub handle_box_select: Arc<dyn Fn(Vec<String>, bool) + Send + Sync>,
+}
 
 #[derive(Clone, Copy, Debug)]
 struct WheelSample {
@@ -277,6 +339,25 @@ fn mouse_canvas_size(event: &MouseEvent) -> (f64, f64) {
         .unwrap_or((1200.0, 800.0))
 }
 
+fn normalize_screen_rect(ax: f64, ay: f64, bx: f64, by: f64) -> (f64, f64, f64, f64) {
+    (ax.min(bx), ay.min(by), ax.max(bx), ay.max(by))
+}
+
+fn territory_overlaps_world_rect(
+    territory: &ClientTerritory,
+    world_left: f64,
+    world_top: f64,
+    world_right: f64,
+    world_bottom: f64,
+) -> bool {
+    let region = &territory.territory.location;
+    let left = region.left() as f64;
+    let right = region.right() as f64;
+    let top = region.top() as f64;
+    let bottom = region.bottom() as f64;
+    left <= world_right && right >= world_left && top <= world_bottom && bottom >= world_top
+}
+
 #[component]
 pub fn MapCanvas() -> impl IntoView {
     let territories: RwSignal<ClientTerritoryMap> = expect_context();
@@ -302,6 +383,10 @@ pub fn MapCanvas() -> impl IntoView {
     let BoldConnections(bold_connections) = expect_context();
     let ConnectionOpacityScale(connection_opacity_scale) = expect_context();
     let ConnectionThicknessScale(connection_thickness_scale) = expect_context();
+    let ConnectionZoomFadeStart(connection_zoom_fade_start) = expect_context();
+    let ConnectionZoomFadeEnd(connection_zoom_fade_end) = expect_context();
+    let SuppressCooldownVisuals(suppress_cooldown_visuals) = expect_context();
+    let FillAlphaBoost(fill_alpha_boost) = expect_context();
     let ResourceHighlight(resource_highlight) = expect_context();
     let ShowResourceIcons(show_resource_icons) = expect_context();
     let ShowTerritoryOrnaments(show_territory_ornaments) = expect_context();
@@ -321,6 +406,7 @@ pub fn MapCanvas() -> impl IntoView {
     let SidebarOpen(sidebar_open) = expect_context();
     let SidebarTransient(sidebar_transient) = expect_context();
     let ShowSettings(show_settings) = expect_context();
+    let claim_canvas = use_context::<ClaimCanvasController>();
 
     let canvas_ref = NodeRef::<leptos::html::Canvas>::new();
     let icon_atlas_requested = Rc::new(Cell::new(false));
@@ -329,6 +415,12 @@ pub fn MapCanvas() -> impl IntoView {
     let is_dragging = Rc::new(Cell::new(false));
     let drag_pointer_id = Rc::new(Cell::new(None::<i32>));
     let drag_moved = Rc::new(Cell::new(false));
+    let claim_dragging = Rc::new(Cell::new(false));
+    let claim_drag_pointer_id = Rc::new(Cell::new(None::<i32>));
+    let claim_last_hit: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let claim_box_pointer_id = Rc::new(Cell::new(None::<i32>));
+    let claim_box_origin = Rc::new(Cell::new((0.0f64, 0.0f64)));
+    let claim_box_rect: RwSignal<Option<(f64, f64, f64, f64)>> = RwSignal::new(None);
     let last_x = Rc::new(Cell::new(0.0f64));
     let last_y = Rc::new(Cell::new(0.0f64));
 
@@ -419,6 +511,10 @@ pub fn MapCanvas() -> impl IntoView {
             renderer.bold_connections = bold_connections.get_untracked();
             renderer.connection_opacity_scale = connection_opacity_scale.get_untracked() as f32;
             renderer.connection_thickness_scale = connection_thickness_scale.get_untracked() as f32;
+            renderer.connection_zoom_fade_start = connection_zoom_fade_start.get_untracked() as f32;
+            renderer.connection_zoom_fade_end = connection_zoom_fade_end.get_untracked() as f32;
+            renderer.suppress_cooldown_visuals = suppress_cooldown_visuals.get_untracked();
+            renderer.fill_alpha_boost = fill_alpha_boost.get_untracked() as f32;
             let new_readable = readable_font.get_untracked();
             if renderer.use_readable_font != new_readable {
                 renderer.use_readable_font = new_readable;
@@ -605,6 +701,10 @@ pub fn MapCanvas() -> impl IntoView {
             bold_connections.track();
             connection_opacity_scale.track();
             connection_thickness_scale.track();
+            connection_zoom_fade_start.track();
+            connection_zoom_fade_end.track();
+            suppress_cooldown_visuals.track();
+            fill_alpha_boost.track();
             readable_font.track();
             name_color.track();
             tag_color.track();
@@ -748,9 +848,17 @@ pub fn MapCanvas() -> impl IntoView {
         let pinch_last_dist = pinch_last_dist.clone();
         let pinch_last_cx = pinch_last_cx.clone();
         let pinch_last_cy = pinch_last_cy.clone();
+        let spatial_grid = spatial_grid.clone();
+        let claim_dragging = claim_dragging.clone();
+        let claim_drag_pointer_id = claim_drag_pointer_id.clone();
+        let claim_last_hit = claim_last_hit.clone();
+        let claim_box_pointer_id = claim_box_pointer_id.clone();
+        let claim_box_origin = claim_box_origin.clone();
+        let claim_box_rect = claim_box_rect;
         let interaction_deadline = interaction_deadline.clone();
         let scheduler = scheduler.clone();
         let jump_from_minimap = jump_from_minimap.clone();
+        let claim_canvas = claim_canvas.clone();
 
         move |event: PointerEvent| {
             event.prevent_default();
@@ -784,6 +892,58 @@ pub fn MapCanvas() -> impl IntoView {
                 return;
             }
 
+            if event.button() == 0
+                && let Some(controller) = claim_canvas.as_ref()
+            {
+                let tool = controller.tool.get_untracked();
+                let vp = viewport.get_untracked();
+                let (wx, wy) = vp.screen_to_world(sx, sy);
+                let hit = spatial_grid.borrow().find_at(wx, wy);
+
+                if tool.starts_selection_box() {
+                    claim_box_pointer_id.set(Some(pointer_id));
+                    claim_box_origin.set((sx, sy));
+                    claim_box_rect.set(Some((sx, sy, sx, sy)));
+                    *claim_last_hit.borrow_mut() = hit;
+                    interaction_deadline.set(js_sys::Date::now() + INTERACTION_SETTLE_MS);
+                    if let Some(canvas) = event
+                        .target()
+                        .and_then(|t| t.dyn_into::<HtmlCanvasElement>().ok())
+                    {
+                        let _ = canvas.set_pointer_capture(pointer_id);
+                    }
+                    scheduler.mark_dirty();
+                    return;
+                }
+
+                if tool.applies_single_hit() {
+                    if let Some(hit) = hit {
+                        *claim_last_hit.borrow_mut() = Some(hit.clone());
+                        (controller.handle_hit)(hit, event.shift_key());
+                        interaction_deadline.set(js_sys::Date::now() + INTERACTION_SETTLE_MS);
+                        scheduler.mark_dirty();
+                        return;
+                    }
+                    *claim_last_hit.borrow_mut() = None;
+                } else if tool.starts_stroke_on_hit()
+                    && let Some(hit) = hit
+                {
+                    claim_drag_pointer_id.set(Some(pointer_id));
+                    claim_dragging.set(true);
+                    *claim_last_hit.borrow_mut() = Some(hit.clone());
+                    (controller.handle_hit)(hit, false);
+                    interaction_deadline.set(js_sys::Date::now() + INTERACTION_SETTLE_MS);
+                    if let Some(canvas) = event
+                        .target()
+                        .and_then(|t| t.dyn_into::<HtmlCanvasElement>().ok())
+                    {
+                        let _ = canvas.set_pointer_capture(pointer_id);
+                    }
+                    scheduler.mark_dirty();
+                    return;
+                }
+            }
+
             drag_pointer_id.set(Some(pointer_id));
             is_dragging.set(true);
             drag_moved.set(false);
@@ -811,8 +971,16 @@ pub fn MapCanvas() -> impl IntoView {
         let pinch_last_dist = pinch_last_dist.clone();
         let pinch_last_cx = pinch_last_cx.clone();
         let pinch_last_cy = pinch_last_cy.clone();
+        let spatial_grid = spatial_grid.clone();
+        let claim_dragging = claim_dragging.clone();
+        let claim_drag_pointer_id = claim_drag_pointer_id.clone();
+        let claim_last_hit = claim_last_hit.clone();
+        let claim_box_pointer_id = claim_box_pointer_id.clone();
+        let claim_box_origin = claim_box_origin.clone();
+        let claim_box_rect = claim_box_rect;
         let interaction_deadline = interaction_deadline.clone();
         let scheduler = scheduler.clone();
+        let claim_canvas = claim_canvas.clone();
 
         move |event: PointerEvent| {
             let (sx, sy) = pointer_canvas_coords(&event);
@@ -854,6 +1022,31 @@ pub fn MapCanvas() -> impl IntoView {
                 return;
             }
 
+            if claim_dragging.get() && claim_drag_pointer_id.get() == Some(pointer_id) {
+                if let Some(controller) = claim_canvas.as_ref() {
+                    let vp = viewport.get_untracked();
+                    let (wx, wy) = vp.screen_to_world(sx, sy);
+                    let hit = spatial_grid.borrow().find_at(wx, wy);
+                    if hit != *claim_last_hit.borrow() {
+                        *claim_last_hit.borrow_mut() = hit.clone();
+                        if let Some(hit) = hit {
+                            (controller.handle_hit)(hit, false);
+                        }
+                    }
+                }
+                interaction_deadline.set(js_sys::Date::now() + INTERACTION_SETTLE_MS);
+                scheduler.mark_dirty();
+                return;
+            }
+
+            if claim_box_pointer_id.get() == Some(pointer_id) {
+                let (origin_x, origin_y) = claim_box_origin.get();
+                claim_box_rect.set(Some(normalize_screen_rect(origin_x, origin_y, sx, sy)));
+                interaction_deadline.set(js_sys::Date::now() + INTERACTION_SETTLE_MS);
+                scheduler.mark_dirty();
+                return;
+            }
+
             if is_dragging.get() && drag_pointer_id.get() == Some(pointer_id) {
                 let dx = sx - last_x.get();
                 let dy = sy - last_y.get();
@@ -876,7 +1069,17 @@ pub fn MapCanvas() -> impl IntoView {
         let active_pointers = active_pointers.clone();
         let drag_pointer_id = drag_pointer_id.clone();
         let is_dragging = is_dragging.clone();
+        let claim_dragging = claim_dragging.clone();
+        let claim_drag_pointer_id = claim_drag_pointer_id.clone();
+        let claim_box_pointer_id = claim_box_pointer_id.clone();
+        let claim_box_rect = claim_box_rect;
+        let claim_last_hit = claim_last_hit.clone();
         let pinch_last_dist = pinch_last_dist.clone();
+        let spatial_grid = spatial_grid.clone();
+        let claim_canvas = claim_canvas.clone();
+        let territories = territories;
+        let viewport = viewport;
+        let selected = selected;
         let interaction_deadline = interaction_deadline.clone();
         let scheduler = scheduler.clone();
 
@@ -899,6 +1102,75 @@ pub fn MapCanvas() -> impl IntoView {
                 }
             }
 
+            if claim_drag_pointer_id.get() == Some(pointer_id) {
+                claim_drag_pointer_id.set(None);
+                claim_dragging.set(false);
+                *claim_last_hit.borrow_mut() = None;
+                if let Some(canvas) = event
+                    .target()
+                    .and_then(|t| t.dyn_into::<HtmlCanvasElement>().ok())
+                {
+                    let _ = canvas.release_pointer_capture(pointer_id);
+                }
+            }
+
+            if claim_box_pointer_id.get() == Some(pointer_id) {
+                claim_box_pointer_id.set(None);
+                let selection_rect = claim_box_rect.get_untracked();
+                claim_box_rect.set(None);
+
+                if let Some(canvas) = event
+                    .target()
+                    .and_then(|t| t.dyn_into::<HtmlCanvasElement>().ok())
+                {
+                    let _ = canvas.release_pointer_capture(pointer_id);
+                }
+
+                if let Some(controller) = claim_canvas.as_ref()
+                    && let Some((left, top, right, bottom)) = selection_rect
+                {
+                    if (right - left) < 4.0 && (bottom - top) < 4.0 {
+                        let (sx, sy) = pointer_canvas_coords(&event);
+                        let vp = viewport.get_untracked();
+                        let (wx, wy) = vp.screen_to_world(sx, sy);
+                        let hit = spatial_grid.borrow().find_at(wx, wy);
+                        selected.set(hit.clone());
+                        if let Some(hit) = hit {
+                            (controller.handle_hit)(hit, event.shift_key());
+                        } else {
+                            (controller.handle_box_select)(Vec::new(), false);
+                        }
+                    } else {
+                        let vp = viewport.get_untracked();
+                        let (ax, ay) = vp.screen_to_world(left, top);
+                        let (bx, by) = vp.screen_to_world(right, bottom);
+                        let world_left = ax.min(bx);
+                        let world_top = ay.min(by);
+                        let world_right = ax.max(bx);
+                        let world_bottom = ay.max(by);
+
+                        let mut hits = territories.with_untracked(|territory_map| {
+                            territory_map
+                                .iter()
+                                .filter_map(|(name, territory)| {
+                                    territory_overlaps_world_rect(
+                                        territory,
+                                        world_left,
+                                        world_top,
+                                        world_right,
+                                        world_bottom,
+                                    )
+                                    .then(|| name.clone())
+                                })
+                                .collect::<Vec<_>>()
+                        });
+                        hits.sort();
+                        selected.set(hits.last().cloned());
+                        (controller.handle_box_select)(hits, event.shift_key());
+                    }
+                }
+            }
+
             interaction_deadline.set(js_sys::Date::now() + INTERACTION_SETTLE_MS);
             scheduler.mark_dirty();
         }
@@ -918,9 +1190,18 @@ pub fn MapCanvas() -> impl IntoView {
         let drag_moved = drag_moved.clone();
         let scheduler = scheduler.clone();
         let jump_from_minimap = jump_from_minimap.clone();
+        let spatial_grid = spatial_grid.clone();
+        let claim_canvas = claim_canvas.clone();
         move |event: MouseEvent| {
             let (sx, sy) = mouse_canvas_coords(&event);
             let (canvas_w, canvas_h) = mouse_canvas_size(&event);
+
+            if claim_canvas
+                .as_ref()
+                .is_some_and(|controller| controller.tool.get_untracked().uses_canvas_edits())
+            {
+                return;
+            }
 
             if drag_moved.get() {
                 drag_moved.set(false);
@@ -1017,6 +1298,19 @@ pub fn MapCanvas() -> impl IntoView {
                 on:click=on_click
                 on:contextmenu=move |event| event.prevent_default()
             />
+            {move || {
+                claim_box_rect.get().map(|(left, top, right, bottom)| {
+                    let width = (right - left).max(1.0);
+                    let height = (bottom - top).max(1.0);
+                    view! {
+                        <div
+                            style=move || format!(
+                                "position: absolute; left: {left}px; top: {top}px; width: {width}px; height: {height}px; z-index: 26; pointer-events: none; border: 1px dashed rgba(245,197,66,0.94); background: rgba(245,197,66,0.14); box-shadow: 0 0 0 1px rgba(12,14,23,0.38) inset;"
+                            )
+                        ></div>
+                    }
+                })
+            }}
             {move || {
                 gpu_error.get().map(|message| {
                     let token = diagnostics_token(&message);
