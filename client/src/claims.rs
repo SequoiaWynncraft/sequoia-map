@@ -97,6 +97,8 @@ struct ClaimWorkingSession {
 struct StoredClaimDraft {
     document: ClaimDocumentV1,
     follow_live: bool,
+    #[serde(default = "stored_claim_draft_dirty_default")]
+    dirty: bool,
     selection: Vec<String>,
     source_snapshot_id: Option<String>,
     #[serde(default)]
@@ -146,6 +148,7 @@ struct ClaimsEditorInit {
     live_state: Option<LiveState>,
     document: ClaimDocumentV1,
     follow_live: bool,
+    dirty: bool,
     selection: Vec<String>,
     source_snapshot_id: Option<String>,
     source_snapshot_url: Option<String>,
@@ -214,6 +217,10 @@ enum ClaimsRoute {
 
 const fn bootstrap_storage_version() -> u8 {
     BOOTSTRAP_STORAGE_VERSION
+}
+
+const fn stored_claim_draft_dirty_default() -> bool {
+    true
 }
 
 fn parse_claims_route(path: &str) -> ClaimsRoute {
@@ -897,6 +904,7 @@ fn editor_init(
     live_state: Option<LiveState>,
     document: ClaimDocumentV1,
     follow_live: bool,
+    dirty: bool,
     selection: Vec<String>,
     source_snapshot_id: Option<String>,
     source_snapshot_url: Option<String>,
@@ -907,6 +915,7 @@ fn editor_init(
         live_state,
         document,
         follow_live,
+        dirty,
         selection,
         source_snapshot_id,
         source_snapshot_url,
@@ -928,6 +937,7 @@ fn hash_import_boot_payload(
         geometry,
         live_state,
         document,
+        false,
         false,
         Vec::new(),
         None,
@@ -1138,6 +1148,23 @@ fn reusable_share_url(session: &ClaimWorkingSession) -> Option<String> {
         .or_else(|| session.source_snapshot_id.as_deref().map(saved_claim_url))
 }
 
+fn documents_match_for_saved_snapshot(
+    current_document: &ClaimDocumentV1,
+    saved_document: &ClaimDocumentV1,
+) -> bool {
+    let mut current_document = current_document.clone();
+    let mut saved_document = saved_document.clone();
+    current_document.view = ClaimViewState::default();
+    saved_document.view = ClaimViewState::default();
+    if let ClaimDocumentBase::FrozenLiveSnapshot { captured_at, .. } = &mut current_document.base {
+        captured_at.clear();
+    }
+    if let ClaimDocumentBase::FrozenLiveSnapshot { captured_at, .. } = &mut saved_document.base {
+        captured_at.clear();
+    }
+    current_document == saved_document
+}
+
 fn apply_saved_snapshot_if_current(
     session: RwSignal<Option<ClaimWorkingSession>>,
     live_territories: RwSignal<ClientTerritoryMap>,
@@ -1157,7 +1184,7 @@ fn apply_saved_snapshot_if_current(
                 live_seq.get_untracked(),
                 default_view_from(&viewport.get_untracked(), &active_owner.get_untracked()),
             );
-            if current_document != *saved_document {
+            if !documents_match_for_saved_snapshot(&current_document, saved_document) {
                 return;
             }
             state.source_snapshot_id = Some(snapshot_id);
@@ -1199,6 +1226,7 @@ async fn resolve_boot_payload(
             read_staged_live_bootstrap(),
             ClaimDocumentV1::blank(),
             false,
+            false,
             Vec::new(),
             None,
             None,
@@ -1221,6 +1249,7 @@ async fn resolve_boot_payload(
                 Some(live_state),
                 document,
                 false,
+                false,
                 Vec::new(),
                 None,
                 None,
@@ -1238,6 +1267,7 @@ async fn resolve_boot_payload(
                 read_staged_live_bootstrap(),
                 draft.document,
                 draft.follow_live,
+                draft.dirty,
                 draft.selection,
                 draft.source_snapshot_id,
                 draft.source_snapshot_url,
@@ -1256,6 +1286,7 @@ async fn resolve_boot_payload(
                 read_staged_live_bootstrap(),
                 handoff.document.clone(),
                 handoff.follow_live,
+                false,
                 handoff.selection,
                 handoff.source_snapshot_id,
                 handoff.source_snapshot_url,
@@ -1271,6 +1302,7 @@ async fn resolve_boot_payload(
                 geometry,
                 read_staged_live_bootstrap(),
                 payload.document.clone(),
+                false,
                 false,
                 Vec::new(),
                 Some(snapshot_id.clone()),
@@ -1398,6 +1430,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
         live_state: initial_live_state,
         document: initial_document,
         follow_live: initial_follow_live,
+        dirty: initial_dirty,
         selection: initial_selection,
         source_snapshot_id: initial_source_snapshot_id,
         source_snapshot_url: initial_source_snapshot_url,
@@ -1415,7 +1448,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
     let initial_session = ClaimWorkingSession {
         document: initial_document.clone(),
         follow_live: initial_follow_live,
-        dirty: false,
+        dirty: initial_dirty,
         selection: initial_selection,
         source_snapshot_id: initial_source_snapshot_id,
         source_snapshot_url: initial_source_snapshot_url,
@@ -1746,6 +1779,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
             let draft = StoredClaimDraft {
                 document,
                 follow_live: session_state.follow_live,
+                dirty: session_state.dirty,
                 selection: session_state.selection.clone(),
                 source_snapshot_id: session_state.source_snapshot_id.clone(),
                 source_snapshot_url: session_state.source_snapshot_url.clone(),
@@ -2975,6 +3009,63 @@ mod tests {
     }
 
     #[test]
+    fn documents_match_for_saved_snapshot_ignores_captured_at() {
+        let owners = HashMap::from([("Ragni".to_string(), neutral_owner())]);
+        let current_document = ClaimDocumentV1::frozen_live(None, 42, owners.clone());
+        let mut saved_document = ClaimDocumentV1::frozen_live(None, 42, owners);
+        if let ClaimDocumentBase::FrozenLiveSnapshot { captured_at, .. } = &mut saved_document.base
+        {
+            *captured_at = "2000-01-01T00:00:00Z".to_string();
+        }
+        assert!(documents_match_for_saved_snapshot(
+            &current_document,
+            &saved_document
+        ));
+    }
+
+    #[test]
+    fn documents_match_for_saved_snapshot_ignores_view() {
+        let mut current_document = ClaimDocumentV1::blank();
+        current_document.view = ClaimViewState {
+            offset_x: 120.0,
+            offset_y: -45.0,
+            scale: 0.9,
+            active_owner: Some(neutral_owner()),
+        };
+        let mut saved_document = current_document.clone();
+        saved_document.view = ClaimViewState {
+            offset_x: -80.0,
+            offset_y: 300.0,
+            scale: 0.15,
+            active_owner: Some(ClaimOwner::from_guild(GuildRef {
+                uuid: "guild-1".to_string(),
+                name: "Alpha".to_string(),
+                prefix: "ALP".to_string(),
+                color: Some((10, 20, 30)),
+            })),
+        };
+        assert!(documents_match_for_saved_snapshot(
+            &current_document,
+            &saved_document
+        ));
+    }
+
+    #[test]
+    fn stored_claim_draft_defaults_dirty_for_legacy_data() {
+        let draft = serde_json::from_value::<StoredClaimDraft>(serde_json::json!({
+            "document": ClaimDocumentV1::blank(),
+            "follow_live": false,
+            "selection": [],
+            "source_snapshot_id": "snapshot-123",
+            "active_owner": neutral_owner(),
+        }))
+        .expect("deserialize legacy draft");
+        assert!(draft.dirty);
+        assert_eq!(draft.source_snapshot_id.as_deref(), Some("snapshot-123"));
+        assert_eq!(draft.source_snapshot_url, None);
+    }
+
+    #[test]
     fn staged_cache_freshness_requires_matching_version_and_age() {
         assert!(staged_cache_is_fresh_at(
             BOOTSTRAP_STORAGE_VERSION,
@@ -3019,6 +3110,7 @@ mod tests {
 
         assert_eq!(init.geometry, geometry);
         assert_eq!(init.document, document);
+        assert!(!init.dirty);
         assert!(!init.follow_live);
         assert!(init.selection.is_empty());
     }
