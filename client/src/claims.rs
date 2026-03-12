@@ -99,6 +99,7 @@ struct StoredClaimDraft {
     follow_live: bool,
     selection: Vec<String>,
     source_snapshot_id: Option<String>,
+    #[serde(default)]
     source_snapshot_url: Option<String>,
     active_owner: ClaimOwner,
 }
@@ -1137,18 +1138,35 @@ fn reusable_share_url(session: &ClaimWorkingSession) -> Option<String> {
         .or_else(|| session.source_snapshot_id.as_deref().map(saved_claim_url))
 }
 
-fn mark_session_saved(
+fn apply_saved_snapshot_if_current(
     session: RwSignal<Option<ClaimWorkingSession>>,
+    live_territories: RwSignal<ClientTerritoryMap>,
+    live_seq: RwSignal<u64>,
+    viewport: RwSignal<Viewport>,
+    active_owner: RwSignal<ClaimOwner>,
     snapshot_id: String,
     snapshot_url: String,
-) {
+    saved_document: &ClaimDocumentV1,
+) -> bool {
+    let mut applied = false;
     session.update(|state| {
         if let Some(state) = state.as_mut() {
+            let current_document = canonical_document_for_session(
+                state,
+                &live_territories.get_untracked(),
+                live_seq.get_untracked(),
+                default_view_from(&viewport.get_untracked(), &active_owner.get_untracked()),
+            );
+            if current_document != *saved_document {
+                return;
+            }
             state.source_snapshot_id = Some(snapshot_id);
             state.source_snapshot_url = Some(snapshot_url);
             state.dirty = false;
+            applied = true;
         }
     });
+    applied
 }
 
 async fn resolve_boot_payload(
@@ -2666,6 +2684,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                                 live_seq.get_untracked(),
                                                 default_view_from(&viewport.get_untracked(), &active_owner.get_untracked()),
                                             );
+                                            let saved_document = document.clone();
                                             snapshot_save_in_flight.set(true);
                                             spawn_local(async move {
                                                 let result = create_saved_claim(document).await;
@@ -2673,11 +2692,21 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                                 match result {
                                                     Ok(payload) => {
                                                         let share_url = absolute_claim_url(&payload.url);
-                                                        mark_session_saved(
+                                                        if !apply_saved_snapshot_if_current(
                                                             session,
+                                                            live_territories,
+                                                            live_seq,
+                                                            viewport,
+                                                            active_owner,
                                                             payload.id.clone(),
                                                             share_url.clone(),
-                                                        );
+                                                            &saved_document,
+                                                        ) {
+                                                            status_message.set(Some(
+                                                                "Snapshot finished saving, but newer edits are not included".to_string(),
+                                                            ));
+                                                            return;
+                                                        }
                                                         copy_url_to_clipboard(&share_url);
                                                         status_message.set(Some("Copied short share URL".to_string()));
                                                     }
@@ -2707,6 +2736,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                                 live_seq.get_untracked(),
                                                 default_view_from(&viewport.get_untracked(), &active_owner.get_untracked()),
                                             );
+                                            let saved_document = document.clone();
                                             snapshot_save_in_flight.set(true);
                                             spawn_local(async move {
                                                 let result = create_saved_claim(document).await;
@@ -2714,12 +2744,26 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                                 match result {
                                                     Ok(payload) => {
                                                         let share_url = absolute_claim_url(&payload.url);
-                                                        mark_session_saved(
+                                                        if !apply_saved_snapshot_if_current(
                                                             session,
+                                                            live_territories,
+                                                            live_seq,
+                                                            viewport,
+                                                            active_owner,
                                                             payload.id.clone(),
                                                             share_url,
-                                                        );
-                                                        status_message.set(Some(format!("Saved snapshot {}", payload.id)));
+                                                            &saved_document,
+                                                        ) {
+                                                            status_message.set(Some(
+                                                                format!(
+                                                                    "Saved snapshot {} while newer edits remained unsaved",
+                                                                    payload.id
+                                                                ),
+                                                            ));
+                                                            return;
+                                                        }
+                                                        status_message
+                                                            .set(Some(format!("Saved snapshot {}", payload.id)));
                                                     }
                                                     Err(error) => {
                                                         error_message.set(Some(error));
