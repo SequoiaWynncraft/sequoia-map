@@ -5,28 +5,21 @@ use axum::{
     Router,
     extract::DefaultBodyLimit,
     extract::Request,
-    http::{HeaderValue, header},
+    http::{HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
 };
 use tower_http::compression::CompressionLayer;
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 
 use crate::routes;
 use crate::state::AppState;
 
 pub(crate) fn build_app(state: AppState) -> Router {
     let api_body_limit = crate::config::api_body_limit_bytes();
-    let claims_static_assets = ServeDir::new("claims-client/dist")
-        .precompressed_br()
-        .precompressed_gzip();
-    let main_static_assets = ServeDir::new("client/dist")
-        .precompressed_br()
-        .precompressed_gzip();
     let static_assets = Router::new()
-        .nest_service("/claims-app", claims_static_assets)
-        .fallback_service(main_static_assets)
-        .layer(middleware::from_fn(set_static_cache_control));
+        .nest("/claims-app", static_assets_router("claims-client/dist"))
+        .merge(static_assets_router("client/dist"));
 
     let app = Router::new()
         .route(
@@ -107,6 +100,8 @@ pub(crate) fn build_app(state: AppState) -> Router {
             "/api/history/heat",
             axum::routing::get(routes::history::history_heat),
         )
+        .route("/api", axum::routing::any(api_not_found))
+        .route("/api/{*path}", axum::routing::any(api_not_found))
         .route("/claims", axum::routing::get(serve_claims_route))
         .route("/claims/{*path}", axum::routing::get(serve_claims_route));
 
@@ -114,6 +109,24 @@ pub(crate) fn build_app(state: AppState) -> Router {
         .layer(DefaultBodyLimit::max(api_body_limit))
         .fallback_service(static_assets)
         .with_state(state)
+}
+
+fn static_assets_router(dist_dir: impl AsRef<Path>) -> Router {
+    let dist_dir = dist_dir.as_ref().to_path_buf();
+    let index_path = dist_dir.join("index.html");
+
+    Router::new()
+        .fallback_service(
+            ServeDir::new(dist_dir)
+                .precompressed_br()
+                .precompressed_gzip()
+                .fallback(ServeFile::new(index_path)),
+        )
+        .layer(middleware::from_fn(set_static_cache_control))
+}
+
+async fn api_not_found() -> impl IntoResponse {
+    (StatusCode::NOT_FOUND, "Not Found")
 }
 
 async fn set_static_cache_control(request: Request, next: Next) -> Response {
@@ -251,6 +264,10 @@ fn claims_editor_index_path() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::{self, Body};
+    use axum::http::Request;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tower::util::ServiceExt;
 
     #[test]
     fn immutable_cache_for_hashed_bundle_assets() {
@@ -309,5 +326,80 @@ mod tests {
         assert!(is_claims_editor_path("/claims/s/example"));
         assert!(!is_claims_editor_path("/claims"));
         assert!(!is_claims_editor_path("/claims/unknown"));
+    }
+
+    #[tokio::test]
+    async fn history_route_uses_spa_shell_fallback() {
+        let temp_dir = create_temp_dist_dir();
+        let app = static_assets_router(&temp_dir);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/history")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("history request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let body = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(body.contains("Sequoia Test Shell"));
+    }
+
+    #[tokio::test]
+    async fn unknown_api_route_returns_404_without_html_shell() {
+        let temp_dir = create_temp_dist_dir();
+        let app = Router::new()
+            .route("/api/{*path}", axum::routing::any(api_not_found))
+            .merge(static_assets_router(&temp_dir));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/does-not-exist")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("api request should succeed");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let content_type = response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let body = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(!content_type.contains("text/html"));
+        assert!(!body.contains("<html"));
+        assert!(body.contains("Not Found"));
+    }
+
+    fn create_temp_dist_dir() -> std::path::PathBuf {
+        let mut dir = std::env::temp_dir();
+        let unique = format!(
+            "sequoia-map-app-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock before epoch")
+                .as_nanos()
+        );
+        dir.push(unique);
+        std::fs::create_dir_all(&dir).expect("create temp dist dir");
+        std::fs::write(
+            dir.join("index.html"),
+            "<!DOCTYPE html><html><body>Sequoia Test Shell</body></html>",
+        )
+        .expect("write test index");
+        dir
     }
 }

@@ -25,3 +25,6 @@ sqlx-postgres = { version = "0.8", default-features = false, features = ["chrono
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bytes = "1"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

@@ -5,7 +5,8 @@ version.workspace = true
 
 [dependencies]
 sequoia-shared = { path = "../shared" }
-leptos = { version = "0.7", default-features = false, features = ["csr"] }
+leptos = { version = "0.8.17", default-features = false, features = ["csr"] }
+leptos_router = { version = "0.8.12", default-features = false }
 web-sys = { version = "0.3", features = [
     "AbortController",
     "AbortSignal",

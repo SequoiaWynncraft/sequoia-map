@@ -112,6 +112,8 @@ mod gpu {
 }
 
 use leptos::mount::mount_to;
+use leptos::prelude::*;
+use leptos_router::components::Router;
 use std::any::Any;
 use std::cell::RefCell;
 use wasm_bindgen::JsCast;
@@ -209,7 +211,13 @@ fn main() {
         // If main() is re-entered (e.g. dev/hot-reload runtime quirks), drop the old mount
         // so stale effects/signals can't keep mutating app state.
         let _old = slot.borrow_mut().take();
-        let handle = mount_to(target, app::App);
+        let handle = mount_to(target, || {
+            view! {
+                <Router>
+                    <app::App />
+                </Router>
+            }
+        });
         *slot.borrow_mut() = Some(Box::new(handle));
     });
 }

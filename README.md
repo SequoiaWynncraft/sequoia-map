@@ -1,16 +1,18 @@
 # Sequoia Map
 
 [![Rust](https://img.shields.io/badge/Rust-2024_Edition-b7410e?style=flat-square&logo=rust)](https://www.rust-lang.org/)
-[![Leptos](https://img.shields.io/badge/Leptos-0.7-ef3939?style=flat-square)](https://leptos.dev/)
+[![Leptos](https://img.shields.io/badge/Leptos-0.8-ef3939?style=flat-square)](https://leptos.dev/)
 [![wgpu](https://img.shields.io/badge/wgpu-24.0-4b8bbe?style=flat-square)](https://wgpu.rs/)
 [![Axum](https://img.shields.io/badge/Axum-0.8-222222?style=flat-square)](https://github.com/tokio-rs/axum)
 [![WebAssembly](https://img.shields.io/badge/WebAssembly-654ff0?style=flat-square&logo=webassembly&logoColor=white)](https://webassembly.org/)
 [![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-06b6d4?style=flat-square&logo=tailwindcss&logoColor=white)](https://tailwindcss.com/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-4169e1?style=flat-square&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-4169e1?style=flat-square&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Docker](https://img.shields.io/badge/Docker-2496ed?style=flat-square&logo=docker&logoColor=white)](https://www.docker.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
 
 A [Wynncraft](https://wynncraft.com/) guild territory map built entirely in Rust: server, client, and shared types, compiled to WebAssembly & GPU Accelerated *for reasons!!*. 
+
+*largely inspired by other wynncraft web maps like [Wynnmap](http://wynnmap.zatzou.com/) and [Avicia's map](https://www.avicia.info/map)*
 
 
 ## Stack
@@ -18,7 +20,7 @@ A [Wynncraft](https://wynncraft.com/) guild territory map built entirely in Rust
 | Layer | Crates |
 |-------|-------------|
 | **Server** | Axum 0.8, Tokio, SQLx 0.8, DashMap, Tower-HTTP |
-| **Client** | Leptos 0.7 (CSR &rarr; WASM), wgpu 24.0 (WebGL), Tailwind CSS |
+| **Client** | Leptos 0.8 (CSR &rarr; WASM), wgpu 24.0 (WebGL), Tailwind CSS |
 | **Shared** | Serde, Chrono, crc32fast |
 
 ## Quick Start
@@ -27,7 +29,7 @@ The comments in combination with the README.md should be enough for anyone to pi
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs/) 1.86+
+- [Rust](https://rustup.rs/) 1.88+
 - `wasm32-unknown-unknown` target | `rustup target add wasm32-unknown-unknown`
 - [Trunk](https://trunkrs.dev/) | `cargo install trunk --locked`
 - A running PostgreSQL instance
@@ -93,6 +95,7 @@ Production compose is TLS-first and now runs:
 - `restart: unless-stopped` for long-running services
 - default Docker log rotation (`json-file`, configurable size/count)
 - automatic PostgreSQL backups to a dedicated `pgbackups` volume
+- PostgreSQL 18 data layout (`/var/lib/postgresql` volume mount with `PGDATA=/var/lib/postgresql/18/docker`)
 
 Set DNS for your domains and provide environment variables before starting:
 
@@ -114,6 +117,7 @@ Security notes:
 - Public edge routes block `/api/metrics`, `/metrics`, and `/iris/metrics`; scrape metrics over private service networking.
 - Compose defaults `INGEST_SINGLE_REPORTER_MODE=false`; only enable it explicitly for controlled single-reporter deployments.
 - Compose defaults `INGEST_DEGRADED_SINGLE_REPORTER_ENABLED=false`; set it to `true` explicitly only if single-reporter degraded updates are required.
+- Compose defaults `INGEST_QUORUM_MIN_DISTINCT_ORIGINS=1`, so same-NAT observers can still corroborate; raise it to `2` only if you want strict cross-origin quorum. Values above `INGEST_QUORUM_MIN_REPORTERS` are capped to the reporter quorum threshold.
 - Compose defaults `INGEST_TRUSTED_PROXY_CIDRS` to loopback + RFC1918 private ranges for containerized edge proxies; set explicit edge proxy CIDRs in production to narrow trust as needed.
 - For local development, use `docker-compose.dev.yml` (plain localhost HTTP endpoints).
 
@@ -212,6 +216,7 @@ Notes:
 | `INGEST_TRUSTED_PROXY_CIDRS` | Comma-separated trusted reverse proxy CIDRs for `X-Forwarded-For` | *(empty in service; prod/coolify compose defaults to loopback + RFC1918 private ranges)* |
 | `INGEST_SINGLE_REPORTER_MODE` | Restrict active enrollment/reporting to one reporter identity at a time | `false` *(prod/coolify compose defaults to `false`)* |
 | `INGEST_DEGRADED_SINGLE_REPORTER_ENABLED` | Allow single active reporter to emit degraded canonical updates without quorum | `false` *(prod/coolify compose defaults to `false`; dev compose defaults to `true`)* |
+| `INGEST_QUORUM_MIN_DISTINCT_ORIGINS` | Minimum distinct origin IPs required in addition to reporter/device quorum | `1` *(capped to `INGEST_QUORUM_MIN_REPORTERS`; set `2` for strict cross-origin corroboration)* |
 | `INGEST_API_BODY_LIMIT_BYTES` | Max request body size accepted by ingest routes | `2097152` |
 | `INGEST_MAX_REPORTS_PER_BATCH` | Max territory updates accepted per reporter upload batch | `1024` |
 | `DOCKER_LOG_MAX_SIZE` | Docker log max size before rotation (Compose) | `10m` |
@@ -240,6 +245,26 @@ Utility scripts:
 ```
 
 Important: backups are generated with `--clean --if-exists`, so restore will drop/recreate dumped objects in the current database. It does not drop the database itself.
+
+## PostgreSQL 17 -> 18 Upgrade Runbook
+
+Use the scripted runbook under `ops/postgres` for preflight checks, cutover, and post-cutover validation:
+
+```bash
+# 1) Preflight checks (extensions/auth/collation/unlogged partitioned tables)
+./ops/postgres/precheck_17_to_18.sh
+
+# 2) Upgrade using pg_upgrade (check+link first, fallback to copy mode)
+./ops/postgres/upgrade_17_to_18.sh
+
+# 3) Post-cutover verification (version + API smoke checks)
+./ops/postgres/verify_18_postcutover.sh
+```
+
+Notes:
+- The upgrade script takes a logical backup first via `./ops/backup/backup_now.sh`.
+- It also writes a compressed Docker volume snapshot under `ops/postgres/snapshots/`.
+- If link mode cannot be used on your Docker storage backend, the script retries with `--copy`.
 
 ## Monitoring And Alerting
 
@@ -284,7 +309,7 @@ Coolify/VPS monitoring notes:
 ## CI And Integration Tests
 
 - GitHub Actions workflow: `.github/workflows/ci.yml`
-- CI provisions PostgreSQL (`postgres:18-alpine`) and runs server/client checks plus server tests.
+- CI provisions PostgreSQL (`postgres:18.3-alpine`) and runs server, client, and `claims-client` checks plus server tests.
 - Included a -Postgres integration test that verifies:
   - poller update persistence into `territory_events`
   - `/api/history/bounds`
