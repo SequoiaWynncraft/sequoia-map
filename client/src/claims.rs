@@ -951,6 +951,7 @@ fn validate_document_against_live(
 fn apply_document_to_session(
     active_owner: RwSignal<ClaimOwner>,
     viewport: RwSignal<Viewport>,
+    selected: RwSignal<Option<String>>,
     session: RwSignal<Option<ClaimWorkingSession>>,
     tab: RwSignal<ClaimTab>,
     status_message: RwSignal<Option<String>>,
@@ -970,6 +971,7 @@ fn apply_document_to_session(
         offset_y: document.view.offset_y,
         scale: document.view.scale.max(0.05),
     });
+    selected.set(None);
     session.set(Some(ClaimWorkingSession {
         document,
         follow_live,
@@ -1945,6 +1947,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                             apply_document_to_session(
                                 active_owner,
                                 viewport,
+                                selected,
                                 session,
                                 tab,
                                 status_message,
@@ -2465,11 +2468,16 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                                 <div style="flex: 1;">{label}</div>
                                                 <button class="btn btn-sm"
                                                     on:click=move |_| {
+                                                        let preferred = selected.get_untracked();
                                                         session.update(|state| {
                                                             if let Some(state) = state.as_mut() {
                                                                 state.selection = select_macro.clone();
                                                             }
                                                         });
+                                                        selected.set(selection_focus(
+                                                            &select_macro,
+                                                            preferred.as_deref(),
+                                                        ));
                                                     }
                                                 >
                                                     "Select"
@@ -2669,6 +2677,7 @@ fn ClaimsEditor(boot: ClaimsBootPayload) -> impl IntoView {
                                                         apply_document_to_session(
                                                             active_owner,
                                                             viewport,
+                                                            selected,
                                                             session,
                                                             tab,
                                                             status_message,
