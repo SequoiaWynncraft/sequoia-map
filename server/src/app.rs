@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::OnceLock;
 
 use axum::{
     Router,
@@ -176,8 +177,8 @@ async fn serve_claims_route(request: Request) -> impl IntoResponse {
     serve_html_file(html_path).await
 }
 
-async fn serve_html_file(path: String) -> Response {
-    match tokio::fs::read(&path).await {
+async fn serve_html_file(path: &str) -> Response {
+    match tokio::fs::read(path).await {
         Ok(body) => (
             [
                 (header::CONTENT_TYPE, "text/html; charset=utf-8"),
@@ -186,7 +187,10 @@ async fn serve_html_file(path: String) -> Response {
             body,
         )
             .into_response(),
-        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(err) => {
+            tracing::error!(path = %path, error = %err, "failed to read HTML file");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
 }
 
@@ -197,33 +201,51 @@ fn is_claims_editor_path(path: &str) -> bool {
         || path.starts_with("/claims/s/")
 }
 
-fn claims_launcher_path() -> String {
-    let manifest_root = env!("CARGO_MANIFEST_DIR");
-    let candidates = [
-        "server/static/claims-launcher.html".to_string(),
-        format!("{manifest_root}/static/claims-launcher.html"),
-        format!("{manifest_root}/../server/static/claims-launcher.html"),
-    ];
-
+fn resolve_first_existing_path<I>(candidates: I, fallback: String) -> String
+where
+    I: IntoIterator<Item = String>,
+{
     candidates
         .into_iter()
         .find(|path| Path::new(path).exists())
-        .unwrap_or_else(|| format!("{manifest_root}/static/claims-launcher.html"))
+        .unwrap_or(fallback)
 }
 
-fn claims_editor_index_path() -> String {
-    let manifest_root = env!("CARGO_MANIFEST_DIR");
-    let candidates = [
-        "claims-client/dist/index.html".to_string(),
-        "claims-client/index.html".to_string(),
-        format!("{manifest_root}/../claims-client/dist/index.html"),
-        format!("{manifest_root}/../claims-client/index.html"),
-    ];
+fn claims_launcher_path() -> &'static str {
+    static CLAIMS_LAUNCHER_HTML_PATH: OnceLock<String> = OnceLock::new();
 
-    candidates
-        .into_iter()
-        .find(|path| Path::new(path).exists())
-        .unwrap_or_else(|| format!("{manifest_root}/../claims-client/index.html"))
+    let manifest_root = env!("CARGO_MANIFEST_DIR");
+    CLAIMS_LAUNCHER_HTML_PATH
+        .get_or_init(|| {
+            resolve_first_existing_path(
+                [
+                    "server/static/claims-launcher.html".to_string(),
+                    format!("{manifest_root}/static/claims-launcher.html"),
+                    format!("{manifest_root}/../server/static/claims-launcher.html"),
+                ],
+                format!("{manifest_root}/static/claims-launcher.html"),
+            )
+        })
+        .as_str()
+}
+
+fn claims_editor_index_path() -> &'static str {
+    static CLAIMS_EDITOR_INDEX_PATH: OnceLock<String> = OnceLock::new();
+
+    let manifest_root = env!("CARGO_MANIFEST_DIR");
+    CLAIMS_EDITOR_INDEX_PATH
+        .get_or_init(|| {
+            resolve_first_existing_path(
+                [
+                    "claims-client/dist/index.html".to_string(),
+                    "claims-client/index.html".to_string(),
+                    format!("{manifest_root}/../claims-client/dist/index.html"),
+                    format!("{manifest_root}/../claims-client/index.html"),
+                ],
+                format!("{manifest_root}/../claims-client/index.html"),
+            )
+        })
+        .as_str()
 }
 
 #[cfg(test)]

@@ -1,6 +1,4 @@
 use std::cmp::Ordering;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::sync::atomic::Ordering as AtomicOrdering;
 
 use axum::Json;
@@ -25,6 +23,8 @@ use crate::state::{
 const GUILD_CATALOG_TTL_SECS: i64 = 3600;
 const DEFAULT_GUILD_CATALOG_LIMIT: usize = 24;
 const MAX_GUILD_CATALOG_LIMIT: usize = 100;
+const CLAIMS_GEOMETRY_ETAG_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+const CLAIMS_GEOMETRY_ETAG_PRIME: u64 = 0x100000001b3;
 
 #[derive(Debug, Deserialize)]
 pub struct GuildCatalogQuery {
@@ -332,7 +332,7 @@ fn match_rank(prefix: &str, name: &str, needle: &str) -> u8 {
 fn next_claim_id(state: &AppState) -> String {
     let suffix = state.next_claim_id.fetch_add(1, AtomicOrdering::Relaxed);
     format!(
-        "clm{:x}{suffix:04x}",
+        "clm{:x}{suffix:08x}",
         Utc::now().timestamp_millis().unsigned_abs()
     )
 }
@@ -348,9 +348,12 @@ fn validation_status(error: ClaimValidationError) -> StatusCode {
 }
 
 fn claims_geometry_etag(body: &[u8]) -> String {
-    let mut hasher = DefaultHasher::new();
-    body.hash(&mut hasher);
-    format!("\"claims-geometry-{:016x}\"", hasher.finish())
+    let hash = body
+        .iter()
+        .fold(CLAIMS_GEOMETRY_ETAG_OFFSET_BASIS, |acc, byte| {
+            (acc ^ u64::from(*byte)).wrapping_mul(CLAIMS_GEOMETRY_ETAG_PRIME)
+        });
+    format!("\"claims-geometry-{hash:016x}\"")
 }
 
 #[cfg(test)]
@@ -404,5 +407,13 @@ mod tests {
         let first = claims_geometry_etag(br#"{"territories":{"A":{}}}"#);
         let second = claims_geometry_etag(br#"{"territories":{"B":{}}}"#);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn claims_geometry_etag_is_stable_for_known_payload() {
+        assert_eq!(
+            claims_geometry_etag(br#"{"territories":{"A":{}}}"#),
+            "\"claims-geometry-ebe620cff86e5348\""
+        );
     }
 }

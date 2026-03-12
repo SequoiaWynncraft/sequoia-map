@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -23,6 +24,15 @@ use crate::config::{
 pub type GuildColor = (u8, u8, u8);
 pub type GuildColorMap = HashMap<String, GuildColor>;
 pub type CachedScalarSample = (SeasonScalarSample, Arc<Bytes>);
+
+fn initial_claim_id_seed() -> u64 {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    let pid = u64::from(std::process::id());
+    (now ^ (now >> 32) ^ pid) & u64::from(u32::MAX)
+}
 
 /// Normalize guild names for resilient color cache lookups.
 /// - trims leading/trailing whitespace
@@ -375,7 +385,7 @@ impl AppState {
             max_ingest_updates_per_request: max_ingest_updates_per_request(),
             max_history_replay_events: max_history_replay_events(),
             max_history_sr_sample_rows: max_history_sr_sample_rows(),
-            next_claim_id: Arc::new(AtomicU64::new(0)),
+            next_claim_id: Arc::new(AtomicU64::new(initial_claim_id_seed())),
             guild_catalog_url: Arc::new(WYNNCRAFT_GUILD_LIST_URL.to_string()),
             observability: Arc::new(ObservabilityCounters::default()),
         }
