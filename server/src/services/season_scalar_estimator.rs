@@ -301,18 +301,20 @@ async fn top_candidate_guilds(
     }
 
     let mut candidates: HashMap<String, CandidateGuild> = HashMap::new();
+    let mut live_candidates: HashMap<String, CandidateGuild> = HashMap::new();
     for territory in snapshot.territories.values() {
-        merge_candidate(
-            &mut candidates,
-            CandidateGuild {
-                guild_name: territory.guild.name.clone(),
-                guild_uuid: territory.guild.uuid.clone(),
-                guild_prefix: territory.guild.prefix.clone(),
-                territory_count: 1,
-            },
+        accumulate_live_candidate(
+            &mut live_candidates,
+            &territory.guild.name,
+            &territory.guild.uuid,
+            &territory.guild.prefix,
         );
     }
     drop(snapshot);
+
+    for candidate in live_candidates.into_values() {
+        merge_candidate(&mut candidates, candidate);
+    }
 
     for contender in latest_top_contender_guilds(pool, contender_count).await? {
         merge_candidate(&mut candidates, contender);
@@ -480,6 +482,36 @@ fn candidate_from_observation_row(row: LatestObservationCandidateRow) -> Candida
     }
 }
 
+fn accumulate_live_candidate(
+    target: &mut HashMap<String, CandidateGuild>,
+    guild_name: &str,
+    guild_uuid: &str,
+    guild_prefix: &str,
+) {
+    use std::collections::hash_map::Entry;
+
+    match target.entry(guild_name.to_string()) {
+        Entry::Vacant(entry) => {
+            entry.insert(CandidateGuild {
+                guild_name: guild_name.to_string(),
+                guild_uuid: guild_uuid.to_string(),
+                guild_prefix: guild_prefix.to_string(),
+                territory_count: 1,
+            });
+        }
+        Entry::Occupied(mut entry) => {
+            let existing = entry.get_mut();
+            existing.territory_count = existing.territory_count.saturating_add(1);
+            if existing.guild_uuid.trim().is_empty() && !guild_uuid.trim().is_empty() {
+                existing.guild_uuid = guild_uuid.to_string();
+            }
+            if existing.guild_prefix.trim().is_empty() && !guild_prefix.trim().is_empty() {
+                existing.guild_prefix = guild_prefix.to_string();
+            }
+        }
+    }
+}
+
 fn merge_candidate(target: &mut HashMap<String, CandidateGuild>, candidate: CandidateGuild) {
     use std::collections::hash_map::Entry;
 
@@ -511,8 +543,8 @@ fn latest_season_rating(season_ranks: &HashMap<String, GuildSeasonRank>) -> Opti
 #[cfg(test)]
 mod tests {
     use super::{
-        CandidateGuild, GuildSeasonRank, GuildSeasonSnapshot, latest_season_rating,
-        merge_candidate, rank_snapshots,
+        CandidateGuild, GuildSeasonRank, GuildSeasonSnapshot, accumulate_live_candidate,
+        latest_season_rating, merge_candidate, rank_snapshots,
     };
     use chrono::Utc;
     use std::collections::HashMap;
@@ -589,6 +621,24 @@ mod tests {
                 territory_count: 1,
             },
         );
+
+        assert_eq!(
+            candidates.get("Sequoia"),
+            Some(&CandidateGuild {
+                guild_name: "Sequoia".to_string(),
+                guild_uuid: "uuid-1".to_string(),
+                guild_prefix: "SEQ".to_string(),
+                territory_count: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn accumulate_live_candidate_counts_each_live_territory() {
+        let mut candidates = HashMap::new();
+        accumulate_live_candidate(&mut candidates, "Sequoia", "", "");
+        accumulate_live_candidate(&mut candidates, "Sequoia", "uuid-1", "SEQ");
+        accumulate_live_candidate(&mut candidates, "Sequoia", "", "");
 
         assert_eq!(
             candidates.get("Sequoia"),
