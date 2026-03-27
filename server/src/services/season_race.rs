@@ -96,6 +96,8 @@ pub async fn build_race_response(
     let generated_at = Utc::now();
     let range_end = generated_at.min(active.end_at);
     let remaining_hours = ((active.end_at - generated_at).num_seconds().max(0) as f64) / 3600.0;
+    let recent_query_start =
+        recent_observation_query_start(active.start_at, range_end, active.lookback_hours);
 
     let latest_rows: Vec<LatestGuildRow> = sqlx::query_as(
         "SELECT guild_name, COALESCE(guild_uuid, ''), COALESCE(guild_prefix, ''), territory_count, season_rating, observed_at \
@@ -138,7 +140,7 @@ pub async fn build_race_response(
     }
 
     let guild_names: Vec<String> = latest_rows.iter().map(|row| row.0.clone()).collect();
-    let series_rows: Vec<SeriesRow> = sqlx::query_as(
+    let recent_rows: Vec<SeriesRow> = sqlx::query_as(
         "SELECT guild_name, observed_at, season_rating, territory_count \
          FROM season_guild_observations \
          WHERE season_id = $1 \
@@ -149,16 +151,38 @@ pub async fn build_race_response(
     )
     .bind(active.season_id)
     .bind(&guild_names)
+    .bind(recent_query_start)
+    .bind(range_end)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| SeasonRaceError::Internal)?;
+
+    let chart_rows: Vec<SeriesRow> = sqlx::query_as(
+        "SELECT guild_name, observed_at, season_rating, territory_count \
+         FROM ( \
+             SELECT DISTINCT ON (guild_name, date_trunc('hour', observed_at)) \
+                 guild_name, observed_at, season_rating, territory_count \
+             FROM season_guild_observations \
+             WHERE season_id = $1 \
+               AND guild_name = ANY($2) \
+               AND observed_at >= $3 \
+               AND observed_at <= $4 \
+             ORDER BY guild_name, date_trunc('hour', observed_at), observed_at DESC \
+         ) hourly \
+         ORDER BY guild_name ASC, observed_at ASC",
+    )
+    .bind(active.season_id)
+    .bind(&guild_names)
     .bind(active.start_at)
     .bind(range_end)
     .fetch_all(pool)
     .await
     .map_err(|_| SeasonRaceError::Internal)?;
 
-    let mut series_by_guild: HashMap<String, Vec<SeriesObservation>> = HashMap::new();
+    let mut recent_by_guild: HashMap<String, Vec<SeriesObservation>> = HashMap::new();
     let mut latest_observed_territory_count: HashMap<String, usize> = HashMap::new();
-    for (guild_name, observed_at, season_rating, territory_count) in series_rows {
-        series_by_guild
+    for (guild_name, observed_at, season_rating, territory_count) in recent_rows {
+        recent_by_guild
             .entry(guild_name.clone())
             .or_default()
             .push(SeriesObservation {
@@ -169,6 +193,17 @@ pub async fn build_race_response(
             guild_name,
             usize::try_from(territory_count.max(0)).unwrap_or(0),
         );
+    }
+
+    let mut series_by_guild: HashMap<String, Vec<SeriesObservation>> = HashMap::new();
+    for (guild_name, observed_at, season_rating, _territory_count) in chart_rows {
+        series_by_guild
+            .entry(guild_name)
+            .or_default()
+            .push(SeriesObservation {
+                observed_at,
+                season_rating: i64::from(season_rating),
+            });
     }
 
     let live_territory_counts = live_territory_counts(state).await;
@@ -190,9 +225,10 @@ pub async fn build_race_response(
             .copied()
             .unwrap_or_else(|| usize::try_from(territory_count.max(0)).unwrap_or(0));
         let current_territory_count = live_count.max(fallback_count);
-        let observations = series_by_guild.remove(&guild_name).unwrap_or_default();
+        let recent_observations = recent_by_guild.remove(&guild_name).unwrap_or_default();
+        let chart_observations = series_by_guild.remove(&guild_name).unwrap_or_default();
         let observed_rate = observed_rate_per_hour(
-            &observations,
+            &recent_observations,
             active.start_at,
             range_end,
             active.lookback_hours,
@@ -210,13 +246,13 @@ pub async fn build_race_response(
             current_rank,
             projected_rank: current_rank,
             territory_count: current_territory_count,
-            sample_count: u32::try_from(observations.len()).unwrap_or(u32::MAX),
+            sample_count: u32::try_from(chart_observations.len()).unwrap_or(u32::MAX),
             last_sampled_at: observed_at.to_rfc3339(),
             observed_rate_per_hour: observed_rate,
             passive_rate_per_hour: passive_rate,
             forecast_rate_per_hour: forecast_rate,
             forecast_source,
-            series: downsample_series_hourly(observations),
+            series: downsample_series_hourly(chart_observations),
         });
     }
 
@@ -294,6 +330,15 @@ fn observed_rate_per_hour(
     }
 
     Some((last.season_rating - first.season_rating) as f64 / elapsed_hours)
+}
+
+fn recent_observation_query_start(
+    season_start: DateTime<Utc>,
+    range_end: DateTime<Utc>,
+    lookback_hours: i64,
+) -> DateTime<Utc> {
+    let buffered_hours = lookback_hours.max(1).saturating_mul(2);
+    season_start.max(range_end - Duration::hours(buffered_hours))
 }
 
 fn forecast_rate(observed_rate: Option<f64>, passive_rate: Option<f64>) -> (f64, ForecastSource) {
@@ -378,7 +423,7 @@ fn apply_projected_ranks(entries: &mut [SeasonRaceEntry]) {
 mod tests {
     use super::{
         ForecastSource, SeriesObservation, apply_projected_ranks, downsample_series_hourly,
-        forecast_rate, observed_rate_per_hour, project_final_sr,
+        forecast_rate, observed_rate_per_hour, project_final_sr, recent_observation_query_start,
     };
     use chrono::{DateTime, Utc};
 
@@ -412,6 +457,30 @@ mod tests {
         .expect("recent rate");
 
         assert!((rate - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn recent_observation_query_start_uses_buffered_lookback_window() {
+        assert_eq!(
+            recent_observation_query_start(
+                ts("2026-03-01T00:00:00Z"),
+                ts("2026-03-02T12:00:00Z"),
+                6,
+            ),
+            ts("2026-03-02T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn recent_observation_query_start_clamps_to_season_start() {
+        assert_eq!(
+            recent_observation_query_start(
+                ts("2026-03-01T10:00:00Z"),
+                ts("2026-03-01T12:00:00Z"),
+                6,
+            ),
+            ts("2026-03-01T10:00:00Z")
+        );
     }
 
     #[test]

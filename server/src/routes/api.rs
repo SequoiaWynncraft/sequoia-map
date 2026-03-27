@@ -9,6 +9,7 @@ use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::stream::{self, StreamExt};
+use tracing::warn;
 
 use super::http_util::{if_none_match_matches, json_bytes_response, not_modified_response};
 
@@ -517,9 +518,18 @@ pub async fn get_guilds_online(
             .map(|(name, _)| name.clone())
             .collect();
         if !missing_rating_names.is_empty() {
-            let fallback = load_latest_observed_season_ratings(pool, &missing_rating_names)
-                .await
-                .unwrap_or_default();
+            let fallback =
+                match load_latest_observed_season_ratings(pool, &missing_rating_names).await {
+                    Ok(fallback) => fallback,
+                    Err(error) => {
+                        warn!(
+                            error = %error,
+                            guild_count = missing_rating_names.len(),
+                            "failed to load snapshot season rating fallback"
+                        );
+                        HashMap::new()
+                    }
+                };
             apply_snapshot_fallback(&mut result, fallback);
         }
     }
