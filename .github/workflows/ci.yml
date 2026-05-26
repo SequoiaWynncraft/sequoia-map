@@ -37,9 +37,12 @@ jobs:
           git checkout --force "${GITHUB_SHA}"
 
       - name: Install Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup update stable
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
 
       - name: Build And Test
         run: |
