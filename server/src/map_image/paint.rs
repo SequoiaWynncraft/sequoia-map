@@ -576,6 +576,12 @@ mod tests {
             let [r, g, b] = rgb;
             assert!(canvas.data().chunks_exact(4).any(|p| p == [r, g, b, 255]));
             assert!(canvas.data().chunks_exact(4).any(|p| p == [0, 0, 0, 255]));
+            assert!(
+                canvas
+                    .data()
+                    .chunks_exact(4)
+                    .all(|p| { p[3] == 0 || p == [r, g, b, 255] || p == [0, 0, 0, 255] })
+            );
             if rgb[0] < 60 {
                 assert!(!canvas.data().chunks_exact(4).any(|p| p == [255; 4]));
             }
