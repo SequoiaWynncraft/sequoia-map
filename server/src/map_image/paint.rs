@@ -169,7 +169,11 @@ impl LabelPlan {
 
     /// Width and height of the stacked parts, including the text halo.
     fn size(self, assets: &Assets, tag: &str, held: &str) -> (f32, f32) {
-        let halo = 2.0 * self.tag.halo_width();
+        let halo = 2.0
+            * self
+                .tag
+                .halo_width
+                .max(self.held.map_or(0.0, |style| style.halo_width));
         let mut width = assets.regular.width(tag, self.tag.cell) + halo;
         let mut height = self.tag.cap_height() + halo;
         if let Some(style) = self.held {
@@ -189,6 +193,7 @@ fn label_style(cell: u32, fill: ColorU8) -> TextStyle {
         cell,
         fill: color(fill),
         halo: color(palette::HALO),
+        halo_width: (cell / 2 + 1).clamp(2, 3) as f32,
     }
 }
 
@@ -209,9 +214,13 @@ fn label_territory(
     };
     let [r, g, b] = guild.color;
     plan.tag.fill = color(ColorU8::from_rgba(r, g, b, 255));
+    plan.tag.halo = palette::contrasting_outline(guild.color);
+    if plan.tag.halo != color(palette::OUTLINE) {
+        plan.tag.halo_width = 1.0;
+    }
     let (_, height) = plan.size(assets, tag, &plot.held);
     let centre_x = rect.left() + rect.width() / 2.0;
-    let mut top = (rect.top() + (rect.height() - height) / 2.0 + plan.tag.halo_width()).round();
+    let mut top = (rect.top() + (rect.height() - height) / 2.0 + plan.tag.halo_width).round();
     if let Some(size) = plan.crown {
         let left = centre_x - size as f32 / 2.0;
         draw_crown(canvas, &assets.crown, (left, top), size);
@@ -528,6 +537,40 @@ mod tests {
             (f32::from(pixel[channel]) - f32::from(terrain[channel]))
                 / (f32::from(guild[channel]) - f32::from(terrain[channel]))
         })
+    }
+
+    #[test]
+    fn guild_labels_keep_their_colour_with_a_contrasting_outline() {
+        let assets = Assets::load(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../client/public"
+        )))
+        .expect("assets");
+        let plot = Plot {
+            bounds: [0; 4],
+            owner: None,
+            held: String::new(),
+            headquarters: false,
+        };
+        for (rgb, outline) in [
+            ([0, 0, 0], [255, 255, 255, 255]),
+            ([58, 38, 81], [255, 255, 255, 255]),
+            ([255, 255, 255], [0, 0, 0, 255]),
+            ([255, 255, 0], [0, 0, 0, 255]),
+        ] {
+            let guild = Guild {
+                prefix: "SEQ".to_string(),
+                name: "Sequoia".to_string(),
+                color: rgb,
+                territories: 1,
+            };
+            let mut canvas = Pixmap::new(160, 80).expect("canvas");
+            let rect = Rect::from_xywh(8.0, 8.0, 144.0, 64.0).expect("rectangle");
+            label_territory(&mut canvas, &assets, &plot, &guild, rect, MIN_CELL);
+            let [r, g, b] = rgb;
+            assert!(canvas.data().chunks_exact(4).any(|p| p == [r, g, b, 255]));
+            assert!(canvas.data().chunks_exact(4).any(|p| p == outline));
+        }
     }
 
     #[test]
