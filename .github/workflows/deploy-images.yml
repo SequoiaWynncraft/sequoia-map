@@ -303,8 +303,9 @@ jobs:
             server)
               image="${SERVER_IMAGE}"
               dockerfile=./Dockerfile
-              # BuildKit runs native and WASM stages together; share this runner's CPU budget.
-              cargo_jobs="$((($(nproc) + 1) / 2))"
+              # Native and WASM stages share the declared pod budget, not the node's CPU count.
+              : "${CARGO_BUILD_JOBS:?The runner must declare its CPU budget}"
+              cargo_jobs="$(((CARGO_BUILD_JOBS + 1) / 2))"
               build_args+=(--build-arg "SOURCE_COMMIT=${GITHUB_SHA}" --build-arg "CARGO_BUILD_JOBS=${cargo_jobs}") ;;
             ingest)
               image="${INGEST_IMAGE}"
