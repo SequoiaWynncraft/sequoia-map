@@ -23,7 +23,7 @@ env:
 jobs:
   changes:
     if: github.repository == 'SequoiaWynncraft/sequoia-map' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: apollo-sequoia-demeter
     timeout-minutes: 5
     permissions:
       contents: read
@@ -193,7 +193,7 @@ jobs:
     name: Validate Deployment Credentials
     needs: changes
     if: needs.changes.outputs.deploy == 'true'
-    runs-on: ubuntu-latest
+    runs-on: apollo-sequoia-demeter
     timeout-minutes: 2
     steps:
       - name: Validate Coolify Deploy Credentials
@@ -228,8 +228,7 @@ jobs:
     name: Build ${{ matrix.image }} Image
     needs: [changes, credentials]
     if: needs.changes.outputs.deploy == 'true'
-    # Independent hosted runners avoid serial image compilation and runner scarcity.
-    runs-on: ubuntu-latest
+    runs-on: apollo-sequoia-demeter
     timeout-minutes: 45
     permissions:
       contents: read
@@ -332,7 +331,7 @@ jobs:
     needs: [changes, credentials, build-images]
     # Missing selections or failed prerequisites must produce a failed promotion gate.
     if: always() && !cancelled() && github.repository == 'SequoiaWynncraft/sequoia-map' && github.ref == 'refs/heads/main' && (needs.changes.result != 'success' || needs.changes.outputs.deploy != 'false')
-    runs-on: ubuntu-latest
+    runs-on: apollo-sequoia-demeter
     timeout-minutes: 10
     permissions:
       contents: read
