@@ -1,0 +1,48 @@
+name: Demeter runner canary
+on:
+  push:
+    branches: [ci/demeter-runner-canary]
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: sequoia-demeter-canary
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: public.ecr.aws/docker/library/postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: canary
+          POSTGRES_DB: canary
+        ports:
+          - 15432:5432
+        options: --health-cmd "pg_isready -U postgres -d canary" --health-interval 2s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify runner, compiler and PostgreSQL service
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          set -euo pipefail
+          test -f mise.toml
+          test ! -e /var/run/secrets/kubernetes.io/serviceaccount/token
+          /home/runner/bin/Runner.Listener --version | tail -1
+          id
+          nproc
+          cat /sys/fs/cgroup/cpu.max /sys/fs/cgroup/memory.max
+          printf 'int main(void) { return 0; }\n' > "$RUNNER_TEMP/canary.c"
+          cc "$RUNNER_TEMP/canary.c" -o "$RUNNER_TEMP/canary"
+          "$RUNNER_TEMP/canary"
+          pkg-config --modversion openssl
+          python3 -c 'import socket; socket.create_connection(("127.0.0.1",15432),timeout=5).close()'
+          test "$(docker exec "$POSTGRES_CONTAINER" psql -U postgres -d canary -tAc 'SELECT 1')" = 1
+      - name: Verify Buildx builds a fresh image
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/image-context"
+          printf 'demeter-canary\n' > "$RUNNER_TEMP/image-context/marker"
+          printf 'FROM scratch\nCOPY marker /marker\n' > "$RUNNER_TEMP/image-context/Dockerfile"
+          docker buildx build --load -t demeter-canary:check "$RUNNER_TEMP/image-context"
+          docker image inspect demeter-canary:check >/dev/null
