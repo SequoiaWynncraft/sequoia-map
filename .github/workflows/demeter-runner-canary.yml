@@ -24,6 +24,7 @@ jobs:
       - name: Verify runner, compiler and PostgreSQL service
         env:
           POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           test -f mise.toml
@@ -36,6 +37,8 @@ jobs:
           cc "$RUNNER_TEMP/canary.c" -o "$RUNNER_TEMP/canary"
           "$RUNNER_TEMP/canary"
           pkg-config --modversion openssl
+          gh --version
+          test "$(gh api "repos/$GITHUB_REPOSITORY" --jq .full_name)" = "$GITHUB_REPOSITORY"
           python3 -c 'import socket; socket.create_connection(("127.0.0.1",15432),timeout=5).close()'
           test "$(docker exec "$POSTGRES_CONTAINER" psql -U postgres -d canary -tAc 'SELECT 1')" = 1
       - name: Verify Buildx builds a fresh image
