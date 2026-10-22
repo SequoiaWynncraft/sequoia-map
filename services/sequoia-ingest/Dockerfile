@@ -3,7 +3,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20250419~deb12u2 \
     && rm -rf /var/lib/apt/lists/*
 ENV RUSTUP_USE_CURL=1
-RUN rustup self update && rustup --version | grep -E '^rustup 1\.29\.2 '
+RUN case "$(uname -m)" in \
+        x86_64) rustup_sha=5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4 ;; \
+        aarch64) rustup_sha=a9c168dbea81a84671c6b7a5c1795cb0eb699020110d107ddfca427bd797e697 ;; \
+        *) exit 1 ;; \
+    esac \
+    && curl --proto '=https' --tlsv1.2 -fsSLo /rustup-init "https://static.rust-lang.org/rustup/archive/1.29.2/$(uname -m)-unknown-linux-gnu/rustup-init" \
+    && echo "$rustup_sha  /rustup-init" | sha256sum -c - \
+    && chmod +x /rustup-init && /rustup-init -y --no-modify-path --default-toolchain none \
+    && rm /rustup-init \
+    && rustup --version | grep -E '^rustup 1\.29\.2 '
 
 WORKDIR /app
 COPY Cargo.toml ./
