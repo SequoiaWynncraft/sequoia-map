@@ -1,4 +1,7 @@
 FROM rust:1.88-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20250419~deb12u2 \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY Cargo.toml ./
@@ -10,13 +13,16 @@ WORKDIR /app/services/sequoia-ingest
 RUN --mount=type=cache,id=sequoia-ingest-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=sequoia-ingest-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=sequoia-ingest-target,target=/tmp/target-cache,sharing=locked \
-    CARGO_TARGET_DIR=/tmp/target-cache cargo build --release --bin sequoia-ingest && \
+    CARGO_TARGET_DIR=/tmp/target-cache cargo build --release --locked --bin sequoia-ingest && \
     install -Dm755 /tmp/target-cache/release/sequoia-ingest /app/sequoia-ingest && \
     strip /app/sequoia-ingest
 
 FROM debian:bookworm-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20250419~deb12u2 \
+    && rm -rf /var/lib/apt/lists/*
 RUN groupadd --system --gid 10001 sequoia \
     && useradd --system --uid 10001 --gid 10001 --create-home --home-dir /home/sequoia sequoia
 
