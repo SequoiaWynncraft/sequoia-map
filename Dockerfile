@@ -1,13 +1,32 @@
+FROM rust:1.88-bookworm AS rust-base
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20250419~deb12u2 \
+    && rm -rf /var/lib/apt/lists/*
+ENV RUSTUP_USE_CURL=1
+RUN case "$(uname -m)" in \
+        x86_64) rustup_sha=5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4 ;; \
+        aarch64) rustup_sha=a9c168dbea81a84671c6b7a5c1795cb0eb699020110d107ddfca427bd797e697 ;; \
+        *) exit 1 ;; \
+    esac \
+    && curl --proto '=https' --tlsv1.2 -fsSLo /rustup-init "https://static.rust-lang.org/rustup/archive/1.29.2/$(uname -m)-unknown-linux-gnu/rustup-init" \
+    && echo "$rustup_sha  /rustup-init" | sha256sum -c - \
+    && chmod +x /rustup-init && /rustup-init -y --no-modify-path --default-toolchain none \
+    && rm /rustup-init \
+    && rustup --version | grep -E '^rustup 1\.29\.2 '
+
 ### Stage 1: Build the client (WASM via Trunk)
-FROM rust:1.88-bookworm AS client-build
+FROM rust-base AS client-build
 
 ARG TARGETARCH
 ARG BINARYEN_VERSION=126
 ARG BINARYEN_ARCH=
 ARG TAILWINDCSS_VERSION=4.2.0
 ARG WASM_BINDGEN_VERSION=0.2.113
+ARG TRUNK_VERSION=0.21.14
 
-RUN apt-get update && apt-get install -y --no-install-recommends brotli gzip ca-certificates curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends brotli gzip ca-certificates curl pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
 COPY .ci/binaryen/ /tmp/binaryen-assets/
 COPY .ci/tailwindcss/ /tmp/tailwindcss-assets/
 COPY .ci/wasm-bindgen/ /tmp/wasm-bindgen-assets/
@@ -101,7 +120,7 @@ RUN set -eux; \
 RUN rustup target add wasm32-unknown-unknown
 RUN --mount=type=cache,id=sequoia-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=sequoia-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    cargo install trunk --locked
+    cargo install trunk --version "${TRUNK_VERSION}" --locked --no-default-features --features native-tls
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
@@ -118,7 +137,7 @@ RUN --mount=type=cache,id=sequoia-cargo-registry,target=/usr/local/cargo/registr
     --mount=type=cache,id=sequoia-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=sequoia-client-target,target=/app/target,sharing=locked \
     --mount=type=cache,id=sequoia-trunk-cache,target=/app/.trunk,sharing=locked \
-    trunk build --release
+    trunk build --release --locked
 RUN find dist -type f -name '*_bg.wasm' -exec wasm-opt -Oz {} -o {} \;
 RUN find dist -type f \( -name '*.wasm' -o -name '*.js' -o -name '*.css' -o -name '*.html' -o -name '*.json' -o -name '*.svg' \) -exec sh -c 'brotli -f -q 11 "$1" -o "$1.br"; gzip -f -k -9 "$1"' _ {} \;
 
@@ -127,12 +146,12 @@ RUN --mount=type=cache,id=sequoia-cargo-registry,target=/usr/local/cargo/registr
     --mount=type=cache,id=sequoia-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=sequoia-client-target,target=/app/target,sharing=locked \
     --mount=type=cache,id=sequoia-trunk-cache,target=/app/.trunk,sharing=locked \
-    trunk build --release
+    trunk build --release --locked
 RUN find dist -type f -name '*_bg.wasm' -exec wasm-opt -Oz {} -o {} \;
 RUN find dist -type f \( -name '*.wasm' -o -name '*.js' -o -name '*.css' -o -name '*.html' -o -name '*.json' -o -name '*.svg' \) -exec sh -c 'brotli -f -q 11 "$1" -o "$1.br"; gzip -f -k -9 "$1"' _ {} \;
 
 ### Stage 2: Build the server
-FROM rust:1.88-bookworm AS server-build
+FROM rust-base AS server-build
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
@@ -148,7 +167,7 @@ RUN mkdir -p claims-client/src && echo 'fn main() {}' > claims-client/src/main.r
 RUN --mount=type=cache,id=sequoia-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=sequoia-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=sequoia-server-target,target=/tmp/target-cache,sharing=locked \
-    CARGO_TARGET_DIR=/tmp/target-cache cargo build --release --bin sequoia-server && \
+    CARGO_TARGET_DIR=/tmp/target-cache cargo build --release --locked --bin sequoia-server && \
     install -Dm755 /tmp/target-cache/release/sequoia-server /app/sequoia-server && \
     strip /app/sequoia-server
 
@@ -157,7 +176,10 @@ FROM debian:bookworm-slim
 
 ARG SOURCE_COMMIT=
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20250419~deb12u2 \
+    && rm -rf /var/lib/apt/lists/*
 RUN groupadd --system --gid 10001 sequoia \
     && useradd --system --uid 10001 --gid 10001 --create-home --home-dir /home/sequoia sequoia
 
