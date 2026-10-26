@@ -6,7 +6,7 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use sequoia_shared::tower::format_stat;
-use sequoia_shared::war_activity::{ActivityEntry, ActivityOutcome, WarActivityPage};
+use sequoia_shared::war_activity::{ActivityEntry, ActivityOutcome, StartSource, WarActivityPage};
 use sequoia_shared::war_board::format_clock;
 
 use super::{MapFocus, WarRoom, difficulty_color, difficulty_label};
@@ -60,18 +60,22 @@ pub(crate) struct ActivityList {
     widened: bool,
     /// The day boundary the first page stopped at.
     first_since: Option<i64>,
+    /// Loaded as the whole week from the start, as a territory's list is.
+    whole_week: bool,
     pub ended: bool,
 }
 
 impl ActivityList {
-    /// After the first page for the last day.
-    pub fn first(page: WarActivityPage, since: i64) -> Self {
+    /// After the first page: the last day, or for `whole_week`, the whole week at once.
+    pub fn first(page: WarActivityPage, since: i64, whole_week: bool) -> Self {
+        let ended = whole_week && page.next_before.is_none();
         Self {
             entries: page.entries,
             next_before: page.next_before,
-            widened: false,
+            widened: whole_week,
             first_since: Some(since),
-            ended: false,
+            whole_week,
+            ended,
         }
     }
 
@@ -99,7 +103,7 @@ impl ActivityList {
             .map(|entry| entry.cursor.clone())
             .or_else(|| {
                 self.first_since
-                    .map(|since| format!("{}.{}", since * 1000, i64::MAX))
+                    .map(|since| format!("{}.{}", since * 1_000_000, i64::MAX))
             });
         Some(ActivityRequest {
             since: None,
@@ -123,10 +127,20 @@ impl ActivityList {
         self.ended = self.widened && self.next_before.is_none();
     }
 
-    /// Merges a fresh first page in at the top without disturbing what is loaded below.
-    pub fn refresh(&mut self, page: WarActivityPage) {
+    /// Merges a fresh first page in at the top without disturbing what is loaded below. When
+    /// more arrived than one page holds, the fresh page does not reach what is loaded, and
+    /// merging would leave a hole Load older could never fill: the list starts over from the
+    /// fresh page instead, and says so.
+    pub fn refresh(&mut self, page: WarActivityPage, since: i64) -> bool {
         let known: std::collections::HashSet<i64> =
             self.entries.iter().map(|entry| entry.id).collect();
+        let reaches = page.next_before.is_none()
+            || self.entries.is_empty()
+            || page.entries.iter().any(|entry| known.contains(&entry.id));
+        if !reaches {
+            *self = Self::first(page, since, self.whole_week);
+            return true;
+        }
         let mut fresh: Vec<ActivityEntry> = page
             .entries
             .iter()
@@ -141,6 +155,7 @@ impl ActivityList {
         }
         fresh.extend(std::mem::take(&mut self.entries));
         self.entries = fresh;
+        false
     }
 }
 
@@ -176,6 +191,9 @@ pub(crate) fn ActivityFeed(
     let load = RwSignal::new(Load::Idle);
     let alive = StoredValue::new(true);
     on_cleanup(move || alive.set_value(false));
+    // Bumped whenever the selection changes: an answer to an older selection is dropped.
+    let epoch = StoredValue::new(0u64);
+    let current = move |asked: u64| alive.get_value() && epoch.get_value() == asked;
 
     let base = Memo::new(move |_| ActivityRequest {
         since: None,
@@ -183,42 +201,31 @@ pub(crate) fn ActivityFeed(
         territory: territory.map(|territory| territory.get()),
         everything: everything.get(),
     });
+    // A territory's list is short and wants its whole week at once; the war panel's starts
+    // with the last day.
+    let whole_week = territory.is_some();
     let first_request = move || {
         let since = room.now.get_untracked() - RECENT_SECS;
         (
             ActivityRequest {
-                since: Some(since),
+                since: (!whole_week).then_some(since),
                 ..base.get_untracked()
             },
             since,
         )
     };
-    // A territory's list is short and wants its whole week at once.
     let load_first = move || {
         let (request, since) = first_request();
-        let request = if territory.is_some() {
-            ActivityRequest {
-                since: None,
-                ..request
-            }
-        } else {
-            request
-        };
-        let widened = territory.is_some();
+        let asked = epoch.get_value();
         load.set(Load::Loading);
         spawn_local(async move {
             let result = fetch(&request).await;
-            if !alive.get_value() {
+            if !current(asked) {
                 return;
             }
             match result {
                 Ok(page) => {
-                    let mut first = ActivityList::first(page, since);
-                    if widened {
-                        first.widened = true;
-                        first.ended = first.next_before.is_none();
-                    }
-                    list.set(Some(first));
+                    list.set(Some(ActivityList::first(page, since, whole_week)));
                     load.set(Load::Idle);
                 }
                 Err(_) => load.set(Load::Failed),
@@ -227,6 +234,7 @@ pub(crate) fn ActivityFeed(
     };
     Effect::new(move || {
         base.track();
+        epoch.update_value(|epoch| *epoch += 1);
         list.set(None);
         load_first();
     });
@@ -237,16 +245,22 @@ pub(crate) fn ActivityFeed(
                 if list.with_untracked(Option::is_none) {
                     return;
                 }
-                let (request, _) = first_request();
+                let (request, since) = first_request();
+                let asked = epoch.get_value();
                 spawn_local(async move {
                     if let Ok(page) = fetch(&request).await
-                        && alive.get_value()
+                        && current(asked)
                     {
-                        list.update(|list| {
-                            if let Some(list) = list.as_mut() {
-                                list.refresh(page);
-                            }
-                        });
+                        let started_over = list
+                            .try_update(|list| {
+                                list.as_mut().is_some_and(|list| list.refresh(page, since))
+                            })
+                            .unwrap_or(false);
+                        // An older page still on its way belongs to the list that was replaced.
+                        if started_over {
+                            epoch.update_value(|epoch| *epoch += 1);
+                            load.set(Load::Idle);
+                        }
                     }
                 });
             },
@@ -266,10 +280,11 @@ pub(crate) fn ActivityFeed(
             return;
         };
         let widened = request.since.is_none();
+        let asked = epoch.get_value();
         load.set(Load::Loading);
         spawn_local(async move {
             let result = fetch(&request).await;
-            if !alive.get_value() {
+            if !current(asked) {
                 return;
             }
             match result {
@@ -409,20 +424,32 @@ fn ActivityDetail(entry: ActivityEntry) -> impl IntoView {
             facts.push(("Queue timer", format_clock(seconds)));
         }
     }
+    if entry.attempt_ambiguous {
+        facts.push(("Attack", "Several fit; none attached".to_string()));
+    }
     if let Some(war) = &entry.war {
-        if let Some(starts_at) = war.starts_at {
-            let label = if war.start_scheduled {
-                "War start"
-            } else {
-                "First seen"
-            };
-            facts.push((label, local_time(starts_at)));
+        // Each time is only what it says: a start only when a queue scheduled it, and an end
+        // only when a member reported one.
+        match (war.starts_at, war.start_source) {
+            (Some(at), Some(StartSource::Queue)) => facts.push(("War start", local_time(at))),
+            (Some(at), Some(StartSource::Estimate)) => {
+                facts.push(("War start", format!("about {}", local_time(at))))
+            }
+            _ => {}
         }
-        if let Some(ended_at) = war.ended_at {
-            facts.push(("Ended", stamp(ended_at, war.end_reported)));
+        if let Some(at) = war.first_reported_at {
+            facts.push(("First report", local_time(at)));
+        }
+        match (war.ended_at, war.last_reported_at) {
+            (Some(at), _) => facts.push(("Reported end", local_time(at))),
+            (None, Some(at)) => facts.push(("Last report", local_time(at))),
+            (None, None) => {}
         }
         if let Some(fought) = war.fought_secs() {
             facts.push(("Fought", format_clock(fought)));
+        }
+        if war.interrupted {
+            facts.push(("Reports", "stopped and resumed".to_string()));
         }
         if let Some(tower) = &war.tower {
             let mut line = Vec::new();
@@ -500,7 +527,8 @@ mod tests {
             queue: None,
             war: None,
             owner_change: None,
-            cursor: format!("{}.{id}", at * 1000),
+            attempt_ambiguous: false,
+            cursor: format!("{}.{id}", at * 1_000_000),
         }
     }
 
@@ -543,22 +571,23 @@ mod tests {
         let mut list = ActivityList::first(
             page(
                 vec![entry(9, 990_000), entry(8, 980_000)],
-                Some("980000000.8"),
+                Some("980000000000.8"),
             ),
             since,
+            false,
         );
 
         let more_today = list.older(&base()).expect("more of the day");
         assert_eq!(
             (more_today.since, more_today.before.as_deref()),
-            (Some(since), Some("980000000.8"))
+            (Some(since), Some("980000000000.8"))
         );
         list.extend(page(vec![entry(7, 950_000)], None), false);
 
         let week = list.older(&base()).expect("the rest of the week");
         assert_eq!(
             (week.since, week.before.as_deref()),
-            (None, Some("950000000.7"))
+            (None, Some("950000000000.7"))
         );
         list.extend(page(vec![entry(6, 500_000)], None), true);
 
@@ -574,13 +603,20 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_day_continues_from_the_days_edge() {
-        let list = ActivityList::first(page(Vec::new(), None), 913_600);
+    fn an_empty_day_continues_from_the_days_edge_in_microseconds() {
+        let list = ActivityList::first(page(Vec::new(), None), 913_600, false);
         let week = list.older(&base()).expect("the week");
         assert_eq!(
             week.before.as_deref(),
-            Some(format!("913600000.{}", i64::MAX).as_str())
+            Some(format!("913600000000.{}", i64::MAX).as_str())
         );
+    }
+
+    #[test]
+    fn a_whole_week_list_ends_with_its_only_page() {
+        let list = ActivityList::first(page(vec![entry(3, 990_000)], None), 913_600, true);
+        assert!(list.ended);
+        assert_eq!(list.older(&base()), None);
     }
 
     #[test]
@@ -588,9 +624,10 @@ mod tests {
         let mut list = ActivityList::first(
             page(
                 vec![entry(9, 990_000), entry(8, 980_000)],
-                Some("980000000.8"),
+                Some("980000000000.8"),
             ),
             913_600,
+            false,
         );
         list.extend(
             page(vec![entry(8, 980_000), entry(7, 970_000)], None),
@@ -598,7 +635,10 @@ mod tests {
         );
         let mut confirmed = entry(9, 990_000);
         confirmed.outcome = ActivityOutcome::Captured;
-        list.refresh(page(vec![entry(10, 995_000), confirmed], None));
+        assert!(!list.refresh(
+            page(vec![entry(10, 995_000), confirmed], Some("990000000000.9")),
+            913_600,
+        ));
 
         assert_eq!(
             list.entries
@@ -608,5 +648,29 @@ mod tests {
             [10, 9, 8, 7]
         );
         assert_eq!(list.entries[1].outcome, ActivityOutcome::Captured);
+    }
+
+    #[test]
+    fn more_arrivals_than_a_page_start_the_list_over_instead_of_leaving_a_hole() {
+        // Held [10, 9]; then 40 down to 11 arrive and the refreshed page holds only 40 to 16.
+        let mut list = ActivityList::first(
+            page(vec![entry(10, 900_100), entry(9, 900_090)], None),
+            813_600,
+            false,
+        );
+        list.extend(page(vec![entry(8, 800_000)], None), true);
+        let head: Vec<ActivityEntry> = (16..=40)
+            .rev()
+            .map(|id| entry(id, 900_000 + id * 100))
+            .collect();
+        assert!(list.refresh(page(head, Some("901600000000.16")), 913_600));
+
+        assert_eq!(list.entries.len(), 25);
+        assert_eq!(list.entries.last().map(|entry| entry.id), Some(16));
+        assert!(!list.ended);
+        // Load older carries on from 16, so 15 to 11 and then the held rows come back in order.
+        let older = list.older(&base()).expect("more");
+        assert_eq!(older.before.as_deref(), Some("901600000000.16"));
+        assert_eq!(older.since, Some(913_600));
     }
 }
