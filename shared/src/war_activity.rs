@@ -104,6 +104,10 @@ pub struct ActivityWar {
     /// The reports stopped and resumed: it was not observed throughout.
     #[serde(default)]
     pub interrupted: bool,
+    /// Its reports followed an earlier attack's on the territory after a gap too long to tell
+    /// whether it is the same attack.
+    #[serde(default)]
+    pub after_gap: bool,
     #[serde(default)]
     pub tower: Option<ActivityTower>,
     /// Members who reported being in the war, in the order they joined.
@@ -188,7 +192,7 @@ mod tests {
              "occurred_at_exact": false, "difficulty": null, "queue": null,
              "war": {"starts_at": null, "start_source": null, "first_reported_at": 1787518900,
                      "last_reported_at": 1787519000, "ended_at": null, "interrupted": true,
-                     "tower": null, "participants": []},
+                     "after_gap": true, "tower": null, "participants": []},
              "owner_change": null, "attempt_ambiguous": false, "cursor": "1787519000000000.11"}
         ],
         "next_before": "1787519000000000.11",
@@ -212,7 +216,8 @@ mod tests {
         let quiet = &page.entries[1];
         assert_eq!(quiet.outcome, ActivityOutcome::Ended);
         let war = quiet.war.as_ref().expect("war");
-        assert!(war.interrupted);
+        assert!(war.interrupted && war.after_gap);
+        assert!(!capture.war.as_ref().expect("war").after_gap);
         assert_eq!((war.starts_at, war.ended_at), (None, None));
         assert_eq!(war.fought_secs(), None);
         assert_eq!(page.next_before.as_deref(), Some("1787519000000000.11"));
@@ -227,6 +232,7 @@ mod tests {
             last_reported_at: Some(200),
             ended_at,
             interrupted: false,
+            after_gap: false,
             tower: None,
             participants: Vec::new(),
         };
