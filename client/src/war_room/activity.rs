@@ -130,14 +130,15 @@ impl ActivityList {
     /// Merges a fresh first page in at the top without disturbing what is loaded below. When
     /// more arrived than one page holds, the fresh page does not reach what is loaded, and
     /// merging would leave a hole Load older could never fill: the list starts over from the
-    /// fresh page instead, and says so.
+    /// fresh page instead, and says so. So does an empty list that the fresh page fills, which
+    /// takes the fresh page's continuation rather than the empty one's end.
     pub fn refresh(&mut self, page: WarActivityPage, since: i64) -> bool {
         let known: std::collections::HashSet<i64> =
             self.entries.iter().map(|entry| entry.id).collect();
         let reaches = page.next_before.is_none()
-            || self.entries.is_empty()
             || page.entries.iter().any(|entry| known.contains(&entry.id));
-        if !reaches {
+        let fills = self.entries.is_empty() && !page.entries.is_empty();
+        if !reaches || fills {
             *self = Self::first(page, since, self.whole_week);
             return true;
         }
@@ -451,6 +452,9 @@ fn ActivityDetail(entry: ActivityEntry) -> impl IntoView {
         if war.interrupted {
             facts.push(("Reports", "stopped and resumed".to_string()));
         }
+        if war.after_gap {
+            facts.push(("Attack", "May continue the one before".to_string()));
+        }
         if let Some(tower) = &war.tower {
             let mut line = Vec::new();
             if let Some(ehp) = tower.ehp {
@@ -615,6 +619,49 @@ mod tests {
     #[test]
     fn a_whole_week_list_ends_with_its_only_page() {
         let list = ActivityList::first(page(vec![entry(3, 990_000)], None), 913_600, true);
+        assert!(list.ended);
+        assert_eq!(list.older(&base()), None);
+    }
+
+    #[test]
+    fn an_empty_territory_list_takes_the_continuation_of_a_busy_refresh() {
+        // The territory had nothing; then 30 entries arrived and the refresh holds the newest 25.
+        let mut list = ActivityList::first(page(Vec::new(), None), 813_600, true);
+        assert!(list.ended);
+        let head: Vec<ActivityEntry> = (6..=30)
+            .rev()
+            .map(|id| entry(id, 900_000 + id * 100))
+            .collect();
+        assert!(list.refresh(page(head, Some("900600000000.6")), 913_600));
+
+        assert!(!list.ended);
+        let older = list.older(&base()).expect("Load older");
+        assert_eq!(
+            (older.since, older.before.as_deref()),
+            (None, Some("900600000000.6"))
+        );
+        let rest: Vec<ActivityEntry> = (1..=5)
+            .rev()
+            .map(|id| entry(id, 900_000 + id * 100))
+            .collect();
+        list.extend(page(rest, None), true);
+
+        assert!(list.ended);
+        assert_eq!(
+            list.entries
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            (1..=30).rev().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_refresh_that_is_still_empty_keeps_a_finished_list_finished() {
+        let mut list = ActivityList::first(page(Vec::new(), None), 813_600, false);
+        list.extend(page(Vec::new(), None), true);
+        assert!(list.ended);
+        assert!(!list.refresh(page(Vec::new(), None), 913_600));
         assert!(list.ended);
         assert_eq!(list.older(&base()), None);
     }
