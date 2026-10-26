@@ -1,0 +1,612 @@
+//! Recent activity: Sequoia's captures and losses over the last day, and older pages back
+//! through the week the backend keeps, opened on purpose from the war panel or a territory's
+//! sidebar. Nothing loads until it is opened, and nothing is collected in the browser: every
+//! page comes from the backend's journal.
+
+use leptos::prelude::*;
+use leptos::task::spawn_local;
+use sequoia_shared::tower::format_stat;
+use sequoia_shared::war_activity::{ActivityEntry, ActivityOutcome, WarActivityPage};
+use sequoia_shared::war_board::format_clock;
+
+use super::{MapFocus, WarRoom, difficulty_color, difficulty_label};
+use crate::territory_card::{Disclosure, ago, local_time};
+
+const ENDPOINT: &str = "/api/war-activity";
+/// The first page covers the last day; Load older reaches back through the backend's window.
+const RECENT_SECS: i64 = 24 * 60 * 60;
+const PAGE_SIZE: u32 = 25;
+/// How often an open list checks for newer entries.
+const REFRESH_MS: u64 = 60_000;
+
+/// One request for a page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ActivityRequest {
+    pub since: Option<i64>,
+    pub before: Option<String>,
+    pub territory: Option<String>,
+    pub everything: bool,
+}
+
+impl ActivityRequest {
+    pub fn url(&self) -> String {
+        let mut url = format!("{ENDPOINT}?limit={PAGE_SIZE}");
+        if let Some(since) = self.since {
+            url.push_str(&format!("&since={since}"));
+        }
+        if let Some(before) = &self.before {
+            url.push_str(&format!("&before={}", crate::encode_uri_component(before)));
+        }
+        if let Some(territory) = &self.territory {
+            url.push_str(&format!(
+                "&territory={}",
+                crate::encode_uri_component(territory)
+            ));
+        }
+        if self.everything {
+            url.push_str("&scope=all");
+        }
+        url
+    }
+}
+
+/// Where the list stands: what it shows, and what Load older would ask for next.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct ActivityList {
+    pub entries: Vec<ActivityEntry>,
+    /// The next older page within the current range, from the backend.
+    next_before: Option<String>,
+    /// Whether the week beyond the first day has been opened up yet.
+    widened: bool,
+    /// The day boundary the first page stopped at.
+    first_since: Option<i64>,
+    pub ended: bool,
+}
+
+impl ActivityList {
+    /// After the first page for the last day.
+    pub fn first(page: WarActivityPage, since: i64) -> Self {
+        Self {
+            entries: page.entries,
+            next_before: page.next_before,
+            widened: false,
+            first_since: Some(since),
+            ended: false,
+        }
+    }
+
+    /// The request Load older makes: more of the day while the day has more, then the rest
+    /// of the week from where the list stops.
+    pub fn older(&self, base: &ActivityRequest) -> Option<ActivityRequest> {
+        if self.ended {
+            return None;
+        }
+        if let Some(before) = &self.next_before {
+            let since = if self.widened { None } else { self.first_since };
+            return Some(ActivityRequest {
+                since,
+                before: Some(before.clone()),
+                ..base.clone()
+            });
+        }
+        if self.widened {
+            return None;
+        }
+        // The day is exhausted: carry on from its last entry, or from the day's edge.
+        let before = self
+            .entries
+            .last()
+            .map(|entry| entry.cursor.clone())
+            .or_else(|| {
+                self.first_since
+                    .map(|since| format!("{}.{}", since * 1000, i64::MAX))
+            });
+        Some(ActivityRequest {
+            since: None,
+            before,
+            ..base.clone()
+        })
+    }
+
+    /// Appends an older page. Entries already shown are skipped, so a page boundary that
+    /// moved under new entries never shows one twice.
+    pub fn extend(&mut self, page: WarActivityPage, widened: bool) {
+        let known: std::collections::HashSet<i64> =
+            self.entries.iter().map(|entry| entry.id).collect();
+        self.entries.extend(
+            page.entries
+                .into_iter()
+                .filter(|entry| !known.contains(&entry.id)),
+        );
+        self.widened |= widened;
+        self.next_before = page.next_before;
+        self.ended = self.widened && self.next_before.is_none();
+    }
+
+    /// Merges a fresh first page in at the top without disturbing what is loaded below.
+    pub fn refresh(&mut self, page: WarActivityPage) {
+        let known: std::collections::HashSet<i64> =
+            self.entries.iter().map(|entry| entry.id).collect();
+        let mut fresh: Vec<ActivityEntry> = page
+            .entries
+            .iter()
+            .filter(|entry| !known.contains(&entry.id))
+            .cloned()
+            .collect();
+        // An outcome confirmed since it was loaded replaces the old row in place.
+        for entry in &page.entries {
+            if let Some(held) = self.entries.iter_mut().find(|held| held.id == entry.id) {
+                *held = entry.clone();
+            }
+        }
+        fresh.extend(std::mem::take(&mut self.entries));
+        self.entries = fresh;
+    }
+}
+
+async fn fetch(request: &ActivityRequest) -> Result<WarActivityPage, String> {
+    let response = gloo_net::http::Request::get(&request.url())
+        .send()
+        .await
+        .map_err(|error| format!("request failed: {error}"))?;
+    if !response.ok() {
+        return Err(format!("status {}", response.status()));
+    }
+    response
+        .json::<WarActivityPage>()
+        .await
+        .map_err(|error| format!("decode failed: {error}"))
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Load {
+    Idle,
+    Loading,
+    Failed,
+}
+
+/// The activity list, loading once it is shown. `territory` narrows it to one territory.
+#[component]
+pub(crate) fn ActivityFeed(
+    #[prop(optional, into)] territory: Option<Signal<String>>,
+) -> impl IntoView {
+    let room = expect_context::<WarRoom>();
+    let everything = RwSignal::new(false);
+    let list = RwSignal::new(None::<ActivityList>);
+    let load = RwSignal::new(Load::Idle);
+    let alive = StoredValue::new(true);
+    on_cleanup(move || alive.set_value(false));
+
+    let base = Memo::new(move |_| ActivityRequest {
+        since: None,
+        before: None,
+        territory: territory.map(|territory| territory.get()),
+        everything: everything.get(),
+    });
+    let first_request = move || {
+        let since = room.now.get_untracked() - RECENT_SECS;
+        (
+            ActivityRequest {
+                since: Some(since),
+                ..base.get_untracked()
+            },
+            since,
+        )
+    };
+    // A territory's list is short and wants its whole week at once.
+    let load_first = move || {
+        let (request, since) = first_request();
+        let request = if territory.is_some() {
+            ActivityRequest {
+                since: None,
+                ..request
+            }
+        } else {
+            request
+        };
+        let widened = territory.is_some();
+        load.set(Load::Loading);
+        spawn_local(async move {
+            let result = fetch(&request).await;
+            if !alive.get_value() {
+                return;
+            }
+            match result {
+                Ok(page) => {
+                    let mut first = ActivityList::first(page, since);
+                    if widened {
+                        first.widened = true;
+                        first.ended = first.next_before.is_none();
+                    }
+                    list.set(Some(first));
+                    load.set(Load::Idle);
+                }
+                Err(_) => load.set(Load::Failed),
+            }
+        });
+    };
+    Effect::new(move || {
+        base.track();
+        list.set(None);
+        load_first();
+    });
+    // While shown, pick up newer entries now and then rather than streaming them.
+    Effect::new(move || {
+        let handle = set_interval_with_handle(
+            move || {
+                if list.with_untracked(Option::is_none) {
+                    return;
+                }
+                let (request, _) = first_request();
+                spawn_local(async move {
+                    if let Ok(page) = fetch(&request).await
+                        && alive.get_value()
+                    {
+                        list.update(|list| {
+                            if let Some(list) = list.as_mut() {
+                                list.refresh(page);
+                            }
+                        });
+                    }
+                });
+            },
+            std::time::Duration::from_millis(REFRESH_MS),
+        );
+        on_cleanup(move || {
+            if let Ok(handle) = handle {
+                handle.clear();
+            }
+        });
+    });
+    let load_older = move |_| {
+        let Some(request) = list.with_untracked(|list| {
+            list.as_ref()
+                .and_then(|list| list.older(&base.get_untracked()))
+        }) else {
+            return;
+        };
+        let widened = request.since.is_none();
+        load.set(Load::Loading);
+        spawn_local(async move {
+            let result = fetch(&request).await;
+            if !alive.get_value() {
+                return;
+            }
+            match result {
+                Ok(page) => {
+                    list.update(|list| {
+                        if let Some(list) = list.as_mut() {
+                            list.extend(page, widened);
+                        }
+                    });
+                    load.set(Load::Idle);
+                }
+                Err(_) => load.set(Load::Failed),
+            }
+        });
+    };
+    let entries =
+        Memo::new(move |_| list.with(|list| list.as_ref().map(|list| list.entries.clone())));
+    let can_load_older = Memo::new(move |_| {
+        list.with(|list| {
+            list.as_ref()
+                .is_some_and(|list| list.older(&base.get()).is_some())
+        })
+    });
+    let ended = Memo::new(move |_| list.with(|list| list.as_ref().is_some_and(|list| list.ended)));
+
+    view! {
+        <div class="activity">
+            <label class="activity-scope">
+                <input type="checkbox" prop:checked=move || everything.get() on:change=move |event| everything.set(event_target_checked(&event)) />
+                "Include cancelled and unconfirmed"
+            </label>
+            {move || match entries.get() {
+                None if load.get() == Load::Failed => view! { <p class="activity-note" role="status">"Recent activity is unavailable"</p> }.into_any(),
+                None => view! { <p class="activity-note" role="status">"Loading"</p> }.into_any(),
+                Some(entries) if entries.is_empty() && ended.get() => {
+                    view! { <p class="activity-note">"Nothing in the last 7 days"</p> }.into_any()
+                }
+                Some(entries) => view! {
+                    <ol class="activity-list">
+                        {entries.into_iter().map(|entry| view! { <ActivityRow entry /> }).collect_view()}
+                    </ol>
+                }.into_any(),
+            }}
+            <Show when=move || can_load_older.get()>
+                <button type="button" class="activity-older" disabled=move || load.get() == Load::Loading on:click=load_older>
+                    "Load older"
+                </button>
+            </Show>
+            <Show when=move || ended.get() && entries.with(|entries| entries.as_ref().is_some_and(|entries| !entries.is_empty()))>
+                <p class="activity-note">"Activity is kept for 7 days"</p>
+            </Show>
+            <Show when=move || load.get() == Load::Failed && entries.with(Option::is_some)>
+                <p class="activity-note" role="status">"Could not load more"</p>
+            </Show>
+        </div>
+    }
+}
+
+#[component]
+fn ActivityRow(entry: ActivityEntry) -> impl IntoView {
+    let room = expect_context::<WarRoom>();
+    let focus_map = MapFocus::from_context();
+    let open = RwSignal::new(false);
+    let territory = entry.territory.clone();
+    let outcome = entry.outcome;
+    let difficulty = entry.difficulty.clone();
+    let at = entry.occurred_at;
+    let detail_label = format!(
+        "Details for {} {}",
+        entry.territory,
+        outcome.label().to_lowercase()
+    );
+    let has_detail = entry.queue.is_some() || entry.war.is_some() || entry.owner_change.is_some();
+    view! {
+        <li class="activity-row" data-outcome=outcome_slug(outcome)>
+            <div class="activity-head">
+                <span class="war-difficulty" style:background=difficulty_color(difficulty.as_deref()) title=difficulty_label(difficulty.as_deref()).unwrap_or("Difficulty unknown") />
+                <button type="button" class="war-link activity-territory" title=format!("Show {territory} on the map") on:click={
+                    let territory = territory.clone();
+                    move |_| focus_map.territory(&territory)
+                }>
+                    {territory.clone()}
+                </button>
+                <span class="activity-outcome">{outcome.label()}</span>
+                <time class="activity-when" title=local_time(at)>{move || ago(room.now.get() - at)}</time>
+                {has_detail.then(|| view! {
+                    <button
+                        type="button"
+                        class="war-front-expand"
+                        aria-label=detail_label.clone()
+                        aria-expanded=move || open.get().to_string()
+                        on:click=move |_| open.update(|open| *open = !*open)
+                    />
+                })}
+            </div>
+            <Show when=move || open.get()>
+                <ActivityDetail entry=entry.clone() />
+            </Show>
+        </li>
+    }
+}
+
+/// What was recorded about the attempt, as it was then. Absent facts are left out.
+#[component]
+fn ActivityDetail(entry: ActivityEntry) -> impl IntoView {
+    let mut facts: Vec<(&'static str, String)> = Vec::new();
+    if let Some(change) = &entry.owner_change {
+        let guild = |guild: &sequoia_shared::war_activity::ActivityGuild| match (
+            &guild.prefix,
+            &guild.name,
+        ) {
+            (Some(prefix), Some(name)) => format!("[{prefix}] {name}"),
+            (None, Some(name)) => name.clone(),
+            (Some(prefix), None) => format!("[{prefix}]"),
+            (None, None) => "Unknown guild".to_string(),
+        };
+        match entry.outcome {
+            ActivityOutcome::Lost => facts.push(("Taken by", guild(&change.to))),
+            _ => facts.push(("Taken from", guild(&change.from))),
+        }
+        facts.push(("Changed hands", stamp(change.changed_at, change.exact)));
+    }
+    if let Some(queue) = &entry.queue {
+        let when = queue.queued_at.map(local_time);
+        let by = queue
+            .queuer
+            .clone()
+            .unwrap_or_else(|| "queuer unknown".to_string());
+        facts.push((
+            "Queued",
+            match when {
+                Some(when) => format!("{when}, {by}"),
+                None => by,
+            },
+        ));
+        if let Some(seconds) = queue.seconds {
+            facts.push(("Queue timer", format_clock(seconds)));
+        }
+    }
+    if let Some(war) = &entry.war {
+        if let Some(starts_at) = war.starts_at {
+            let label = if war.start_scheduled {
+                "War start"
+            } else {
+                "First seen"
+            };
+            facts.push((label, local_time(starts_at)));
+        }
+        if let Some(ended_at) = war.ended_at {
+            facts.push(("Ended", stamp(ended_at, war.end_reported)));
+        }
+        if let Some(fought) = war.fought_secs() {
+            facts.push(("Fought", format_clock(fought)));
+        }
+        if let Some(tower) = &war.tower {
+            let mut line = Vec::new();
+            if let Some(ehp) = tower.ehp {
+                line.push(format!("{} EHP", format_stat(ehp as f64)));
+            }
+            if let Some(dps) = tower.dps {
+                line.push(format!("{} DPS", format_stat(dps as f64)));
+            }
+            if !tower.from_start
+                && let Some(health) = tower.first_health
+            {
+                line.push(format!("first seen at {:.0}%", health * 100.0));
+            }
+            if !line.is_empty() {
+                facts.push(("Tower", line.join(", ")));
+            }
+        }
+        if !war.participants.is_empty() {
+            facts.push(("Reported by", war.participants.join(", ")));
+        }
+    }
+    view! {
+        <dl class="war-front-detail activity-detail">
+            {facts.into_iter().map(|(label, value)| view! { <div><dt>{label}</dt><dd>{value}</dd></div> }).collect_view()}
+        </dl>
+    }
+}
+
+/// A time, marked as approximate when only the moment it was first seen is known.
+fn stamp(at: i64, exact: bool) -> String {
+    if exact {
+        local_time(at)
+    } else {
+        format!("by {}", local_time(at))
+    }
+}
+
+fn outcome_slug(outcome: ActivityOutcome) -> &'static str {
+    match outcome {
+        ActivityOutcome::Captured => "captured",
+        ActivityOutcome::Lost => "lost",
+        ActivityOutcome::Cancelled => "cancelled",
+        ActivityOutcome::Ended => "ended",
+    }
+}
+
+/// The war panel's Recent activity, closed until a member opens it.
+#[component]
+pub(crate) fn RecentActivity() -> impl IntoView {
+    let open = RwSignal::new(false);
+    view! {
+        <section class="war-section war-section-activity" aria-label="Recent activity">
+            <Disclosure open summary="Recent activity" class="activity-disclosure">
+                <Show when=move || open.get()>
+                    <ActivityFeed />
+                </Show>
+            </Disclosure>
+        </section>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(id: i64, at: i64) -> ActivityEntry {
+        ActivityEntry {
+            id,
+            territory: format!("Territory {id}"),
+            outcome: ActivityOutcome::Lost,
+            occurred_at: at,
+            occurred_at_exact: true,
+            difficulty: None,
+            queue: None,
+            war: None,
+            owner_change: None,
+            cursor: format!("{}.{id}", at * 1000),
+        }
+    }
+
+    fn page(entries: Vec<ActivityEntry>, next: Option<&str>) -> WarActivityPage {
+        WarActivityPage {
+            server_time: 1_000_000,
+            entries,
+            next_before: next.map(str::to_string),
+            kept_since: 400_000,
+        }
+    }
+
+    fn base() -> ActivityRequest {
+        ActivityRequest {
+            since: None,
+            before: None,
+            territory: None,
+            everything: false,
+        }
+    }
+
+    #[test]
+    fn a_request_names_only_what_it_asks_for() {
+        assert_eq!(base().url(), "/api/war-activity?limit=25");
+        let request = ActivityRequest {
+            since: Some(900),
+            before: Some("1000.5".to_string()),
+            territory: Some("Path to the Grootslangs".to_string()),
+            everything: true,
+        };
+        assert_eq!(
+            request.url(),
+            "/api/war-activity?limit=25&since=900&before=1000.5&territory=Path%20to%20the%20Grootslangs&scope=all"
+        );
+    }
+
+    #[test]
+    fn load_older_finishes_the_day_then_opens_the_week_then_ends() {
+        let since = 913_600;
+        let mut list = ActivityList::first(
+            page(
+                vec![entry(9, 990_000), entry(8, 980_000)],
+                Some("980000000.8"),
+            ),
+            since,
+        );
+
+        let more_today = list.older(&base()).expect("more of the day");
+        assert_eq!(
+            (more_today.since, more_today.before.as_deref()),
+            (Some(since), Some("980000000.8"))
+        );
+        list.extend(page(vec![entry(7, 950_000)], None), false);
+
+        let week = list.older(&base()).expect("the rest of the week");
+        assert_eq!(
+            (week.since, week.before.as_deref()),
+            (None, Some("950000000.7"))
+        );
+        list.extend(page(vec![entry(6, 500_000)], None), true);
+
+        assert!(list.ended);
+        assert_eq!(list.older(&base()), None);
+        assert_eq!(
+            list.entries
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            [9, 8, 7, 6]
+        );
+    }
+
+    #[test]
+    fn an_empty_day_continues_from_the_days_edge() {
+        let list = ActivityList::first(page(Vec::new(), None), 913_600);
+        let week = list.older(&base()).expect("the week");
+        assert_eq!(
+            week.before.as_deref(),
+            Some(format!("913600000.{}", i64::MAX).as_str())
+        );
+    }
+
+    #[test]
+    fn pages_and_refreshes_never_show_an_entry_twice() {
+        let mut list = ActivityList::first(
+            page(
+                vec![entry(9, 990_000), entry(8, 980_000)],
+                Some("980000000.8"),
+            ),
+            913_600,
+        );
+        list.extend(
+            page(vec![entry(8, 980_000), entry(7, 970_000)], None),
+            false,
+        );
+        let mut confirmed = entry(9, 990_000);
+        confirmed.outcome = ActivityOutcome::Captured;
+        list.refresh(page(vec![entry(10, 995_000), confirmed], None));
+
+        assert_eq!(
+            list.entries
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            [10, 9, 8, 7]
+        );
+        assert_eq!(list.entries[1].outcome, ActivityOutcome::Captured);
+    }
+}
