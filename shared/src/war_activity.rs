@@ -37,6 +37,9 @@ pub struct ActivityEntry {
     pub war: Option<ActivityWar>,
     #[serde(default)]
     pub owner_change: Option<OwnerChange>,
+    /// A capture several observed attacks could have produced; none of them is attached.
+    #[serde(default)]
+    pub attempt_ambiguous: bool,
     /// This entry's place in the order, for continuing a page after it.
     pub cursor: String,
 }
@@ -81,18 +84,26 @@ pub struct ActivityQueue {
     pub seconds: Option<i64>,
 }
 
+/// What was observed of an attack. Each time is only what it says it is.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActivityWar {
-    #[serde(default)]
-    pub entered_at: Option<i64>,
+    /// The start a queue scheduled; `None` when no queue scheduled it.
     #[serde(default)]
     pub starts_at: Option<i64>,
-    /// False when the start was inferred from the first report rather than a queue.
-    pub start_scheduled: bool,
+    #[serde(default)]
+    pub start_source: Option<StartSource>,
+    /// The first report from a member in it.
+    #[serde(default)]
+    pub first_reported_at: Option<i64>,
+    /// The last report from a member in it; not when the fighting ended.
+    #[serde(default)]
+    pub last_reported_at: Option<i64>,
+    /// When a member reported it complete; `None` otherwise.
     #[serde(default)]
     pub ended_at: Option<i64>,
-    /// True when a member reported the war complete; otherwise the end is the last report.
-    pub end_reported: bool,
+    /// The reports stopped and resumed: it was not observed throughout.
+    #[serde(default)]
+    pub interrupted: bool,
     #[serde(default)]
     pub tower: Option<ActivityTower>,
     /// Members who reported being in the war, in the order they joined.
@@ -100,9 +111,23 @@ pub struct ActivityWar {
     pub participants: Vec<String>,
 }
 
+/// Where a scheduled start came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum StartSource {
+    /// An observed queue timer.
+    Queue,
+    /// The fifteen-minute guess for a queue whose timer nobody saw.
+    Estimate,
+}
+
 impl ActivityWar {
-    /// How long the war was fought, when it both started and ended on record.
+    /// How long the war was fought: only between a start an observed queue timer scheduled and
+    /// a reported end. Anything else would be a guess.
     pub fn fought_secs(&self) -> Option<i64> {
+        if self.start_source != Some(StartSource::Queue) {
+            return None;
+        }
         let (start, end) = (self.starts_at?, self.ended_at?);
         (end > start).then_some(end - start)
     }
@@ -146,25 +171,27 @@ mod tests {
     const PAGE: &str = r#"{
         "server_time": 1787520000,
         "entries": [
-            {"id": 12, "territory": "Detlas", "outcome": "CAPTURED", "occurred_at": 1787519880,
-             "occurred_at_exact": false, "difficulty": "HIGH",
+            {"id": 12, "territory": "Detlas", "outcome": "CAPTURED", "occurred_at": 1787519885,
+             "occurred_at_exact": true, "difficulty": "HIGH",
              "queue": {"queuer": "EpicPuppy613", "queued_at": 1787519400, "seconds": 420},
-             "war": {"entered_at": 1787519820, "starts_at": 1787519850, "start_scheduled": true,
-                     "ended_at": 1787519880, "end_reported": false,
+             "war": {"starts_at": 1787519850, "start_source": "QUEUE", "first_reported_at": 1787519820,
+                     "last_reported_at": 1787519879, "ended_at": 1787519880, "interrupted": false,
                      "tower": {"ehp": 400000, "dps": 3750, "first_health": 1.0, "observed_at": 1787519851,
                                "from_start": true},
                      "participants": ["EpicPuppy613", "pat_crafter07"]},
              "owner_change": {"from": {"name": "Avicia", "prefix": "AVO"},
                               "to": {"name": "Sequoia", "prefix": "SEQ"},
                               "changed_at": 1787519885, "exact": true},
-             "cursor": "1787519880000.12"},
+             "attempt_ambiguous": false,
+             "cursor": "1787519885000000.12"},
             {"id": 11, "territory": "Ragni", "outcome": "ENDED", "occurred_at": 1787519000,
-             "occurred_at_exact": true, "difficulty": null, "queue": null,
-             "war": {"entered_at": 1787518900, "starts_at": 1787518930, "start_scheduled": false,
-                     "ended_at": 1787519000, "end_reported": true, "tower": null, "participants": []},
-             "owner_change": null, "cursor": "1787519000000.11"}
+             "occurred_at_exact": false, "difficulty": null, "queue": null,
+             "war": {"starts_at": null, "start_source": null, "first_reported_at": 1787518900,
+                     "last_reported_at": 1787519000, "ended_at": null, "interrupted": true,
+                     "tower": null, "participants": []},
+             "owner_change": null, "attempt_ambiguous": false, "cursor": "1787519000000000.11"}
         ],
-        "next_before": "1787519000000.11",
+        "next_before": "1787519000000000.11",
         "kept_since": 1786915200
     }"#;
 
@@ -176,34 +203,43 @@ mod tests {
         assert!(capture.outcome.is_decisive());
         let war = capture.war.as_ref().expect("war");
         assert_eq!(war.fought_secs(), Some(30));
+        assert_eq!(war.start_source, Some(StartSource::Queue));
         assert_eq!(
             war.tower.as_ref().and_then(|tower| tower.ehp),
             Some(400_000)
         );
-        assert_eq!(
-            capture.queue.as_ref().and_then(|queue| queue.seconds),
-            Some(420)
-        );
 
-        let ended = &page.entries[1];
-        assert_eq!(ended.outcome, ActivityOutcome::Ended);
-        assert!(!ended.outcome.is_decisive());
-        assert_eq!(ended.difficulty, None);
-        assert_eq!(ended.war.as_ref().and_then(|war| war.tower.clone()), None);
-        assert_eq!(page.next_before.as_deref(), Some("1787519000000.11"));
+        let quiet = &page.entries[1];
+        assert_eq!(quiet.outcome, ActivityOutcome::Ended);
+        let war = quiet.war.as_ref().expect("war");
+        assert!(war.interrupted);
+        assert_eq!((war.starts_at, war.ended_at), (None, None));
+        assert_eq!(war.fought_secs(), None);
+        assert_eq!(page.next_before.as_deref(), Some("1787519000000000.11"));
     }
 
     #[test]
-    fn a_war_that_ended_before_it_started_has_no_fight_duration() {
-        let war = ActivityWar {
-            entered_at: Some(100),
+    fn only_an_observed_queued_start_and_a_reported_end_give_a_fight_time() {
+        let war = |source, ended_at| ActivityWar {
             starts_at: Some(130),
-            start_scheduled: true,
-            ended_at: Some(120),
-            end_reported: false,
+            start_source: source,
+            first_reported_at: Some(100),
+            last_reported_at: Some(200),
+            ended_at,
+            interrupted: false,
             tower: None,
             participants: Vec::new(),
         };
-        assert_eq!(war.fought_secs(), None);
+        assert_eq!(
+            war(Some(StartSource::Queue), Some(190)).fought_secs(),
+            Some(60)
+        );
+        assert_eq!(
+            war(Some(StartSource::Estimate), Some(190)).fought_secs(),
+            None
+        );
+        assert_eq!(war(None, Some(190)).fought_secs(), None);
+        assert_eq!(war(Some(StartSource::Queue), None).fought_secs(), None);
+        assert_eq!(war(Some(StartSource::Queue), Some(120)).fought_secs(), None);
     }
 }
