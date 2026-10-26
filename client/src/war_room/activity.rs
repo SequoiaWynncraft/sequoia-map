@@ -3,6 +3,9 @@
 //! sidebar. Nothing loads until it is opened, and nothing is collected in the browser: every
 //! page comes from the backend's journal.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use sequoia_shared::tower::format_stat;
@@ -181,6 +184,51 @@ enum Load {
     Failed,
 }
 
+/// What the feed shows in place of its rows, or that it shows rows.
+#[derive(Clone, Copy, PartialEq)]
+enum Shown {
+    Loading,
+    Unavailable,
+    Nothing,
+    Rows,
+}
+
+/// Whether the feed is still mounted, and which selection its requests answer. Plain atomics
+/// rather than reactive values, so a response arriving after the feed is gone can ask without
+/// touching anything the feed owned.
+#[derive(Clone)]
+struct Requests {
+    alive: Arc<AtomicBool>,
+    epoch: Arc<AtomicU64>,
+}
+
+impl Requests {
+    fn new() -> Self {
+        Self {
+            alive: Arc::new(AtomicBool::new(true)),
+            epoch: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    fn asked(&self) -> u64 {
+        self.epoch.load(Ordering::Relaxed)
+    }
+
+    /// Answers to requests made before this are dropped.
+    fn supersede(&self) {
+        self.epoch.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn close(&self) {
+        self.alive.store(false, Ordering::Relaxed);
+    }
+
+    /// Whether an answer to a request made at `asked` still belongs to the feed.
+    fn current(&self, asked: u64) -> bool {
+        self.alive.load(Ordering::Relaxed) && self.epoch.load(Ordering::Relaxed) == asked
+    }
+}
+
 /// The activity list, loading once it is shown. `territory` narrows it to one territory.
 #[component]
 pub(crate) fn ActivityFeed(
@@ -190,11 +238,13 @@ pub(crate) fn ActivityFeed(
     let everything = RwSignal::new(false);
     let list = RwSignal::new(None::<ActivityList>);
     let load = RwSignal::new(Load::Idle);
-    let alive = StoredValue::new(true);
-    on_cleanup(move || alive.set_value(false));
-    // Bumped whenever the selection changes: an answer to an older selection is dropped.
-    let epoch = StoredValue::new(0u64);
-    let current = move |asked: u64| alive.get_value() && epoch.get_value() == asked;
+    // Superseded whenever the selection changes: an answer to an older selection is dropped,
+    // and so is any answer once the feed is gone.
+    let requests = Requests::new();
+    on_cleanup({
+        let requests = requests.clone();
+        move || requests.close()
+    });
 
     let base = Memo::new(move |_| ActivityRequest {
         since: None,
@@ -215,65 +265,80 @@ pub(crate) fn ActivityFeed(
             since,
         )
     };
-    let load_first = move || {
-        let (request, since) = first_request();
-        let asked = epoch.get_value();
-        load.set(Load::Loading);
-        spawn_local(async move {
-            let result = fetch(&request).await;
-            if !current(asked) {
-                return;
-            }
-            match result {
-                Ok(page) => {
-                    list.set(Some(ActivityList::first(page, since, whole_week)));
-                    load.set(Load::Idle);
-                }
-                Err(_) => load.set(Load::Failed),
-            }
-        });
-    };
-    Effect::new(move || {
-        base.track();
-        epoch.update_value(|epoch| *epoch += 1);
-        list.set(None);
-        load_first();
-    });
-    // While shown, pick up newer entries now and then rather than streaming them.
-    Effect::new(move || {
-        let handle = set_interval_with_handle(
-            move || {
-                if list.with_untracked(Option::is_none) {
+    let load_first = {
+        let requests = requests.clone();
+        move || {
+            let (request, since) = first_request();
+            let requests = requests.clone();
+            let asked = requests.asked();
+            load.set(Load::Loading);
+            spawn_local(async move {
+                let result = fetch(&request).await;
+                if !requests.current(asked) {
                     return;
                 }
-                let (request, since) = first_request();
-                let asked = epoch.get_value();
-                spawn_local(async move {
-                    if let Ok(page) = fetch(&request).await
-                        && current(asked)
-                    {
-                        let started_over = list
-                            .try_update(|list| {
-                                list.as_mut().is_some_and(|list| list.refresh(page, since))
-                            })
-                            .unwrap_or(false);
-                        // An older page still on its way belongs to the list that was replaced.
-                        if started_over {
-                            epoch.update_value(|epoch| *epoch += 1);
-                            load.set(Load::Idle);
-                        }
+                match result {
+                    Ok(page) => {
+                        list.set(Some(ActivityList::first(page, since, whole_week)));
+                        load.set(Load::Idle);
                     }
-                });
-            },
-            std::time::Duration::from_millis(REFRESH_MS),
-        );
-        on_cleanup(move || {
-            if let Ok(handle) = handle {
-                handle.clear();
-            }
-        });
+                    Err(_) => load.set(Load::Failed),
+                }
+            });
+        }
+    };
+    Effect::new({
+        let requests = requests.clone();
+        move || {
+            base.track();
+            requests.supersede();
+            list.set(None);
+            load_first();
+        }
+    });
+    // While shown, pick up newer entries now and then rather than streaming them.
+    Effect::new({
+        let requests = requests.clone();
+        move || {
+            let requests = requests.clone();
+            let handle = set_interval_with_handle(
+                move || {
+                    if list.with_untracked(Option::is_none) {
+                        return;
+                    }
+                    let (request, since) = first_request();
+                    let requests = requests.clone();
+                    let asked = requests.asked();
+                    spawn_local(async move {
+                        if let Ok(page) = fetch(&request).await
+                            && requests.current(asked)
+                        {
+                            let started_over = list
+                                .try_update(|list| {
+                                    list.as_mut().is_some_and(|list| list.refresh(page, since))
+                                })
+                                .unwrap_or(false);
+                            // An older page still on its way belongs to the list that was replaced.
+                            if started_over {
+                                requests.supersede();
+                                load.set(Load::Idle);
+                            }
+                        }
+                    });
+                },
+                std::time::Duration::from_millis(REFRESH_MS),
+            );
+            on_cleanup(move || {
+                if let Ok(handle) = handle {
+                    handle.clear();
+                }
+            });
+        }
     });
     let load_older = move |_| {
+        if load.get_untracked() == Load::Loading {
+            return;
+        }
         let Some(request) = list.with_untracked(|list| {
             list.as_ref()
                 .and_then(|list| list.older(&base.get_untracked()))
@@ -281,11 +346,12 @@ pub(crate) fn ActivityFeed(
             return;
         };
         let widened = request.since.is_none();
-        let asked = epoch.get_value();
+        let requests = requests.clone();
+        let asked = requests.asked();
         load.set(Load::Loading);
         spawn_local(async move {
             let result = fetch(&request).await;
-            if !current(asked) {
+            if !requests.current(asked) {
                 return;
             }
             match result {
@@ -301,8 +367,19 @@ pub(crate) fn ActivityFeed(
             }
         });
     };
-    let entries =
-        Memo::new(move |_| list.with(|list| list.as_ref().map(|list| list.entries.clone())));
+    // Only a change between these rebuilds the list; rows themselves are keyed by entry, so
+    // pages and refreshes keep a retained row's state, its focus and its open details.
+    let shown = Memo::new(move |_| {
+        list.with(|list| match list {
+            None if load.get() == Load::Failed => Shown::Unavailable,
+            None => Shown::Loading,
+            Some(list) if list.entries.is_empty() && list.ended => Shown::Nothing,
+            Some(_) => Shown::Rows,
+        })
+    });
+    let has_entries = Memo::new(move |_| {
+        list.with(|list| list.as_ref().is_some_and(|list| !list.entries.is_empty()))
+    });
     let can_load_older = Memo::new(move |_| {
         list.with(|list| {
             list.as_ref()
@@ -317,27 +394,43 @@ pub(crate) fn ActivityFeed(
                 <input type="checkbox" prop:checked=move || everything.get() on:change=move |event| everything.set(event_target_checked(&event)) />
                 "Include cancelled and unconfirmed"
             </label>
-            {move || match entries.get() {
-                None if load.get() == Load::Failed => view! { <p class="activity-note" role="status">"Recent activity is unavailable"</p> }.into_any(),
-                None => view! { <p class="activity-note" role="status">"Loading"</p> }.into_any(),
-                Some(entries) if entries.is_empty() && ended.get() => {
-                    view! { <p class="activity-note">"Nothing in the last 7 days"</p> }.into_any()
-                }
-                Some(entries) => view! {
+            {move || match shown.get() {
+                Shown::Unavailable => view! { <p class="activity-note" role="status">"Recent activity is unavailable"</p> }.into_any(),
+                Shown::Loading => view! { <p class="activity-note" role="status">"Loading"</p> }.into_any(),
+                Shown::Nothing => view! { <p class="activity-note">"Nothing in the last 7 days"</p> }.into_any(),
+                Shown::Rows => view! {
                     <ol class="activity-list">
-                        {entries.into_iter().map(|entry| view! { <ActivityRow entry /> }).collect_view()}
+                        <For
+                            each=move || list.with(|list| list.as_ref().map(|list| list.entries.clone()).unwrap_or_default())
+                            key=|entry| entry.id
+                            children=move |entry| {
+                                let id = entry.id;
+                                // The row follows its entry's updates without being rebuilt.
+                                let entry = Memo::new(move |previous: Option<&ActivityEntry>| {
+                                    list.with(|list| {
+                                        list.as_ref()
+                                            .and_then(|list| list.entries.iter().find(|held| held.id == id))
+                                            .cloned()
+                                    })
+                                    .or_else(|| previous.cloned())
+                                    .unwrap_or_else(|| entry.clone())
+                                });
+                                view! { <ActivityRow entry /> }
+                            }
+                        />
                     </ol>
                 }.into_any(),
             }}
             <Show when=move || can_load_older.get()>
-                <button type="button" class="activity-older" disabled=move || load.get() == Load::Loading on:click=load_older>
+                // Not disabled while loading, which would drop keyboard focus from it.
+                <button type="button" class="activity-older" aria-disabled=move || (load.get() == Load::Loading).to_string() on:click=load_older.clone()>
                     "Load older"
                 </button>
             </Show>
-            <Show when=move || ended.get() && entries.with(|entries| entries.as_ref().is_some_and(|entries| !entries.is_empty()))>
+            <Show when=move || ended.get() && has_entries.get()>
                 <p class="activity-note">"Activity is kept for 7 days"</p>
             </Show>
-            <Show when=move || load.get() == Load::Failed && entries.with(Option::is_some)>
+            <Show when=move || load.get() == Load::Failed && list.with(Option::is_some)>
                 <p class="activity-note" role="status">"Could not load more"</p>
             </Show>
         </div>
@@ -345,44 +438,57 @@ pub(crate) fn ActivityFeed(
 }
 
 #[component]
-fn ActivityRow(entry: ActivityEntry) -> impl IntoView {
+fn ActivityRow(entry: Memo<ActivityEntry>) -> impl IntoView {
     let room = expect_context::<WarRoom>();
     let focus_map = MapFocus::from_context();
     let open = RwSignal::new(false);
-    let territory = entry.territory.clone();
-    let outcome = entry.outcome;
-    let difficulty = entry.difficulty.clone();
-    let at = entry.occurred_at;
-    let detail_label = format!(
-        "Details for {} {}",
-        entry.territory,
-        outcome.label().to_lowercase()
-    );
-    let has_detail = entry.queue.is_some() || entry.war.is_some() || entry.owner_change.is_some();
+    // An entry keeps its territory and time; its outcome and snapshot can still be updated.
+    let (territory, at) =
+        entry.with_untracked(|entry| (entry.territory.clone(), entry.occurred_at));
+    let outcome = move || entry.with(|entry| entry.outcome);
+    let difficulty = move || entry.with(|entry| entry.difficulty.clone());
+    let detail_label = move || {
+        entry.with(|entry| {
+            format!(
+                "Details for {} {}",
+                entry.territory,
+                entry.outcome.label().to_lowercase()
+            )
+        })
+    };
+    let has_detail = Memo::new(move |_| {
+        entry.with(|entry| {
+            entry.queue.is_some() || entry.war.is_some() || entry.owner_change.is_some()
+        })
+    });
     view! {
-        <li class="activity-row" data-outcome=outcome_slug(outcome)>
+        <li class="activity-row" data-outcome=move || outcome_slug(outcome())>
             <div class="activity-head">
-                <span class="war-difficulty" style:background=difficulty_color(difficulty.as_deref()) title=difficulty_label(difficulty.as_deref()).unwrap_or("Difficulty unknown") />
+                <span
+                    class="war-difficulty"
+                    style:background=move || difficulty_color(difficulty().as_deref())
+                    title=move || difficulty_label(difficulty().as_deref()).unwrap_or("Difficulty unknown")
+                />
                 <button type="button" class="war-link activity-territory" title=format!("Show {territory} on the map") on:click={
                     let territory = territory.clone();
                     move |_| focus_map.territory(&territory)
                 }>
                     {territory.clone()}
                 </button>
-                <span class="activity-outcome">{outcome.label()}</span>
+                <span class="activity-outcome">{move || outcome().label()}</span>
                 <time class="activity-when" title=local_time(at)>{move || ago(room.now.get() - at)}</time>
-                {has_detail.then(|| view! {
+                <Show when=move || has_detail.get()>
                     <button
                         type="button"
                         class="war-front-expand"
-                        aria-label=detail_label.clone()
+                        aria-label=detail_label
                         aria-expanded=move || open.get().to_string()
                         on:click=move |_| open.update(|open| *open = !*open)
                     />
-                })}
+                </Show>
             </div>
-            <Show when=move || open.get()>
-                <ActivityDetail entry=entry.clone() />
+            <Show when=move || open.get() && has_detail.get()>
+                {move || view! { <ActivityDetail entry=entry.get() /> }}
             </Show>
         </li>
     }
