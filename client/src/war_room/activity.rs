@@ -310,6 +310,7 @@ pub(crate) fn ActivityFeed(
     };
     Effect::new({
         let requests = requests.clone();
+        let load_first = load_first.clone();
         move || {
             base.track();
             requests.supersede();
@@ -321,7 +322,15 @@ pub(crate) fn ActivityFeed(
     let refresh = {
         let requests = requests.clone();
         move || {
-            if list.with_untracked(Option::is_none) || load.get_untracked() == Load::Loading {
+            if load.get_untracked() == Load::Loading {
+                return;
+            }
+            // Without a first page there is nothing to refresh. One that failed is asked for
+            // again, so a passing outage does not leave a kept feed unavailable.
+            if list.with_untracked(Option::is_none) {
+                if load.get_untracked() == Load::Failed {
+                    load_first();
+                }
                 return;
             }
             checked_at.set(room.now.get_untracked());
@@ -368,7 +377,9 @@ pub(crate) fn ActivityFeed(
     Effect::new(move |was_visible: Option<bool>| {
         let shown = visible.get();
         let due = room.now.get_untracked() - checked_at.get_untracked() >= REFRESH_SECS;
-        if shown && was_visible == Some(false) && due {
+        let unavailable =
+            load.get_untracked() == Load::Failed && list.with_untracked(Option::is_none);
+        if shown && was_visible == Some(false) && (due || unavailable) {
             refresh();
         }
         shown

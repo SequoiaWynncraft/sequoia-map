@@ -6,7 +6,7 @@ use leptos::prelude::*;
 use std::collections::HashMap;
 
 use sequoia_shared::{
-    DataProvenance, Region, TerritoryRuntimeData, passive_sr_per_5s, passive_sr_per_hour,
+    DataProvenance, TerritoryRuntimeData, passive_sr_per_5s, passive_sr_per_hour,
 };
 
 use crate::app::{
@@ -1168,25 +1168,43 @@ fn DetailPanel() -> impl IntoView {
 fn TerritoryMore(territory: String) -> impl IntoView {
     let room = expect_context::<crate::war_room::WarRoom>();
     let territories: RwSignal<ClientTerritoryMap> = expect_context();
+    // The disclosure's state lives here for the territory's whole stay; its facts follow the
+    // territory's geometry, which a live correction can change under the same name.
     let location_open = RwSignal::new(false);
-    let location: Option<Region> = territories
-        .with_untracked(|map| map.get(&territory).map(|ct| ct.territory.location.clone()));
+    let location = Memo::new({
+        let territory = territory.clone();
+        move |_| territories.with(|map| map.get(&territory).map(|ct| ct.territory.location.clone()))
+    });
+    let region = move || {
+        location.with(|location| {
+            location.as_ref().map_or_else(String::new, |location| {
+                format!(
+                    "({}, {}) \u{2192} ({}, {})",
+                    location.start[0], location.start[1], location.end[0], location.end[1]
+                )
+            })
+        })
+    };
+    let size = move || {
+        location.with(|location| {
+            location.as_ref().map_or_else(String::new, |location| {
+                format!("{}\u{00d7}{}", location.width(), location.height())
+            })
+        })
+    };
     let territory = Signal::stored(territory);
     view! {
         <div class="tcard tcard-sidebar tcard-sidebar-tail">
             <TowerCalculator />
             <div class="tcard-more">
-                {location.map(|location| view! {
+                <Show when=move || location.with(Option::is_some)>
                     <Disclosure open=location_open summary="Location">
                         <dl class="tcard-facts">
-                            <div>
-                                <dt>"Region"</dt>
-                                <dd>{format!("({}, {}) \u{2192} ({}, {})", location.start[0], location.start[1], location.end[0], location.end[1])}</dd>
-                            </div>
-                            <div><dt>"Size"</dt><dd>{format!("{}\u{00d7}{}", location.width(), location.height())}</dd></div>
+                            <div><dt>"Region"</dt><dd>{region}</dd></div>
+                            <div><dt>"Size"</dt><dd>{size}</dd></div>
                         </dl>
                     </Disclosure>
-                })}
+                </Show>
                 <Show when=move || room.board.with(Option::is_some)>
                     <ActivityDisclosure territory />
                 </Show>
@@ -1195,8 +1213,6 @@ fn TerritoryMore(territory: String) -> impl IntoView {
     }
 }
 
-/// The bar under every view: help and the map modes on the left, the guild count, then the
-/// feed's status and Settings. Resetting settings lives in Settings itself.
 #[component]
 fn SidebarToolbar() -> impl IntoView {
     let territories: RwSignal<ClientTerritoryMap> = expect_context();
