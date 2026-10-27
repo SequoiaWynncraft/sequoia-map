@@ -3380,7 +3380,6 @@ a.tcard-guild:focus-visible {
 }
 
 .activity-disclosure > summary {
-  color: var(--color-text-primary);
   font-size: 0.8rem;
 }
 
