@@ -342,6 +342,13 @@ fn StatRow(
         }
     };
     let id = format!("tower-{}", label.to_ascii_lowercase());
+    let show_level = move |ev: &web_sys::Event| {
+        let input: web_sys::HtmlInputElement = event_target(ev);
+        let value = level.get_untracked().to_string();
+        if input.value() != value {
+            input.set_value(&value);
+        }
+    };
     let on_wheel = move |ev: web_sys::WheelEvent| {
         ev.prevent_default();
         let value = level.get_untracked();
@@ -365,8 +372,15 @@ fn StatRow(
                     on:input=move |ev| {
                         if let Ok(value) = event_target_value(&ev).parse::<u32>() {
                             set(value);
+                            // Past the maximum the value may not change at all, so the field
+                            // would keep showing what was typed: write back what is used.
+                            if value > max {
+                                show_level(&ev);
+                            }
                         }
                     }
+                    // Whatever was left half-typed, the field ends showing the value in use.
+                    on:blur=move |ev| show_level(&ev)
                     on:focus=move |ev| {
                         let input: web_sys::HtmlInputElement = event_target(&ev);
                         input.select();
