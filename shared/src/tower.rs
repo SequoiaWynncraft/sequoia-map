@@ -349,15 +349,8 @@ mod tests {
         ATTACK_RATES, DefenseRating, HEALTHS, calc_defense_index, calc_dps, calc_dps_range,
         calc_ehp, calc_stat, count_guild_connections, find_externals, format_stat,
     };
+    use crate::test_support::assert_close;
     use std::collections::{HashMap, HashSet};
-
-    fn assert_close(actual: f64, expected: f64) {
-        let diff = (actual - expected).abs();
-        assert!(
-            diff < 1e-9,
-            "expected {expected}, got {actual} (diff: {diff})"
-        );
-    }
 
     #[test]
     fn count_guild_connections_counts_same_guild_within_three_hops_as_externals() {
