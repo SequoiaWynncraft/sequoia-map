@@ -1375,8 +1375,9 @@
 }
 
 /* Sidebar (client/src/sidebar.rs, client/src/ui.rs). Every view uses the same gutter,
-   navigation row and controls; components only add what is particular to them. */
-@media (pointer: coarse), (max-width: 767px) {
+   navigation row and controls; components only add what is particular to them. Any touch
+   input gets the touch size, including a touch laptop whose primary pointer is a mouse. */
+@media (any-pointer: coarse), (max-width: 767px) {
   :root { --sb-control: 44px; --sb-bar-control: 44px; --sb-bar-inset: 10px; }
 }
 @media (max-width: 767px) {
