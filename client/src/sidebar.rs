@@ -350,9 +350,15 @@ fn SearchResults() -> impl IntoView {
             </div>
             <ul class="sb-list">
                 <For
-                    each=move || { filtered.get().into_iter().enumerate().collect::<Vec<_>>() }
-                    key=|(_, (name, ..))| name.clone()
-                    children=move |(index, (name, guild, color))| {
+                    each=move || filtered.get()
+                    key=|(name, ..)| name.clone()
+                    children=move |(name, guild, color)| {
+                        // A kept row can move as the query changes, so its place in the list is
+                        // read from the current results rather than fixed when it was made.
+                        let index = Memo::new({
+                            let name = name.clone();
+                            move |_| filtered.with(|found| found.iter().position(|(found, ..)| *found == name))
+                        });
                         let open = name.clone();
                         let on_click = move |_| {
                             detail_return_guild.set(None);
@@ -362,7 +368,7 @@ fn SearchResults() -> impl IntoView {
                             }
                         };
                         view! {
-                            <li data-sidebar-idx=index.to_string() class="sb-row" class:sb-row-focused=move || sidebar_index.get() == index on:click=on_click>
+                            <li data-sidebar-idx=move || index.get().map(|index| index.to_string()) class="sb-row" class:sb-row-focused=move || index.get() == Some(sidebar_index.get()) on:click=on_click>
                                 <span class="sb-swatch" style:--swatch=guild_css(color) aria-hidden="true" />
                                 <span class="sb-row-text">
                                     <span class="sb-row-name">{name}</span>
